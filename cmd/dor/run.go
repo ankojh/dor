@@ -26,6 +26,7 @@ import (
 	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/matcher"
+	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/record"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -59,6 +60,18 @@ type config struct {
 
 	gatewayAddr    string
 	gatewayOrigins string
+
+	supervisor           bool
+	supervisorInterval   time.Duration
+	supervisorScaleLag   time.Duration
+	supervisorAlarmLag   time.Duration
+	supervisorAlarmFor   time.Duration
+	supervisorCooldown   time.Duration
+	supervisorBacklog    time.Duration
+	supervisorRecovery   time.Duration
+	supervisorMaxConc    int
+	supervisorRestartMin time.Duration
+	supervisorRestartMax time.Duration
 
 	modelsConfig     string
 	thresholdsConfig string
@@ -106,6 +119,18 @@ func runCommand(args []string) error {
 		gatewayAddr:    envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
 		gatewayOrigins: envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
 
+		supervisor:           envBoolOr("DOR_SUPERVISOR", true),
+		supervisorInterval:   envDurationOr("DOR_SUPERVISOR_INTERVAL", 2*time.Second),
+		supervisorScaleLag:   envDurationOr("DOR_SUPERVISOR_SCALE_LAG", 2*time.Second),
+		supervisorAlarmLag:   envDurationOr("DOR_SUPERVISOR_ALARM_LAG", 5*time.Second),
+		supervisorAlarmFor:   envDurationOr("DOR_SUPERVISOR_ALARM_FOR", time.Minute),
+		supervisorCooldown:   envDurationOr("DOR_SUPERVISOR_SCALE_COOLDOWN", 30*time.Second),
+		supervisorBacklog:    envDurationOr("DOR_SUPERVISOR_GDELT_BACKLOG", 20*time.Second),
+		supervisorRecovery:   envDurationOr("DOR_SUPERVISOR_GDELT_RECOVERY", time.Minute),
+		supervisorMaxConc:    envIntOr("DOR_SUPERVISOR_MAX_CONCURRENCY", 32),
+		supervisorRestartMin: envDurationOr("DOR_SUPERVISOR_RESTART_MIN", 5*time.Second),
+		supervisorRestartMax: envDurationOr("DOR_SUPERVISOR_RESTART_MAX", 5*time.Minute),
+
 		modelsConfig:     envOr("DOR_MODELS_CONFIG", "config/models.yaml"),
 		thresholdsConfig: envOr("DOR_THRESHOLDS_CONFIG", "config/thresholds.yaml"),
 		budgetConfig:     envOr("DOR_BUDGET_CONFIG", "config/budget.yaml"),
@@ -150,6 +175,17 @@ func runCommand(args []string) error {
 
 	fs.StringVar(&cfg.gatewayAddr, "gateway-addr", cfg.gatewayAddr, "WebSocket gateway listen address; empty disables it")
 	fs.StringVar(&cfg.gatewayOrigins, "gateway-origins", cfg.gatewayOrigins, "comma-separated WebSocket Origin patterns")
+	fs.BoolVar(&cfg.supervisor, "supervisor", cfg.supervisor, "run the in-process Supervisor and /ops surface")
+	fs.DurationVar(&cfg.supervisorInterval, "supervisor-interval", cfg.supervisorInterval, "Supervisor sampling interval")
+	fs.DurationVar(&cfg.supervisorScaleLag, "supervisor-scale-lag", cfg.supervisorScaleLag, "scale an unordered consumer above this queue lag")
+	fs.DurationVar(&cfg.supervisorAlarmLag, "supervisor-alarm-lag", cfg.supervisorAlarmLag, "queue-lag alarm threshold")
+	fs.DurationVar(&cfg.supervisorAlarmFor, "supervisor-alarm-for", cfg.supervisorAlarmFor, "how long the alarm threshold must persist")
+	fs.DurationVar(&cfg.supervisorCooldown, "supervisor-scale-cooldown", cfg.supervisorCooldown, "minimum time between scale actions per agent")
+	fs.DurationVar(&cfg.supervisorBacklog, "supervisor-gdelt-backlog", cfg.supervisorBacklog, "pipeline backlog duration before GDELT is reduced or paused")
+	fs.DurationVar(&cfg.supervisorRecovery, "supervisor-gdelt-recovery", cfg.supervisorRecovery, "quiet duration before GDELT returns to normal")
+	fs.IntVar(&cfg.supervisorMaxConc, "supervisor-max-concurrency", cfg.supervisorMaxConc, "cap for any runtime concurrency scale action")
+	fs.DurationVar(&cfg.supervisorRestartMin, "supervisor-restart-min", cfg.supervisorRestartMin, "first failed-agent restart backoff")
+	fs.DurationVar(&cfg.supervisorRestartMax, "supervisor-restart-max", cfg.supervisorRestartMax, "maximum failed-agent restart backoff")
 	fs.StringVar(&cfg.modelsConfig, "models-config", cfg.modelsConfig, "model pins and price config")
 	fs.StringVar(&cfg.thresholdsConfig, "thresholds-config", cfg.thresholdsConfig, "decision thresholds")
 	fs.StringVar(&cfg.budgetConfig, "budget-config", cfg.budgetConfig, "daily/per-API budget limits")
@@ -287,7 +323,7 @@ func runCommand(args []string) error {
 		}()
 	}
 
-	enrichmentDeps := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	enrichmentDeps, budgetMgr, budgetCfg := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
 	if dbStore != nil {
 		enrichmentDeps.StoryIndex = dbStore
 	}
@@ -338,6 +374,30 @@ func runCommand(args []string) error {
 		return err
 	}
 
+	var supervisor *ops.Supervisor
+	if cfg.supervisor && len(selected) > 0 {
+		supervisor = ops.New(ops.Config{
+			Interval:          cfg.supervisorInterval,
+			ScaleLag:          cfg.supervisorScaleLag,
+			AlarmLag:          cfg.supervisorAlarmLag,
+			AlarmFor:          cfg.supervisorAlarmFor,
+			ScaleCooldown:     cfg.supervisorCooldown,
+			BacklogFor:        cfg.supervisorBacklog,
+			RecoveryFor:       cfg.supervisorRecovery,
+			MaxConcurrency:    cfg.supervisorMaxConc,
+			RestartBackoffMin: cfg.supervisorRestartMin,
+			RestartBackoffMax: cfg.supervisorRestartMax,
+		}, ops.Deps{
+			Runner:    runner,
+			Metrics:   metrics,
+			Budget:    budgetMgr,
+			BudgetCfg: budgetCfg,
+			Logger:    logger,
+		})
+		supervisor.Start(ctx)
+	}
+	opsHTTP := ops.NewHTTP(b, supervisor, logger)
+
 	var gw *gateway.Server
 	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
 		gwCfg := gateway.Config{
@@ -360,6 +420,7 @@ func runCommand(args []string) error {
 			gwCfg.Store = dbStore
 		}
 		gwCfg.Places = enrichmentDeps.Gazetteer
+		gwCfg.Ops = opsHTTP
 		gw, err = gateway.New(gwCfg)
 		if err != nil {
 			return err
@@ -375,7 +436,7 @@ func runCommand(args []string) error {
 	if cfg.adminAddr != "" {
 		admin = &http.Server{
 			Addr:              cfg.adminAddr,
-			Handler:           adminHandler(b, runner, metrics),
+			Handler:           adminHandler(b, runner, metrics, opsHTTP),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {
@@ -395,6 +456,7 @@ func runCommand(args []string) error {
 		"nats_url", b.RedactedURL(),
 		"agents", runner.Names(),
 		"admin_addr", cfg.adminAddr,
+		"ops_url", opsURL(cfg, gw),
 		"store", articleSink != nil,
 	)
 
@@ -425,6 +487,9 @@ func runCommand(args []string) error {
 		}
 		gwCancel()
 	}
+	if supervisor != nil {
+		supervisor.Stop()
+	}
 	if err := runner.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("agent shutdown", "err", err)
 	}
@@ -435,9 +500,12 @@ func runCommand(args []string) error {
 	return nil
 }
 
-func adminHandler(b *bus.Bus, runner *agents.Runner, metrics *agents.Metrics) http.Handler {
+func adminHandler(b *bus.Bus, runner *agents.Runner, metrics *agents.Metrics, opsHTTP ...*ops.HTTP) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
+	if len(opsHTTP) > 0 && opsHTTP[0] != nil {
+		opsHTTP[0].Mount(mux)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		busOK := b.Connected()
 		agentsOK, statuses := runner.Healthy()
@@ -536,6 +604,18 @@ func runsPublisher(selection string) bool {
 		}
 	}
 	return false
+}
+
+// opsURL returns the reachable /ops page for this process, preferring the
+// gateway (the plan's 8080 surface) over the admin listener.
+func opsURL(cfg config, gw *gateway.Server) string {
+	if gw != nil {
+		return "http://" + gw.Addr() + "/ops"
+	}
+	if cfg.adminAddr != "" {
+		return "http://" + cfg.adminAddr + "/ops"
+	}
+	return ""
 }
 
 // splitList parses a comma-separated flag value, dropping empty entries.

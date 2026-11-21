@@ -86,10 +86,15 @@ err = r.ReadAll(func(f record.Frame) error { ... })
 stats, err := r.Stat("2026-11-20")     // frames, bytes, first/last, per-hour counts
 ```
 
-A replay should republish with `Nats-Msg-Id = f.MsgID` on `f.Subject`, which
-makes the replay idempotent inside the JetStream dedupe window, and pace frames
-by `ReceivedAt`. Day replay at N× is the same loop with the sleep divided by N;
-files are already in time order.
+A replay republishes on `f.Subject` with the original payload. `tools/replayer`
+uses a stage-specific id
+`replay:<run-id>:<raw|raw-priority>:<f.MsgID>` (not `f.MsgID` itself), so a
+replay is distinguishable from live ingest and repeating the same run is
+idempotent inside the JetStream dedupe window without colliding with the
+recording. It also sets `Dor-Replay-Id` and `Dor-Replay-Source-Msg-Id` headers
+for provenance, and paces frames by `ReceivedAt`; N× is the same loop with the
+sleep divided by N. Files are already in time order. The replayer never fetches
+an article body.
 
 ## Size
 

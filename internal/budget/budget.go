@@ -165,8 +165,11 @@ func (m *Manager) WithClock(now func() time.Time) *Manager {
 	return m
 }
 
-// StaleCollected reports how many expired pending reservations were garbage
-// collected. They stay charged at the estimate, which is conservative.
+// StaleCollected reports how many expired pending reservations were
+// garbage-collected by writes that committed. A removal is counted only after
+// the store accepted it, so CAS retries and denied admissions never overcount;
+// entries that stay expired in the store are counted when a later sweep
+// commits their removal. Estimates remain charged, which is conservative.
 func (m *Manager) StaleCollected() int64 { return m.stale.Load() }
 
 // Check reserves estimated dollars and tokens and returns a Reservation.
@@ -184,6 +187,7 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 	}
 
 	var verdict Verdict
+	dailyRemoved := 0
 	err := m.spend.Update(ctx, dayKey, func(old []byte, exists bool) ([]byte, error) {
 		d := Daily{Day: day}
 		if exists {
@@ -191,7 +195,7 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 				return nil, fmt.Errorf("budget: decode daily spend: %w", err)
 			}
 		}
-		m.gcDaily(&d, now)
+		dailyRemoved = m.gcDaily(&d, now)
 		if m.cfg.DailyUSD <= 0 {
 			verdict = Verdict{Reason: "daily-cap", SpendUSD: d.USD, DailyCapUSD: m.cfg.DailyUSD}
 			return nil, ErrAbort
@@ -220,26 +224,35 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 		return json.Marshal(d)
 	})
 	if errors.Is(err, ErrAbort) {
+		// The admission write was discarded, so its GC changes were too. A
+		// denied call must still persist eligible collection without releasing
+		// the stale estimate.
+		if dailyRemoved > 0 {
+			m.persistDailyGC(ctx, dayKey, now)
+		}
 		verdict.Allowed = false
 		return verdict, nil
 	}
 	if err != nil {
 		return Verdict{}, err
 	}
+	m.stale.Add(int64(dailyRemoved))
 
 	// Reserve the token bucket after the dollar reservation. If the bucket is
 	// empty, refund the dollars immediately: a denied call must not consume
 	// daily budget.
 	tokenDenied := false
+	bucketRemoved := 0
 	spec := m.bucketFor(req.API)
-	err = m.tokens.Update(ctx, "tokens."+req.API, func(old []byte, exists bool) ([]byte, error) {
+	bucketKey := "tokens." + req.API
+	err = m.tokens.Update(ctx, bucketKey, func(old []byte, exists bool) ([]byte, error) {
 		b := bucket{Tokens: spec.Capacity, UpdatedAt: now}
 		if exists {
 			if err := json.Unmarshal(old, &b); err != nil {
 				return nil, fmt.Errorf("budget: decode token bucket %s: %w", req.API, err)
 			}
 		}
-		m.gcBucket(&b, now)
+		bucketRemoved = m.gcBucket(&b, now)
 		elapsed := now.Sub(b.UpdatedAt).Seconds()
 		if elapsed > 0 {
 			b.Tokens = clamp(b.Tokens+elapsed*spec.RefillPerSecond, 0, spec.Capacity)
@@ -258,6 +271,9 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 		return json.Marshal(b)
 	})
 	if err != nil {
+		if errors.Is(err, ErrAbort) && bucketRemoved > 0 {
+			m.persistBucketGC(ctx, bucketKey, now)
+		}
 		if refundErr := m.refundDaily(ctx, dayKey, res, now); refundErr != nil && !errors.Is(refundErr, ErrAbort) {
 			return Verdict{}, refundErr
 		}
@@ -268,6 +284,7 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 		}
 		return Verdict{}, err
 	}
+	m.stale.Add(int64(bucketRemoved))
 	verdict.Allowed = true
 	verdict.Reason = "ok"
 	verdict.Reservation = res
@@ -285,6 +302,7 @@ func (m *Manager) Record(ctx context.Context, res Reservation, usage Usage) erro
 		day = now.Format("2006-01-02")
 	}
 	dayKey := "daily." + day
+	dailyRemoved := 0
 	err := m.spend.Update(ctx, dayKey, func(old []byte, exists bool) ([]byte, error) {
 		d := Daily{Day: day}
 		if exists {
@@ -292,7 +310,7 @@ func (m *Manager) Record(ctx context.Context, res Reservation, usage Usage) erro
 				return nil, fmt.Errorf("budget: decode daily spend: %w", err)
 			}
 		}
-		m.gcDaily(&d, now)
+		dailyRemoved = m.gcDaily(&d, now)
 		p, ok := d.Pending[res.ID]
 		if !ok {
 			// Already reconciled, garbage-collected, or unknown. Do not
@@ -310,20 +328,30 @@ func (m *Manager) Record(ctx context.Context, res Reservation, usage Usage) erro
 		d.UpdatedAt = now
 		return json.Marshal(d)
 	})
-	if err != nil && !errors.Is(err, ErrAbort) {
+	if errors.Is(err, ErrAbort) {
+		// The usage write was discarded, but an expired reservation must not
+		// stay stored forever just because this Record arrived late.
+		if dailyRemoved > 0 {
+			m.persistDailyGC(ctx, dayKey, now)
+		}
+	} else if err != nil {
 		return err
+	} else {
+		m.stale.Add(int64(dailyRemoved))
 	}
 
 	actual := usage.InputTokens + usage.OutputTokens
 	spec := m.bucketFor(res.API)
-	err = m.tokens.Update(ctx, "tokens."+res.API, func(old []byte, exists bool) ([]byte, error) {
+	bucketKey := "tokens." + res.API
+	bucketRemoved := 0
+	err = m.tokens.Update(ctx, bucketKey, func(old []byte, exists bool) ([]byte, error) {
 		b := bucket{Tokens: spec.Capacity, UpdatedAt: now}
 		if exists {
 			if err := json.Unmarshal(old, &b); err != nil {
 				return nil, fmt.Errorf("budget: decode token bucket %s: %w", res.API, err)
 			}
 		}
-		m.gcBucket(&b, now)
+		bucketRemoved = m.gcBucket(&b, now)
 		elapsed := now.Sub(b.UpdatedAt).Seconds()
 		if elapsed > 0 {
 			b.Tokens = clamp(b.Tokens+elapsed*spec.RefillPerSecond, 0, spec.Capacity)
@@ -338,7 +366,13 @@ func (m *Manager) Record(ctx context.Context, res Reservation, usage Usage) erro
 		return json.Marshal(b)
 	})
 	if errors.Is(err, ErrAbort) {
+		if bucketRemoved > 0 {
+			m.persistBucketGC(ctx, bucketKey, now)
+		}
 		return nil
+	}
+	if err == nil {
+		m.stale.Add(int64(bucketRemoved))
 	}
 	return err
 }
@@ -350,32 +384,94 @@ func (m *Manager) pendingTTL() time.Duration {
 	return 15 * time.Minute
 }
 
-func (m *Manager) gcDaily(d *Daily, now time.Time) {
+// gcDaily removes expired reservations from d and reports how many it
+// removed. The caller counts them only after the write that carries the
+// removal commits.
+func (m *Manager) gcDaily(d *Daily, now time.Time) int {
 	if len(d.Pending) == 0 {
-		return
+		return 0
 	}
 	ttl := m.pendingTTL()
+	removed := 0
 	for id, p := range d.Pending {
 		if now.Sub(p.At) > ttl {
 			// The estimate stays charged; dropping the entry only makes the
 			// reservation unreconcilable, which is conservative.
 			delete(d.Pending, id)
-			m.stale.Add(1)
+			removed++
 		}
 	}
+	return removed
 }
 
-func (m *Manager) gcBucket(b *bucket, now time.Time) {
+// gcBucket removes expired token reservations from b and reports how many it
+// removed, without refilling or counting anything before a committed write.
+func (m *Manager) gcBucket(b *bucket, now time.Time) int {
 	if len(b.Pending) == 0 {
-		return
+		return 0
 	}
 	ttl := m.pendingTTL()
+	removed := 0
 	for id, p := range b.Pending {
 		if now.Sub(p.At) > ttl {
 			delete(b.Pending, id)
-			m.stale.Add(1)
+			removed++
 		}
 	}
+	return removed
+}
+
+// persistDailyGC removes expired daily reservations in a standalone CAS write.
+// It is used when the admission or reconciliation write that discovered them
+// was discarded, so the removal still becomes durable. Only a committed write
+// increments the collection counter.
+func (m *Manager) persistDailyGC(ctx context.Context, key string, now time.Time) int {
+	removed := 0
+	err := m.spend.Update(ctx, key, func(old []byte, exists bool) ([]byte, error) {
+		if !exists {
+			return nil, ErrAbort
+		}
+		var d Daily
+		if err := json.Unmarshal(old, &d); err != nil {
+			return nil, fmt.Errorf("budget: decode daily spend: %w", err)
+		}
+		removed = m.gcDaily(&d, now)
+		if removed == 0 {
+			return nil, ErrAbort
+		}
+		// Estimates stay charged: only the pending entries are dropped.
+		return json.Marshal(d)
+	})
+	if err != nil {
+		return 0
+	}
+	m.stale.Add(int64(removed))
+	return removed
+}
+
+// persistBucketGC is persistDailyGC for one token bucket. It preserves the
+// bucket's UpdatedAt so a GC-only write cannot lose refill time.
+func (m *Manager) persistBucketGC(ctx context.Context, key string, now time.Time) int {
+	removed := 0
+	err := m.tokens.Update(ctx, key, func(old []byte, exists bool) ([]byte, error) {
+		if !exists {
+			return nil, ErrAbort
+		}
+		var b bucket
+		if err := json.Unmarshal(old, &b); err != nil {
+			return nil, fmt.Errorf("budget: decode token bucket: %w", err)
+		}
+		removed = m.gcBucket(&b, now)
+		if removed == 0 {
+			return nil, ErrAbort
+		}
+		return json.Marshal(b)
+	})
+	if err != nil {
+		return 0
+	}
+	m.stale.Add(int64(removed))
+	return removed
 }
 
 // Snapshot returns the current day's counter, including outstanding
@@ -431,14 +527,15 @@ func (m *Manager) refundDaily(ctx context.Context, key string, res *Reservation,
 	if res.USD == 0 && res.ID == "" {
 		return nil
 	}
-	return m.spend.Update(ctx, key, func(old []byte, exists bool) ([]byte, error) {
+	removed := 0
+	err := m.spend.Update(ctx, key, func(old []byte, exists bool) ([]byte, error) {
 		var d Daily
 		if exists {
 			if err := json.Unmarshal(old, &d); err != nil {
 				return nil, fmt.Errorf("budget: decode daily spend: %w", err)
 			}
 		}
-		m.gcDaily(&d, now)
+		removed = m.gcDaily(&d, now)
 		p, ok := d.Pending[res.ID]
 		if !ok {
 			return nil, ErrAbort
@@ -451,6 +548,16 @@ func (m *Manager) refundDaily(ctx context.Context, key string, res *Reservation,
 		d.UpdatedAt = now
 		return json.Marshal(d)
 	})
+	if errors.Is(err, ErrAbort) {
+		if removed > 0 {
+			m.persistDailyGC(ctx, key, now)
+		}
+		return nil
+	}
+	if err == nil {
+		m.stale.Add(int64(removed))
+	}
+	return err
 }
 
 func (m *Manager) loadDaily(ctx context.Context, now time.Time) (Daily, error) {

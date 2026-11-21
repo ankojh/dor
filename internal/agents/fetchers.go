@@ -89,6 +89,7 @@ type fetcherRuntime struct {
 	health       *fetch.HealthStore
 	seenKV       *seenStore
 	client       *fetch.Client
+	gdelt        *gdeltGate
 
 	sourcesOnce sync.Once
 	sources     *sources.File
@@ -160,6 +161,7 @@ func newFetcherRuntime(ctx context.Context, b *bus.Bus, metrics *Metrics, log *s
 		health:       health,
 		seenKV:       newSeenStore(seenKV),
 		client:       client,
+		gdelt:        newGDELTGate(),
 	}, nil
 }
 

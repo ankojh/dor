@@ -7,10 +7,11 @@ cluster and link news stories; a SolidJS + MapLibre web app shows them on a 3D g
 
 ```bash
 make dev                 # Postgres/pgvector :5433 + TEI :8090, waits for healthy
-make build               # bin/dor, bin/probe
+make build               # bin/dor, bin/probe, bin/replayer
 ./bin/dor run --agents=all
 curl -i localhost:8091/healthz
 curl -s localhost:8091/metrics | grep dor_agent
+open http://127.0.0.1:8080/ops   # Supervisor, agents, budgets, sources and actions
 ```
 
 Publish a test message to the sample echo agent (`echo.in` → `echo.out`):
@@ -47,4 +48,14 @@ make ci                  # exactly what .github/workflows/ci.yml runs
 
 Read [docs/conventions.md](docs/conventions.md) before adding an agent, subject,
 proto field or make target. Open technical choices are in
-[docs/decisions.md](docs/decisions.md).
+[docs/decisions.md](docs/decisions.md). The M6 runbook (Supervisor controls,
+`/ops`, split processes, record/replay, budget GC and the wrong-link queue) is
+[docs/operations.md](docs/operations.md).
+
+Replay a recorded day at 10× into the running stack:
+
+```bash
+DOR_RECORD_DIR=.dor/record make replay
+# or explicitly
+./bin/replayer -dir .dor/record -day 2026-11-20 -rate 10
+```

@@ -110,3 +110,28 @@ func (r *Runner) Names() []string {
 	}
 	return names
 }
+
+// Agent returns one selected agent by name.
+func (r *Runner) Agent(name string) (Agent, bool) {
+	for _, a := range r.agents {
+		if a.Name() == name {
+			return a, true
+		}
+	}
+	return nil, false
+}
+
+// Restart re-arms one selected agent when it supports in-process restart. An
+// agent without that control returns an explicit error; the Supervisor logs it
+// as an advisory instead of pretending a restart happened.
+func (r *Runner) Restart(ctx context.Context, name string) error {
+	a, ok := r.Agent(name)
+	if !ok {
+		return fmt.Errorf("agents: unknown agent %q", name)
+	}
+	restartable, ok := a.(Restartable)
+	if !ok {
+		return fmt.Errorf("agents: %s does not support in-process restart", name)
+	}
+	return restartable.Restart(ctx)
+}

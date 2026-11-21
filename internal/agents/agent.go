@@ -108,6 +108,10 @@ type Spec struct {
 	DrainTimeout time.Duration
 	// Concurrency is the bounded worker pool for unordered stages. Default 1.
 	Concurrency int
+	// MaxConcurrency caps runtime scaling for unordered consumer stages. Zero
+	// derives a conservative cap from Concurrency (at least 8, never less than
+	// Concurrency). Ordered and producer agents are never scaled.
+	MaxConcurrency int
 	// Ordered serialises a shard consumer: one handler at a time and retries
 	// happen in place, so a newer message never overtakes a failed older one.
 	Ordered bool
@@ -231,6 +235,16 @@ type Base struct {
 	shutdownMu    sync.Mutex
 	shutdownCtx   context.Context
 	inflightCount atomic.Int64
+
+	// scaleMu guards the dynamic concurrency gate lifecycle. The gate itself
+	// is safe for concurrent use; scaleMu only serialises creating it in
+	// Consume against a supervisor asking for its limits.
+	scaleMu        sync.Mutex
+	gate           *concurrencyGate
+	maxConcurrency int
+	restartMu      sync.Mutex
+
+	desiredConcurrency atomic.Int64
 }
 
 // NewBase validates a Spec and prepares metrics. It does not connect.
@@ -263,6 +277,23 @@ func NewBase(b *bus.Bus, metrics *Metrics, log *slog.Logger, spec Spec) (*Base, 
 		spec.Concurrency = 1
 		spec.MaxAckPending = 1
 	}
+	maxConcurrency := spec.MaxConcurrency
+	if spec.Ordered || spec.Producer {
+		maxConcurrency = spec.Concurrency
+	} else {
+		if maxConcurrency <= 0 {
+			maxConcurrency = spec.Concurrency * 4
+			if maxConcurrency < 8 {
+				maxConcurrency = 8
+			}
+		}
+		if maxConcurrency < spec.Concurrency {
+			return nil, fmt.Errorf("agents: %s max concurrency %d is below concurrency %d", spec.Name, maxConcurrency, spec.Concurrency)
+		}
+		if maxConcurrency > 64 {
+			maxConcurrency = 64
+		}
+	}
 	if spec.AckWait <= 0 {
 		spec.AckWait = 30 * time.Second
 	}
@@ -294,15 +325,18 @@ func NewBase(b *bus.Bus, metrics *Metrics, log *slog.Logger, spec Spec) (*Base, 
 		}
 	}
 	metrics.RegisterAgent(spec.Name)
-	return &Base{
-		spec:         spec,
-		bus:          b,
-		metrics:      metrics,
-		log:          log.With("agent", spec.Name),
-		ready:        make(chan error, 1),
-		forceCh:      make(chan struct{}),
-		fullyStopped: make(chan struct{}),
-	}, nil
+	base := &Base{
+		spec:           spec,
+		bus:            b,
+		metrics:        metrics,
+		log:            log.With("agent", spec.Name),
+		ready:          make(chan error, 1),
+		forceCh:        make(chan struct{}),
+		fullyStopped:   make(chan struct{}),
+		maxConcurrency: maxConcurrency,
+	}
+	base.desiredConcurrency.Store(int64(spec.Concurrency))
+	return base, nil
 }
 
 func filtersForSpec(spec Spec) []string {
@@ -327,6 +361,11 @@ func (a *Base) Name() string { return a.spec.Name }
 
 // Running reports whether the consumer or producer loop is active.
 func (a *Base) Running() bool { return a.running.Load() && !a.stopped.Load() }
+
+// Producer reports whether this is a scheduled producer with no input
+// consumer. The ops view uses it to show the outbound rate, not a meaningless
+// inbound zero.
+func (a *Base) Producer() bool { return a.spec.Producer }
 
 // LastError returns the last consumer/producer loop error.
 func (a *Base) LastError() error {
@@ -415,11 +454,30 @@ func (a *Base) Consume(ctx context.Context) error {
 
 	// Unbuffered: a callback blocks until a worker is free. The callback starts
 	// the heartbeat immediately, before it blocks, so a delivered message is
-	// protected even while every worker is busy.
+	// protected even while every worker is busy. Unordered stages launch the
+	// full scaling pool up front and gate active handlers with a dynamic
+	// limit, so the supervisor can scale without spawning or joining workers
+	// during a live consumer.
 	a.jobs = make(chan job)
-	a.workers.Add(a.spec.Concurrency)
-	for i := 0; i < a.spec.Concurrency; i++ {
-		go a.worker(ctx, handlerCtx)
+	a.scaleMu.Lock()
+	if !a.spec.Ordered && !a.spec.Producer {
+		start := int(a.desiredConcurrency.Load())
+		if start < 1 {
+			start = 1
+		}
+		a.gate = newConcurrencyGate(start, a.maxConcurrency)
+	} else {
+		a.gate = nil
+	}
+	gate := a.gate
+	a.scaleMu.Unlock()
+	workers := a.spec.Concurrency
+	if gate != nil {
+		workers = a.maxConcurrency
+	}
+	a.workers.Add(workers)
+	for i := 0; i < workers; i++ {
+		go a.worker(ctx, handlerCtx, gate)
 	}
 
 	cc, err := consumer.Consume(a.enqueue,
@@ -523,6 +581,123 @@ func (a *Base) Stop(ctx context.Context) error {
 	}
 }
 
+// Restartable is implemented by agents that can re-arm their consumer (or
+// producer loop) in place after a failure. The Supervisor uses it for the
+// restart path; runtime controls that are absent are reported as advisory.
+type Restartable interface {
+	Restart(ctx context.Context) error
+}
+
+// Scalable is implemented by unordered consumer agents whose worker pool can
+// change at runtime. Ordered stages and producers report supported=false.
+type Scalable interface {
+	Concurrency() (current, max int, supported bool)
+	SetConcurrency(n int) error
+}
+
+// Concurrency reports the current and maximum handler limit. A nil control
+// surface (ordered or producer) is explicitly unsupported rather than faked.
+func (a *Base) Concurrency() (current, max int, supported bool) {
+	if a.spec.Ordered || a.spec.Producer {
+		return 0, 0, false
+	}
+	a.scaleMu.Lock()
+	gate := a.gate
+	a.scaleMu.Unlock()
+	if gate == nil {
+		return int(a.desiredConcurrency.Load()), a.maxConcurrency, false
+	}
+	return gate.limit(), a.maxConcurrency, true
+}
+
+// SetConcurrency changes the active handler limit without spawning or joining
+// workers. It is safe while messages are being handled.
+func (a *Base) SetConcurrency(n int) error {
+	if a.spec.Ordered || a.spec.Producer {
+		return fmt.Errorf("agents: %s has no scalable worker pool", a.spec.Name)
+	}
+	a.scaleMu.Lock()
+	gate := a.gate
+	a.scaleMu.Unlock()
+	if gate == nil {
+		return fmt.Errorf("agents: %s is not running", a.spec.Name)
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > a.maxConcurrency {
+		n = a.maxConcurrency
+	}
+	a.desiredConcurrency.Store(int64(n))
+	gate.setLimit(n)
+	return nil
+}
+
+// Restart re-arms a Base after a consumer or producer failure and starts it
+// again. It waits for the previous loop to finish draining, then rebuilds the
+// per-run channels and counters. A process-wide crash is still handled by the
+// Supervisor's process policy; this method cannot recover state owned by the
+// caller's handler closures beyond the normal durable consumer replay.
+func (a *Base) Restart(ctx context.Context) error {
+	a.restartMu.Lock()
+	defer a.restartMu.Unlock()
+
+	a.mu.Lock()
+	cancel := a.cancel
+	done := a.done
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else if cancel == nil {
+		// Never started (or already fully stopped): there is no loop to wait
+		// for and the structural stop signal can be raised immediately.
+		a.closeFullyStopped()
+	}
+	select {
+	case <-a.fullyStopped:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	a.callbackMu.Lock()
+	a.callbacksClosed = false
+	a.callbackMu.Unlock()
+	a.jobsOnce = sync.Once{}
+	a.forceOnce = sync.Once{}
+	a.fullyStoppedOnce = sync.Once{}
+	a.forceCh = make(chan struct{})
+	a.fullyStopped = make(chan struct{})
+	a.ready = make(chan error, 1)
+	a.started.Store(false)
+	a.stopped.Store(false)
+	a.running.Store(false)
+
+	a.mu.Lock()
+	a.cancel = nil
+	a.done = nil
+	a.runCtx = nil
+	a.consumer = nil
+	a.cc = nil
+	a.lastErr = nil
+	a.mu.Unlock()
+	a.shutdownMu.Lock()
+	a.shutdownCtx = nil
+	a.shutdownMu.Unlock()
+
+	// The caller's context bounds how long we wait for the old loop to drain.
+	// It must not become the lifetime of the restarted agent: a Supervisor
+	// restart uses a short timeout, and the new consumer has to outlive it.
+	// Shutdown still cancels it through the normal Stop path.
+	return a.Start(context.WithoutCancel(ctx))
+}
+
 // newDrainContext bounds draining by both the caller's shutdown budget and the
 // agent's configured DrainTimeout.
 func (a *Base) newDrainContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -547,6 +722,12 @@ func (a *Base) cancelHandlers() {
 func (a *Base) forceStop() {
 	a.forceOnce.Do(func() { close(a.forceCh) })
 	a.cancelHandlers()
+	a.scaleMu.Lock()
+	gate := a.gate
+	a.scaleMu.Unlock()
+	if gate != nil {
+		gate.close()
+	}
 	a.mu.Lock()
 	cc := a.cc
 	a.mu.Unlock()
@@ -601,10 +782,19 @@ func (a *Base) enqueue(msg jetstream.Msg) {
 	}
 }
 
-func (a *Base) worker(runCtx, handlerCtx context.Context) {
+func (a *Base) worker(runCtx, handlerCtx context.Context, gate *concurrencyGate) {
 	defer a.workers.Done()
 	for j := range a.jobs {
+		if gate != nil && !gate.acquire() {
+			// Forced shutdown: leave the message unacknowledged so the durable
+			// consumer redelivers it.
+			a.jobsWG.Done()
+			continue
+		}
 		a.handleMessage(runCtx, handlerCtx, j.msg, j.heartbeatDone)
+		if gate != nil {
+			gate.release()
+		}
 		a.jobsWG.Done()
 	}
 }
@@ -1061,4 +1251,78 @@ func cloneHeader(h nats.Header) nats.Header {
 		out[k] = append([]string(nil), vs...)
 	}
 	return out
+}
+
+// concurrencyGate bounds how many of the launched workers may handle a
+// message at once. Workers wait before starting a handler, so reducing the
+// limit never abandons a delivered message and increasing it takes effect
+// immediately. close unblocks waiters for a forced shutdown; their messages
+// stay unacknowledged and are redelivered.
+type concurrencyGate struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	limitN int
+	max    int
+	active int
+	closed bool
+}
+
+func newConcurrencyGate(limit, max int) *concurrencyGate {
+	if max < limit {
+		max = limit
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	g := &concurrencyGate{limitN: limit, max: max}
+	g.cond = sync.NewCond(&g.mu)
+	return g
+}
+
+func (g *concurrencyGate) acquire() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for !g.closed && g.active >= g.limitN {
+		g.cond.Wait()
+	}
+	if g.closed {
+		return false
+	}
+	g.active++
+	return true
+}
+
+func (g *concurrencyGate) release() {
+	g.mu.Lock()
+	if g.active > 0 {
+		g.active--
+	}
+	g.cond.Signal()
+	g.mu.Unlock()
+}
+
+func (g *concurrencyGate) setLimit(n int) {
+	g.mu.Lock()
+	if n < 1 {
+		n = 1
+	}
+	if n > g.max {
+		n = g.max
+	}
+	g.limitN = n
+	g.cond.Broadcast()
+	g.mu.Unlock()
+}
+
+func (g *concurrencyGate) limit() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.limitN
+}
+
+func (g *concurrencyGate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.cond.Broadcast()
+	g.mu.Unlock()
 }

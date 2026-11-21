@@ -19,10 +19,11 @@ internal/sources/        loader and validation for deploy/sources/sources.yaml
 internal/fetch/          source adapters (RSS/Atom, GDELT, USGS, GDACS, EONET,
                          ReliefWeb), polite HTTP, robots, host budget, health
 internal/record/         record mode: raw-stream writer and reader
+internal/ops/            Supervisor, /ops backend, wrong-link queue
 internal/geo/            GeoNames gazetteer, Photon geocoder, grid helpers
 internal/store/          pgx pool, migrations runner, batch writer
 migrations/              embedded up/down SQL (schema_migrations)
-internal/gateway/        WebSocket gateway, snapshot, resume        (later)
+internal/gateway/        WebSocket gateway, snapshot, resume, /ops mount
 internal/pb/dorv1/       generated Go protobuf (do not edit)
 proto/dor/v1/            protobuf source
 proto/testdata/          golden binaries written by the Go test
@@ -33,13 +34,14 @@ web/                     Vite + SolidJS + TypeScript
   src/gen/               generated TypeScript protobuf (do not edit)
 tools/probe/             dev publisher/counter used by test-echo-restart
 tools/feedcheck/         live source verification (writes the seed-list report)
+tools/replayer/          recorded-day replay at N× (M6 perf input)
 tools/proto-check.sh     proto drift check used by CI
 scripts/                 dev/acceptance scripts (test-echo-restart.sh)
 eval/                    labelled sets, labelling CLI, eval runner
 config/                  thresholds, model pins and budget YAML
 deploy/docker-compose.yml  Postgres/pgvector, TEI, Photon profile
 deploy/postgres/init.sql   creates the vector extension on a fresh volume
-docs/
+docs/                    conventions, decisions, operations (M6 runbook)
 ```
 
 Empty Go packages have a `doc.go` only, so imports and ownership are fixed
@@ -53,7 +55,8 @@ before implementation.
 | `make dev-photon` | also starts Photon (profile `photon`; first start downloads Andorra) |
 | `make dev-down` | stop compose services, keep volumes |
 | `make dev-reset` | stop and delete compose volumes |
-| `make build` | build `bin/dor` and `bin/probe` |
+| `make build` | build `bin/dor`, `bin/probe` and `bin/replayer` |
+| `make replay` | replay the latest recorded day at 10× (`DOR_RECORD_DIR`, `DAY`, `RATE`) |
 | `make test` | `go test ./...` |
 | `make test-race` | `go test -race ./...` |
 | `make proto` | regenerate Go and TypeScript protobuf |
@@ -72,8 +75,8 @@ before implementation.
 | Port | Owner |
 | --- | --- |
 | 4222 | embedded NATS in local mode (127.0.0.1 only) |
-| 8080 | WebSocket gateway (reserved; later ticket) |
-| 8091 | admin HTTP: `GET /healthz`, `GET /metrics` |
+| 8080 | WebSocket gateway and `/ops` |
+| 8091 | admin HTTP: `GET /healthz`, `GET /metrics`, `GET /ops` |
 | 8090 | TEI (host) → 80 (container) |
 | 5433 | Postgres + pgvector (host) → 5432 (container) |
 | 2322 | Photon (profile `photon`) |
@@ -115,6 +118,18 @@ Every flag has a `DOR_*` fallback. An explicit flag wins.
 | `--geonames-dir` | `DOR_GEONAMES_DIR` | `./.dor/geonames` (downloaded once) |
 | `--photon-url` | `DOR_PHOTON_URL` | empty (precise geocoding disabled) |
 | `--tei-url` | `DOR_TEI_URL` | `http://127.0.0.1:8090` (empty disables remote embeddings) |
+| `--gateway-addr` | `DOR_GATEWAY_ADDR` | `127.0.0.1:8080` |
+| `--gateway-origins` | `DOR_GATEWAY_ORIGINS` | `localhost:*,127.0.0.1:*` |
+| `--supervisor` | `DOR_SUPERVISOR` | `true` (in-process Supervisor and `/ops`) |
+| `--supervisor-interval` | `DOR_SUPERVISOR_INTERVAL` | `2s` |
+| `--supervisor-scale-lag` | `DOR_SUPERVISOR_SCALE_LAG` | `2s` |
+| `--supervisor-alarm-lag` | `DOR_SUPERVISOR_ALARM_LAG` | `5s` |
+| `--supervisor-alarm-for` | `DOR_SUPERVISOR_ALARM_FOR` | `1m` |
+| `--supervisor-max-concurrency` | `DOR_SUPERVISOR_MAX_CONCURRENCY` | `32` |
+| `--supervisor-restart-min` / `--supervisor-restart-max` | `DOR_SUPERVISOR_RESTART_MIN` / `_MAX` | `5s` / `5m` |
+
+The full Supervisor flag list and production split-process commands are in
+[operations.md](operations.md).
 
 Tracing: W3C `traceparent` travels in NATS headers. The exporter is a noop
 unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, then OTLP/HTTP is used.
@@ -141,6 +156,12 @@ Prometheus text format. URLs in logs and `/healthz` are redacted: configured
 server components are replaced in raw, quoted and URL-normalized form, with an
 authority-only fallback for arbitrary URL text. Userinfo is removed; an `@` in
 a path or query is not userinfo and is preserved.
+
+The Supervisor and `/ops` are in-process. In split mode each process supervises
+only the agents it runs; the gateway/publisher process serves the primary
+`http://127.0.0.1:8080/ops`, and every other process serves the same page on its
+own admin address. There is no cross-process replica controller in this build.
+See [operations.md](operations.md) for the production profile.
 
 ## Subjects
 
@@ -187,6 +208,7 @@ KV buckets (created by the provisioning owner):
 | `spend` | 48 h | daily model spend, keyed by UTC day (`daily.YYYY-MM-DD`) |
 | `live_state` | 48 h | hot stories/links for snapshot rebuilds |
 | `source_health` | 7 d | one JSON health record per source (state, last success, counters, validators) |
+| `eval_pending` | none | operator-reported wrong links waiting for an explicit agent label |
 
 `budgets` also holds the per-host fetch token buckets (`host.<host>`, host
 sanitized to the NATS key charset), shared by every replica. `seen` also holds

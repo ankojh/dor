@@ -1,7 +1,5 @@
-// Command repair-geocoding audits and repairs persisted F1·1 geocoding errors.
-// Dry-run is the default; --apply commits one transaction. Stop old plot/cluster
-// writers before applying on the live DB, then restart with the fixed binary so
-// old in-memory/KV locations cannot overwrite the repaired durable state.
+// Command repair-geocoding defaults to an offline read-only audit. --apply
+// explicitly commits Postgres changes; it never changes running NATS state.
 package main
 
 import (
@@ -9,14 +7,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
+	"github.com/ankojh/dor/internal/geo"
+	"github.com/jackc/pgx/v5"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
-
-	"github.com/ankojh/dor/internal/geo"
-	"github.com/jackc/pgx/v5"
 )
 
 type location struct {
@@ -26,7 +24,6 @@ type location struct {
 	Weight                      float32
 	Evidence                    []geo.TextEvidence
 }
-
 type counts struct {
 	Scanned    int            `json:"scanned"`
 	Flagged    int            `json:"flagged"`
@@ -35,142 +32,204 @@ type counts struct {
 	Removed    int            `json:"removed"`
 	Reasons    map[string]int `json:"reasons"`
 }
+type change struct {
+	row      location
+	decision geo.RepairDecision
+}
+type auditChange struct {
+	Table       string         `json:"table"`
+	Owner       string         `json:"owner"`
+	OldPlace    string         `json:"old_place"`
+	OldName     string         `json:"old_name"`
+	Reason      string         `json:"reason"`
+	Replacement *geo.Place     `json:"replacement"`
+	Precision   geo.Resolution `json:"precision"`
+}
+type report struct {
+	Status    string               `json:"status"`
+	Committed bool                 `json:"committed"`
+	Tables    map[string]*counts   `json:"tables"`
+	Changes   []auditChange        `json:"changes"`
+	Bundle    LocationRepairBundle `json:"bundle"`
+}
+type options struct {
+	dsn, dir, reportPath string
+	apply                bool
+}
 
+func parseOptions(args []string) (options, error) {
+	var o options
+	fs := flag.NewFlagSet("repair-geocoding", flag.ContinueOnError)
+	fs.StringVar(&o.dsn, "dsn", os.Getenv("DOR_DATABASE_URL"), "Postgres DSN (or DOR_DATABASE_URL)")
+	fs.StringVar(&o.dir, "geonames-dir", geo.DefaultDir, "complete existing GeoNames cache (never downloaded)")
+	fs.StringVar(&o.reportPath, "report", "", "atomic JSON audit and repair bundle output")
+	fs.BoolVar(&o.apply, "apply", false, "explicitly commit Postgres repairs")
+	dry := fs.Bool("dry-run", true, "read-only proposed audit (default)")
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if o.dsn == "" {
+		return o, fmt.Errorf("--dsn or DOR_DATABASE_URL is required")
+	}
+	if !*dry && !o.apply {
+		return o, fmt.Errorf("--dry-run=false does not authorize writes; explicit --apply is required")
+	}
+	if fs.NArg() != 0 {
+		return o, fmt.Errorf("unexpected positional arguments")
+	}
+	return o, nil
+}
 func main() {
-	dsn := flag.String("dsn", os.Getenv("DOR_DATABASE_URL"), "Postgres DSN (or DOR_DATABASE_URL)")
-	dir := flag.String("geonames-dir", geo.DefaultDir, "existing GeoNames cache directory")
-	apply := flag.Bool("apply", false, "commit repairs (default is read-only dry run)")
-	dry := flag.Bool("dry-run", true, "audit without writes; --apply overrides this flag")
-	reportPath := flag.String("report", "", "optional JSON audit file with each changed row")
-	flag.Parse()
-	if *dsn == "" {
-		fmt.Fprintln(os.Stderr, "--dsn or DOR_DATABASE_URL is required")
+	o, err := parseOptions(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := runReport(ctx, *dsn, *dir, *apply || !*dry, *reportPath); err != nil {
+	if err := runReport(ctx, o.dsn, o.dir, o.apply, o.reportPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
-
-func run(ctx context.Context, dsn, dir string, apply bool) error {
-	return runReport(ctx, dsn, dir, apply, "")
-}
-
-func runReport(ctx context.Context, dsn, dir string, apply bool, reportPath string) error {
-	var report io.Writer = io.Discard
-	if reportPath != "" {
-		file, err := os.Create(reportPath)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		report = file
-	}
-	g, err := geo.Load(ctx, dir, slog.Default())
+func runReport(ctx context.Context, dsn, dir string, apply bool, path string) error {
+	g, err := geo.LoadExisting(ctx, dir, slog.Default())
 	if err != nil {
 		return err
 	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return err
 	}
 	defer conn.Close(ctx)
+	r, err := repair(ctx, conn, g, apply)
+	if err != nil {
+		return err
+	}
+	if path != "" {
+		if err := writeReport(path, r); err != nil {
+			return fmt.Errorf("repair status=%s; audit write failed: %w", r.Status, err)
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(struct {
+		Status        string             `json:"status"`
+		Committed     bool               `json:"committed"`
+		Tables        map[string]*counts `json:"tables"`
+		BundleRunID   string             `json:"bundle_run_id"`
+		DatasetSHA256 string             `json:"dataset_sha256"`
+	}{r.Status, r.Committed, r.Tables, r.Bundle.RunID, r.Bundle.DatasetSHA256})
+}
+func writeReport(path string, r report) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".geocoding-audit-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if _, err = file.Write(append(data, '\n')); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+type transactionStarter interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+}
+
+func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply bool) (report, error) {
 	mode := pgx.ReadOnly
 	if apply {
 		mode = pgx.ReadWrite
 	}
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: mode})
+	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: mode})
 	if err != nil {
-		return err
+		return report{}, err
 	}
 	defer tx.Rollback(ctx)
 	if apply {
-		// Prevent a running durable writer from changing rows mid-repair.
-		if _, err := tx.Exec(ctx, `LOCK TABLE stories, story_locations, article_locations IN SHARE ROW EXCLUSIVE MODE`); err != nil {
-			return err
+		if _, err := tx.Exec(ctx, `LOCK TABLE public.stories, public.story_locations, public.article_locations IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			return report{}, err
 		}
 	}
 	locations, err := loadLocations(ctx, tx)
 	if err != nil {
-		return err
+		return report{}, err
 	}
-	totals := map[string]*counts{}
+	r := report{Status: "proposed", Tables: map[string]*counts{}}
 	for _, table := range []string{"story_locations", "article_locations"} {
-		totals[table] = &counts{Reasons: map[string]int{}}
-	}
-	changedStories := map[string]bool{}
-	type change struct {
-		row      location
-		decision geo.RepairDecision
+		r.Tables[table] = &counts{Reasons: map[string]int{}}
 	}
 	var changes []change
 	for _, row := range locations {
-		c := totals[row.Table]
+		c := r.Tables[row.Table]
 		c.Scanned++
 		d := g.RepairLocation(geo.StoredLocation{PlaceID: row.PlaceID, Lat: row.Lat, Lon: row.Lon, Precision: geo.Resolution(row.Precision)}, row.Evidence)
 		if d.Reason == "" {
 			continue
 		}
-		if err := json.NewEncoder(report).Encode(struct {
-			Table       string         `json:"table"`
-			Owner       string         `json:"owner"`
-			OldPlace    string         `json:"old_place"`
-			OldName     string         `json:"old_name"`
-			Reason      string         `json:"reason"`
-			Replacement *geo.Place     `json:"replacement"`
-			Precision   geo.Resolution `json:"precision"`
-		}{row.Table, row.Owner, row.PlaceID, row.Name, d.Reason, d.Replacement, d.Precision}); err != nil {
-			return err
-		}
+		changes = append(changes, change{row, d})
+		r.Changes = append(r.Changes, auditChange{row.Table, row.Owner, row.PlaceID, row.Name, d.Reason, d.Replacement, d.Precision})
 		c.Flagged++
 		c.Reasons[d.Reason]++
-		switch {
-		case d.Replacement == nil:
+		if d.Replacement == nil {
 			c.Removed++
-		case d.Reason == "precision":
+		} else if d.Reason == "precision" {
 			c.Downgraded++
-		default:
+		} else {
 			c.Replotted++
 		}
-		if !apply {
-			continue
-		}
-		changes = append(changes, change{row, d})
-		if row.Table == "story_locations" {
-			changedStories[row.Owner] = true
+	}
+	bundle, err := buildBundle(ctx, tx, g, locations, changes)
+	if err != nil {
+		return report{}, err
+	}
+	r.Bundle = bundle
+	if !apply {
+		return r, nil
+	}
+	for _, c := range changes {
+		if err := deleteLocation(ctx, tx, c.row); err != nil {
+			return report{}, err
 		}
 	}
-	// Delete every rejected row before inserting replacements. A replacement
-	// may share a primary key with another rejected row from this snapshot.
-	for _, change := range changes {
-		if err := deleteLocation(ctx, tx, change.row); err != nil {
-			return err
+	for _, c := range changes {
+		if err := applyLocation(ctx, tx, c.row, c.decision); err != nil {
+			return report{}, err
 		}
 	}
-	for _, change := range changes {
-		if err := applyLocation(ctx, tx, change.row, change.decision); err != nil {
-			return err
+	ids := make([]string, 0, len(bundle.Stories))
+	for _, p := range bundle.Stories {
+		ids = append(ids, p.ID)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `UPDATE public.stories s SET primary_loc=COALESCE((SELECT place_id FROM public.story_locations WHERE story_id=s.id ORDER BY (place_id=s.primary_loc) DESC,weight DESC,role,place_id LIMIT 1),'') WHERE s.id=$1`, id); err != nil {
+			return report{}, err
 		}
 	}
-	for id := range changedStories {
-		if _, err := tx.Exec(ctx, `UPDATE stories s SET primary_loc=COALESCE(
- (SELECT place_id FROM story_locations WHERE story_id=s.id
-  ORDER BY (place_id=s.primary_loc) DESC, weight DESC, role, place_id LIMIT 1), '') WHERE s.id=$1`, id); err != nil {
-			return err
-		}
+	// Verify the planned complete after arrays against transaction-visible SQL,
+	// including collision coalescing and primary selection, before committing.
+	if err := verifyBundle(ctx, tx, bundle); err != nil {
+		return report{}, err
 	}
-	if apply {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit: %w", err)
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return report{}, fmt.Errorf("commit not confirmed for bundle %s; inspect database before retry (no committed audit emitted): %w", r.Bundle.RunID, err)
 	}
-	return json.NewEncoder(os.Stdout).Encode(struct {
-		DryRun bool               `json:"dry_run"`
-		Tables map[string]*counts `json:"tables"`
-	}{!apply, totals})
+	r.Status = "committed"
+	r.Committed = true
+	return r, nil
 }
 
 func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
@@ -181,7 +240,7 @@ func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
 		if table == "article_locations" {
 			owner, weight = "article_id", "conf"
 		}
-		rows, err := tx.Query(ctx, `SELECT `+owner+`,place_id,name,lat,lon,precision,role,`+weight+` FROM `+table+` ORDER BY `+owner+`,place_id,role`)
+		rows, err := tx.Query(ctx, `SELECT `+owner+`,place_id,name,lat,lon,precision,role,`+weight+` FROM public.`+table+` ORDER BY `+owner+`,place_id,role`)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +259,7 @@ func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
 	}
 	// Load evidence in bulk, including every article attached to each story.
 	byArticle, byStory := map[string][]geo.TextEvidence{}, map[string][]geo.TextEvidence{}
-	rows, err := tx.Query(ctx, `SELECT id,COALESCE(story_id,''),title,lede,dateline FROM articles ORDER BY id,created_at`)
+	rows, err := tx.Query(ctx, `SELECT id,COALESCE(story_id,''),title,lede,dateline FROM public.articles ORDER BY id,created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +279,7 @@ func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = tx.Query(ctx, `SELECT id,title FROM stories ORDER BY id`)
+	rows, err = tx.Query(ctx, `SELECT id,title FROM public.stories ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +319,7 @@ func applyLocation(ctx context.Context, tx pgx.Tx, row location, d geo.RepairDec
 	if strings.TrimSpace(name) == "" {
 		name = row.Name
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO `+row.Table+` (`+owner+`,place_id,name,lat,lon,precision,role,`+weight+`)
+	_, err := tx.Exec(ctx, `INSERT INTO public.`+row.Table+` (`+owner+`,place_id,name,lat,lon,precision,role,`+weight+`)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (`+owner+`,place_id,role) DO UPDATE
  SET name=EXCLUDED.name,lat=EXCLUDED.lat,lon=EXCLUDED.lon,precision=EXCLUDED.precision,
  `+weight+`=GREATEST(`+row.Table+`.`+weight+`,EXCLUDED.`+weight+`)`, row.Owner, p.ID, name, p.Lat, p.Lon, int16(d.Precision), row.Role, row.Weight)
@@ -272,6 +331,6 @@ func deleteLocation(ctx context.Context, tx pgx.Tx, row location) error {
 	if row.Table == "article_locations" {
 		owner = "article_id"
 	}
-	_, err := tx.Exec(ctx, `DELETE FROM `+row.Table+` WHERE `+owner+`=$1 AND place_id=$2 AND role=$3`, row.Owner, row.PlaceID, row.Role)
+	_, err := tx.Exec(ctx, `DELETE FROM public.`+row.Table+` WHERE `+owner+`=$1 AND place_id=$2 AND role=$3`, row.Owner, row.PlaceID, row.Role)
 	return err
 }

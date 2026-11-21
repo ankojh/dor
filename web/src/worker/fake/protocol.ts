@@ -56,6 +56,8 @@ export type HudLink = {
   place: string;
   type: number;
   strength: number;
+  /** Similarity-only relation, not confirmed by the relation judge. */
+  unverified?: boolean;
 };
 
 export type HudParty = { lng: number; lat: number; label: string };
@@ -113,6 +115,8 @@ export type LinkArrays = {
   focusAt: Float32Array;
   color: Uint8Array;
   width: Float32Array;
+  /** Optional: 1 when a real link is similarity-only/unverified. */
+  unverified?: Uint8Array;
 };
 
 export type ArcArrays = {

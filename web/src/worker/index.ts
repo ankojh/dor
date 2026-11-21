@@ -9,6 +9,7 @@ import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AckSchema,
   ClientMessageSchema,
+  FocusSchema,
   HelloSchema,
   ServerMessageSchema,
   type ClientMessage,
@@ -17,10 +18,24 @@ import {
   type Story,
   type WireRow,
 } from "../gen/dor/v1/dor_pb";
-import type { SourceHealth, WorkerMessage, WorkerStatus } from "./messages";
+import type { SourceHealth, WorkerCommand, WorkerMessage, WorkerStatus } from "./messages";
 
 const WIRE_LIMIT = 1000;
-const statusScope = globalThis as unknown as { postMessage(message: WorkerMessage): void };
+const statusScope = globalThis as unknown as {
+  postMessage(message: WorkerMessage): void;
+  __dorWorker?: Record<string, unknown>;
+};
+const debug: Record<string, unknown> = {
+  raw: 0,
+  snapshots: 0,
+  batches: 0,
+  deltas: 0,
+  wires: 0,
+  lastType: null,
+  lastError: null,
+  socket: "init",
+};
+statusScope.__dorWorker = debug;
 
 const env = import.meta.env as Record<string, string | undefined>;
 const configuredUrl = env.VITE_WS_URL;
@@ -30,7 +45,8 @@ const socketUrl =
     : import.meta.env.DEV
       ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`
       : "ws://127.0.0.1:8080/ws";
-const healthUrl = env.VITE_HEALTH_URL || "/api/health";
+const apiBase = (env.VITE_API_URL || "").replace(/\/$/, "");
+const healthUrl = env.VITE_HEALTH_URL || `${apiBase}/api/health`;
 
 const stories = new Map<string, Story>();
 const links = new Map<string, Link>();
@@ -137,14 +153,17 @@ function linkKey(a: string, b: string): string {
 }
 
 async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
+  debug.raw = Number(debug.raw) + 1;
   const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
   let message;
   try {
     message = fromBinary(ServerMessageSchema, bytes);
   } catch (error) {
+    debug.lastError = String(error);
     postStatus(socket?.readyState === WebSocket.OPEN ? "online" : "offline", String(error));
     return;
   }
+  debug.lastType = message.body.case ?? null;
   switch (message.body.case) {
     case "snapshot": {
       const snapshot = message.body.value;
@@ -152,6 +171,8 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
       for (const story of snapshot.stories) stories.set(story.id, story);
       for (const link of snapshot.links) links.set(linkKey(link.a, link.b), link);
       lastSeq = Number(snapshot.seq);
+      debug.snapshots = Number(debug.snapshots) + 1;
+      debug.wires = wire.length;
       statusScope.postMessage({
         type: "snapshot",
         seq: lastSeq,
@@ -165,6 +186,9 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
     }
     case "deltas": {
       const batch = message.body.value.deltas;
+      debug.batches = Number(debug.batches) + 1;
+      debug.deltas = Number(debug.deltas) + batch.length;
+      debug.wires = wire.length;
       for (const delta of batch) applyDelta(delta);
       statusScope.postMessage({
         type: "deltas",
@@ -217,7 +241,9 @@ function connect(): void {
     return;
   }
   socket.binaryType = "arraybuffer";
+  debug.socket = "connecting";
   socket.onopen = () => {
+    debug.socket = "open";
     reconnectAttempt = 0;
     reconnectAt = 0;
     postStatus("online");
@@ -231,6 +257,7 @@ function connect(): void {
     postStatus("reconnecting", "gateway socket error");
   };
   socket.onclose = (event) => {
+    debug.socket = `closed:${event.code}`;
     socket = null;
     if (stopped) return;
     postStatus("reconnecting", event.reason || `socket closed (${event.code})`);
@@ -245,15 +272,28 @@ async function pollHealth(): Promise<void> {
     const payload = (await response.json()) as {
       ok?: boolean;
       status?: string;
-      sources?: Array<{ ok?: boolean; status?: string; name?: string; id?: string }>;
+      count?: number;
+      sources?: Array<{
+        source?: string;
+        name?: string;
+        id?: string;
+        ok?: boolean;
+        status?: string;
+        health?: { state?: string; source_id?: string };
+      }>;
       source_count?: number;
       healthy_sources?: number;
     };
     const list = Array.isArray(payload.sources) ? payload.sources : [];
-    const sourcesOk = list.filter((source) => source.ok !== false && source.status !== "down").length;
-    const sourcesTotal = list.length || payload.source_count || 0;
+    const stateOf = (source: NonNullable<typeof payload.sources>[number]): string =>
+      (source.health?.state ?? source.status ?? (source.ok === false ? "down" : "ok")).toLowerCase();
+    const sourcesOk = list.filter((source) => stateOf(source) === "ok").length;
+    const sourcesTotal = payload.count ?? list.length ?? payload.source_count ?? 0;
     health = {
-      ok: payload.ok ?? (payload.status ? payload.status === "ok" : null),
+      ok:
+        sourcesTotal > 0
+          ? sourcesOk === sourcesTotal
+          : payload.ok ?? (payload.status ? payload.status === "ok" : null),
       sourcesOk,
       sourcesTotal,
       detail:
@@ -272,6 +312,16 @@ connect();
 void pollHealth();
 const healthTimer = setInterval(() => void pollHealth(), 15_000);
 void healthTimer;
+
+const commandScope = globalThis as unknown as {
+  onmessage: ((event: MessageEvent<WorkerCommand>) => void) | null;
+};
+commandScope.onmessage = (event) => {
+  const command = event.data;
+  if (command?.type === "focus" && command.storyId) {
+    sendClient({ case: "focus", value: create(FocusSchema, { storyId: command.storyId }) });
+  }
+};
 
 // Vite worker termination handles cleanup; this keeps the module visibly
 // stopped if a host ever posts a stop command.

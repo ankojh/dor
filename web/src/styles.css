@@ -297,7 +297,7 @@ body { overflow: hidden; }
 .health.ok::before { background: #45f0a6; box-shadow: 0 0 8px #45f0a6; }
 .health.bad::before { background: #ff4f6e; box-shadow: 0 0 8px #ff4f6e; }
 .health.unknown::before { background: #ffc25c; box-shadow: 0 0 8px #ffc25c; }
-.health b { color: var(--text-2); font-weight: 500; margin-left: 2px; }
+.health b { color: var(--text-2); font-weight: 500; margin-left: 8px; }
 .app3 > .topbar .right { gap: 12px; }
 
 /* Wire */
@@ -408,4 +408,19 @@ body { overflow: hidden; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wr.fresh .wr-body { animation: none; }
+}
+
+.mobile-story { display: none; }
+@media (max-width: 780px) {
+  .mobile-story {
+    display: flex; flex-direction: column; gap: 8px;
+    position: fixed; left: 10px; right: 10px; bottom: 10px; z-index: 30;
+    padding: 14px 16px; max-height: 42vh; overflow-y: auto;
+  }
+  .mobile-story-head { display: flex; align-items: center; justify-content: space-between; }
+  .mobile-story-head .text-btn { font-size: 18px; }
+  .mobile-story h2 { margin: 0; font-size: 17px; line-height: 1.3; font-weight: 600; }
+  .mobile-story .facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .mobile-story .facts b { color: var(--text-2); font-weight: 500; }
+  .mobile-story .brief { margin: 0; color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
 }

@@ -145,6 +145,7 @@ export function buildLiveGlobe(
   const linkType: number[] = [];
   const linkStrength: number[] = [];
   const linkWidth: number[] = [];
+  const linkUnverified: number[] = [];
   const linkByKey = new Map<string, number>();
   for (const link of realLinks) {
     const a = storyById.get(link.a);
@@ -160,6 +161,7 @@ export function buildLiveGlobe(
     linkStrength.push(Math.max(0, Math.min(1, link.strength)));
     const encoding = encodeArc(link.type, link.strength);
     linkWidth.push(encoding.widthPx);
+    linkUnverified.push((link as Link & { unverified?: boolean }).unverified ? 1 : 0);
   }
 
   const linkCount = linkA.length;
@@ -173,6 +175,7 @@ export function buildLiveGlobe(
     focusAt: new Float32Array(linkCount),
     color: new Uint8Array(linkCount * 4),
     width: Float32Array.from(linkWidth),
+    unverified: Uint8Array.from(linkUnverified),
   };
   for (let i = 0; i < linkCount; i++) {
     const encoding = encodeArc(linkType[i]!, linkStrength[i]!);

@@ -137,8 +137,8 @@ export function App() {
     while (index < rows.length) {
       const current = rows[index]!;
       const source = current.row.source.toUpperCase();
-      const isGdelt = source.includes("GDELT");
-      if (isGdelt) {
+      const isBurst = source.includes("GDELT");
+      if (isBurst) {
         let end = index + 1;
         while (
           end < rows.length &&
@@ -148,7 +148,7 @@ export function App() {
           end++;
         }
         const count = end - index;
-        const batchKey = `gdelt:${Number(current.row.at)}:${index}`;
+        const batchKey = `gdelt:${Number(current.row.at)}:${current.key}`;
         if (count > 1 && !expanded.has(batchKey)) {
           result.push({ kind: "article", key: current.key, item: current });
           result.push({
@@ -320,6 +320,9 @@ export function App() {
       onState: setGlobe,
       onFocus: (details) => {
         setFocus(details);
+        if (details) {
+          worker?.postMessage({ type: "focus", storyId: details.storyId });
+        }
       },
     });
 
@@ -780,8 +783,8 @@ export function App() {
                     {(link) => (
                       <div class="lk" style={`--c:${link.type === 0 ? "#ffc25c" : link.type === 1 ? "#ff6fd8" : "#5ef2ff"}`}>
                         <span class="k">
-                          {link.type === 0 ? "Causal" : link.type === 1 ? "Reaction" : "Thematic"} ·{" "}
-                          {link.place.toUpperCase()}
+                          {link.type === 0 ? "Causal" : link.type === 1 ? "Reaction" : "Thematic"}
+                          {link.unverified ? " · unverified" : ""} · {link.place.toUpperCase()}
                         </span>
                         <span class="sbar">
                           {link.strength.toFixed(2)}
@@ -826,6 +829,30 @@ export function App() {
           </div>
         </div>
       </aside>
+
+      <Show when={focus()}>
+        <div class="mobile-story glass">
+          <div class="mobile-story-head">
+            <span class="cap">Focused story</span>
+            <button class="text-btn" onClick={clearFocus}>
+              ×
+            </button>
+          </div>
+          <h2>{focus()!.story.title}</h2>
+          <div class="facts">
+            <span>
+              <b>{focus()!.hud.story.sources}</b> sources
+            </span>
+            <span>
+              <b>{focus()!.hud.links.length}</b> links
+            </span>
+            <span>{focus()!.hud.story.place}</span>
+          </div>
+          <p class="brief">
+            Story brief and timeline arrive in M3. The globe is showing the real focus path.
+          </p>
+        </div>
+      </Show>
 
       <footer class="timeline">
         <div class="tlrow">

@@ -50,3 +50,6 @@ export type WorkerResync = {
 };
 
 export type WorkerMessage = WorkerStatus | WorkerSnapshot | WorkerDeltas | WorkerResync;
+
+/** Main -> worker controls. */
+export type WorkerCommand = { type: "focus"; storyId: string };

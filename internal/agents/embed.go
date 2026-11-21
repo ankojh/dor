@@ -88,6 +88,21 @@ func (t *TEIClient) embedBatch(ctx context.Context, texts []string) ([][]float32
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	// The bundled TEI server accepts at most 32 inputs per HTTP request.
+	// Keep the agent's larger batching window while respecting that limit.
+	const maxRequestBatch = 32
+	if len(texts) > maxRequestBatch {
+		vectors := make([][]float32, 0, len(texts))
+		for start := 0; start < len(texts); start += maxRequestBatch {
+			end := min(start+maxRequestBatch, len(texts))
+			chunk, err := t.Embed(ctx, texts[start:end])
+			if err != nil {
+				return nil, err
+			}
+			vectors = append(vectors, chunk...)
+		}
+		return vectors, nil
+	}
 	payload, err := json.Marshal(map[string]any{"inputs": texts})
 	if err != nil {
 		return nil, err

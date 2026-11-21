@@ -21,8 +21,8 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/fetch"
 	"github.com/ankojh/dor/internal/gateway"
+	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/record"
-
 	"github.com/ankojh/dor/internal/store"
 )
 
@@ -55,6 +55,13 @@ type config struct {
 
 	gatewayAddr    string
 	gatewayOrigins string
+
+	modelsFile     string
+	thresholdsFile string
+	budgetFile     string
+	geonamesDir    string
+	photonURL      string
+	teiURL         string
 }
 
 func runCommand(args []string) error {
@@ -85,6 +92,13 @@ func runCommand(args []string) error {
 
 		gatewayAddr:    envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
 		gatewayOrigins: envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
+
+		modelsFile:     envOr("DOR_MODELS_CONFIG", "config/models.yaml"),
+		thresholdsFile: envOr("DOR_THRESHOLDS_CONFIG", "config/thresholds.yaml"),
+		budgetFile:     envOr("DOR_BUDGET_CONFIG", "config/budget.yaml"),
+		geonamesDir:    envOr("DOR_GEONAMES_DIR", geo.DefaultDir),
+		photonURL:      envOr("DOR_PHOTON_URL", ""),
+		teiURL:         envOr("DOR_TEI_URL", "http://127.0.0.1:8090"),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -114,6 +128,12 @@ func runCommand(args []string) error {
 
 	fs.StringVar(&cfg.gatewayAddr, "gateway-addr", cfg.gatewayAddr, "WebSocket gateway listen address; empty disables it")
 	fs.StringVar(&cfg.gatewayOrigins, "gateway-origins", cfg.gatewayOrigins, "comma-separated WebSocket Origin patterns")
+	fs.StringVar(&cfg.modelsFile, "models-config", cfg.modelsFile, "models.yaml path")
+	fs.StringVar(&cfg.thresholdsFile, "thresholds-config", cfg.thresholdsFile, "thresholds.yaml path")
+	fs.StringVar(&cfg.budgetFile, "budget-config", cfg.budgetFile, "budget.yaml path")
+	fs.StringVar(&cfg.geonamesDir, "geonames-dir", cfg.geonamesDir, "GeoNames cache directory")
+	fs.StringVar(&cfg.photonURL, "photon-url", cfg.photonURL, "Photon base URL; empty disables precise geocoding")
+	fs.StringVar(&cfg.teiURL, "tei-url", cfg.teiURL, "TEI embedding base URL; empty disables remote embeddings")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -237,7 +257,12 @@ func runCommand(args []string) error {
 		}()
 	}
 
-	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, agents.Deps{ArticleSink: articleSink})
+	enrichmentDeps := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	if dbStore != nil {
+		seedSources(ctx, dbStore, cfg.sourcesFile, logger)
+	}
+
+	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, enrichmentDeps)
 	if err != nil {
 		return err
 	}

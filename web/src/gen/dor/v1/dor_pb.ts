@@ -20,7 +20,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file dor/v1/dor.proto.
  */
 export const file_dor_v1_dor: GenFile = /*@__PURE__*/
-  fileDesc("ChBkb3IvdjEvZG9yLnByb3RvEgZkb3IudjEilgEKCExvY2F0aW9uEhAKCHBsYWNlX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSCwoDbGF0GAMgASgCEgsKA2xvbhgEIAEoAhIkCglwcmVjaXNpb24YBSABKA4yES5kb3IudjEuUHJlY2lzaW9uEhoKBHJvbGUYBiABKA4yDC5kb3IudjEuUm9sZRIOCgZ3ZWlnaHQYByABKAIiuAEKB0FydGljbGUSCgoCaWQYASABKAkSEQoJc291cmNlX2lkGAIgASgJEgsKA3VybBgDIAEoCRINCgV0aXRsZRgEIAEoCRIMCgRsZWRlGAUgASgJEhQKDHB1Ymxpc2hlZF9hdBgGIAEoAxIMCgRsYW5nGAcgASgJEhAKCGRhdGVsaW5lGAggASgJEh8KBWhpbnRzGAkgASgLMhAuZG9yLnYxLlJhd0hpbnRzEg0KBWJ1cnN0GAogASgIIsgBCgVTdG9yeRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIiCghjYXRlZ29yeRgDIAEoDjIQLmRvci52MS5DYXRlZ29yeRIjCglsb2NhdGlvbnMYBCADKAsyEC5kb3IudjEuTG9jYXRpb24SDwoHcHJpbWFyeRgFIAEoDRIUCgxzb3VyY2VfY291bnQYBiABKA0SDAoEaGVhdBgHIAEoAhISCgpmaXJzdF9zZWVuGAggASgDEhIKCnVwZGF0ZWRfYXQYCSABKAMilgEKBExpbmsSCQoBYRgBIAEoCRIJCgFiGAIgASgJEh4KBHR5cGUYAyABKA4yEC5kb3IudjEuTGlua1R5cGUSHgoDZGlyGAQgASgOMhEuZG9yLnYxLkRpcmVjdGlvbhISCgpjb25maWRlbmNlGAUgASgCEhAKCHN0cmVuZ3RoGAYgASgCEhIKCnVwZGF0ZWRfYXQYByABKAMiHwoHTGlua0tleRIJCgFhGAEgASgJEgkKAWIYAiABKAkibgoIQWxlcnRIaXQSEAoIYWxlcnRfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFbGV2ZWwYAyABKAkSEAoIZmlyZWRfYXQYBCABKAMSDQoFdGl0bGUYBSABKAkSDgoGcHJvbXB0GAYgASgJIpwCCgdXaXJlUm93EhIKCmFydGljbGVfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFdGl0bGUYAyABKAkSDgoGc291cmNlGAQgASgJEg0KBXBsYWNlGAUgASgJEiIKCGNhdGVnb3J5GAYgASgOMhAuZG9yLnYxLkNhdGVnb3J5EgoKAmF0GAcgASgDEh4KBGpvaW4YCCABKA4yEC5kb3IudjEuSm9pbktpbmQSOAoNcHJvbXB0X3Njb3JlcxgJIAMoCzIhLmRvci52MS5XaXJlUm93LlByb21wdFNjb3Jlc0VudHJ5GjMKEVByb21wdFNjb3Jlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoAjoCOAEi7AEKBURlbHRhEgsKA3NlcRgBIAEoBBIlCgxzdG9yeV91cHNlcnQYAiABKAsyDS5kb3IudjEuU3RvcnlIABIWCgxzdG9yeV9leHBpcmUYAyABKAlIABIjCgtsaW5rX3Vwc2VydBgEIAEoCzIMLmRvci52MS5MaW5rSAASJgoLbGlua19yZW1vdmUYBSABKAsyDy5kb3IudjEuTGlua0tleUgAEh8KBHdpcmUYBiABKAsyDy5kb3IudjEuV2lyZVJvd0gAEiEKBWFsZXJ0GAcgASgLMhAuZG9yLnYxLkFsZXJ0SGl0SABCBgoEYm9keSJmCghTbmFwc2hvdBILCgNzZXEYASABKAQSHgoHc3RvcmllcxgCIAMoCzINLmRvci52MS5TdG9yeRIbCgVsaW5rcxgDIAMoCzIMLmRvci52MS5MaW5rEhAKCGJ1aWx0X2F0GAQgASgDIisKCkRlbHRhQmF0Y2gSHQoGZGVsdGFzGAEgAygLMg0uZG9yLnYxLkRlbHRhIiUKBlJlc3luYxILCgNzZXEYASABKAQSDgoGcmVhc29uGAIgASgJIoUBCg1TZXJ2ZXJNZXNzYWdlEiQKCHNuYXBzaG90GAEgASgLMhAuZG9yLnYxLlNuYXBzaG90SAASJAoGZGVsdGFzGAIgASgLMhIuZG9yLnYxLkRlbHRhQmF0Y2hIABIgCgZyZXN5bmMYAyABKAsyDi5kb3IudjEuUmVzeW5jSABCBgoEYm9keSIxCgVIZWxsbxIQCghsYXN0X3NlcRgBIAEoBBIWCg5jbGllbnRfdmVyc2lvbhgCIAEoCSJmCgpTZXRGaWx0ZXJzEiQKCmNhdGVnb3JpZXMYASADKA4yEC5kb3IudjEuQ2F0ZWdvcnkSDwoHcmVnaW9ucxgCIAMoCRITCgttaW5fc291cmNlcxgDIAEoDRIMCgRsYW5nGAQgAygJIh0KClNldFByb21wdHMSDwoHcHJvbXB0cxgBIAMoCSIZCgVGb2N1cxIQCghzdG9yeV9pZBgBIAEoCSJACgdHZXRUZXh0EhEKCXN0b3J5X2lkcxgBIAMoCRIiCglsaW5rX2tleXMYAiADKAsyDy5kb3IudjEuTGlua0tleSISCgNBY2sSCwoDc2VxGAEgASgEIu4BCg1DbGllbnRNZXNzYWdlEh4KBWhlbGxvGAEgASgLMg0uZG9yLnYxLkhlbGxvSAASKQoLc2V0X2ZpbHRlcnMYAiABKAsyEi5kb3IudjEuU2V0RmlsdGVyc0gAEikKC3NldF9wcm9tcHRzGAMgASgLMhIuZG9yLnYxLlNldFByb21wdHNIABIeCgVmb2N1cxgEIAEoCzINLmRvci52MS5Gb2N1c0gAEiMKCGdldF90ZXh0GAUgASgLMg8uZG9yLnYxLkdldFRleHRIABIaCgNhY2sYBiABKAsyCy5kb3IudjEuQWNrSABCBgoEYm9keSL8AQoIUmF3SGludHMSDwoHbG9jYXRlZBgBIAEoCBILCgNsYXQYAiABKAESCwoDbG9uGAMgASgBEiQKCXByZWNpc2lvbhgEIAEoDjIRLmRvci52MS5QcmVjaXNpb24SDgoGdGhlbWVzGAUgAygJEg8KB2NvdW50cnkYBiABKAkSDgoGaGF6YXJkGAcgASgJEhEKCW1hZ25pdHVkZRgIIAEoARIQCghzZXZlcml0eRgJIAEoARIQCghldmVudF9pZBgKIAEoCRIWCg5tYWduaXR1ZGVfdW5pdBgLIAEoCRINCgVwbGFjZRgMIAEoCRIQCghyZXZpc2lvbhgNIAEoCSLiAQoKUmF3QXJ0aWNsZRIKCgJpZBgBIAEoCRIRCglzb3VyY2VfaWQYAiABKAkSIAoEa2luZBgDIAEoDjISLmRvci52MS5Tb3VyY2VLaW5kEgsKA3VybBgEIAEoCRINCgV0aXRsZRgFIAEoCRIPCgdzdW1tYXJ5GAYgASgJEhQKDHB1Ymxpc2hlZF9hdBgHIAEoAxISCgpmZXRjaGVkX2F0GAggASgDEgwKBGxhbmcYCSABKAkSHwoFaGludHMYCiABKAsyEC5kb3IudjEuUmF3SGludHMSDQoFYnVyc3QYCyABKAgiVwoLUmVjb3JkRnJhbWUSDwoHc3ViamVjdBgBIAEoCRIOCgZtc2dfaWQYAiABKAkSFgoOcmVjZWl2ZWRfYXRfbXMYAyABKAMSDwoHcGF5bG9hZBgEIAEoDCr4AQoIQ2F0ZWdvcnkSEgoOQ0FURUdPUllfT1RIRVIQABIVChFDQVRFR09SWV9DT05GTElDVBABEhUKEUNBVEVHT1JZX1BPTElUSUNTEAISFAoQQ0FURUdPUllfRUNPTk9NWRADEhEKDUNBVEVHT1JZX1RFQ0gQBBIUChBDQVRFR09SWV9DTElNQVRFEAUSFQoRQ0FURUdPUllfRElTQVNURVIQBhITCg9DQVRFR09SWV9IRUFMVEgQBxIUChBDQVRFR09SWV9TQ0lFTkNFEAgSEwoPQ0FURUdPUllfU1BPUlRTEAkSFAoQQ0FURUdPUllfQ1VMVFVSRRAKKncKCVByZWNpc2lvbhIVChFQUkVDSVNJT05fQ09VTlRSWRAAEhQKEFBSRUNJU0lPTl9SRUdJT04QARISCg5QUkVDSVNJT05fQ0lUWRACEhQKEFBSRUNJU0lPTl9TVFJFRVQQAxITCg9QUkVDSVNJT05fUE9JTlQQBCpeCgRSb2xlEg4KClJPTEVfVkVOVUUQABIPCgtST0xFX09SSUdJThABEg4KClJPTEVfUEFSVFkQAhIRCg1ST0xFX0FGRkVDVEVEEAMSEgoOUk9MRV9NRU5USU9ORUQQBCpQCghMaW5rVHlwZRIUChBMSU5LX1RZUEVfQ0FVU0FMEAASFgoSTElOS19UWVBFX1JFQUNUSU9OEAESFgoSTElOS19UWVBFX1RIRU1BVElDEAIqTgoJRGlyZWN0aW9uEhQKEERJUkVDVElPTl9BX1RPX0IQABIUChBESVJFQ1RJT05fQl9UT19BEAESFQoRRElSRUNUSU9OX1VOQ0xFQVIQAiozCghKb2luS2luZBIRCg1KT0lOX0tJTkRfTkVXEAASFAoQSk9JTl9LSU5EX0pPSU5FRBABKrQBCgpTb3VyY2VLaW5kEhsKF1NPVVJDRV9LSU5EX1VOU1BFQ0lGSUVEEAASEwoPU09VUkNFX0tJTkRfUlNTEAESFQoRU09VUkNFX0tJTkRfR0RFTFQQAhIUChBTT1VSQ0VfS0lORF9VU0dTEAMSFQoRU09VUkNFX0tJTkRfR0RBQ1MQBBIVChFTT1VSQ0VfS0lORF9FT05FVBAFEhkKFVNPVVJDRV9LSU5EX1JFTElFRldFQhAGQi9aLWdpdGh1Yi5jb20vYW5rb2poL2Rvci9pbnRlcm5hbC9wYi9kb3J2MTtkb3J2MWIGcHJvdG8z");
+  fileDesc("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ZXJ0GAQgASgLMgwuZG9yLnYxLkxpbmtIABImCgtsaW5rX3JlbW92ZRgFIAEoCzIPLmRvci52MS5MaW5rS2V5SAASHwoEd2lyZRgGIAEoCzIPLmRvci52MS5XaXJlUm93SAASIQoFYWxlcnQYByABKAsyEC5kb3IudjEuQWxlcnRIaXRIAEIGCgRib2R5ImYKCFNuYXBzaG90EgsKA3NlcRgBIAEoBBIeCgdzdG9yaWVzGAIgAygLMg0uZG9yLnYxLlN0b3J5EhsKBWxpbmtzGAMgAygLMgwuZG9yLnYxLkxpbmsSEAoIYnVpbHRfYXQYBCABKAMiKwoKRGVsdGFCYXRjaBIdCgZkZWx0YXMYASADKAsyDS5kb3IudjEuRGVsdGEiJQoGUmVzeW5jEgsKA3NlcRgBIAEoBBIOCgZyZWFzb24YAiABKAkihQEKDVNlcnZlck1lc3NhZ2USJAoIc25hcHNob3QYASABKAsyEC5kb3IudjEuU25hcHNob3RIABIkCgZkZWx0YXMYAiABKAsyEi5kb3IudjEuRGVsdGFCYXRjaEgAEiAKBnJlc3luYxgDIAEoCzIOLmRvci52MS5SZXN5bmNIAEIGCgRib2R5IjEKBUhlbGxvEhAKCGxhc3Rfc2VxGAEgASgEEhYKDmNsaWVudF92ZXJzaW9uGAIgASgJImYKClNldEZpbHRlcnMSJAoKY2F0ZWdvcmllcxgBIAMoDjIQLmRvci52MS5DYXRlZ29yeRIPCgdyZWdpb25zGAIgAygJEhMKC21pbl9zb3VyY2VzGAMgASgNEgwKBGxhbmcYBCADKAkiHQoKU2V0UHJvbXB0cxIPCgdwcm9tcHRzGAEgAygJIhkKBUZvY3VzEhAKCHN0b3J5X2lkGAEgASgJIkAKB0dldFRleHQSEQoJc3RvcnlfaWRzGAEgAygJEiIKCWxpbmtfa2V5cxgCIAMoCzIPLmRvci52MS5MaW5rS2V5IhIKA0FjaxILCgNzZXEYASABKAQi7gEKDUNsaWVudE1lc3NhZ2USHgoFaGVsbG8YASABKAsyDS5kb3IudjEuSGVsbG9IABIpCgtzZXRfZmlsdGVycxgCIAEoCzISLmRvci52MS5TZXRGaWx0ZXJzSAASKQoLc2V0X3Byb21wdHMYAyABKAsyEi5kb3IudjEuU2V0UHJvbXB0c0gAEh4KBWZvY3VzGAQgASgLMg0uZG9yLnYxLkZvY3VzSAASIwoIZ2V0X3RleHQYBSABKAsyDy5kb3IudjEuR2V0VGV4dEgAEhoKA2FjaxgGIAEoCzILLmRvci52MS5BY2tIAEIGCgRib2R5IvwBCghSYXdIaW50cxIPCgdsb2NhdGVkGAEgASgIEgsKA2xhdBgCIAEoARILCgNsb24YAyABKAESJAoJcHJlY2lzaW9uGAQgASgOMhEuZG9yLnYxLlByZWNpc2lvbhIOCgZ0aGVtZXMYBSADKAkSDwoHY291bnRyeRgGIAEoCRIOCgZoYXphcmQYByABKAkSEQoJbWFnbml0dWRlGAggASgBEhAKCHNldmVyaXR5GAkgASgBEhAKCGV2ZW50X2lkGAogASgJEhYKDm1hZ25pdHVkZV91bml0GAsgASgJEg0KBXBsYWNlGAwgASgJEhAKCHJldmlzaW9uGA0gASgJIuIBCgpSYXdBcnRpY2xlEgoKAmlkGAEgASgJEhEKCXNvdXJjZV9pZBgCIAEoCRIgCgRraW5kGAMgASgOMhIuZG9yLnYxLlNvdXJjZUtpbmQSCwoDdXJsGAQgASgJEg0KBXRpdGxlGAUgASgJEg8KB3N1bW1hcnkYBiABKAkSFAoMcHVibGlzaGVkX2F0GAcgASgDEhIKCmZldGNoZWRfYXQYCCABKAMSDAoEbGFuZxgJIAEoCRIfCgVoaW50cxgKIAEoCzIQLmRvci52MS5SYXdIaW50cxINCgVidXJzdBgLIAEoCCJXCgtSZWNvcmRGcmFtZRIPCgdzdWJqZWN0GAEgASgJEg4KBm1zZ19pZBgCIAEoCRIWCg5yZWNlaXZlZF9hdF9tcxgDIAEoAxIPCgdwYXlsb2FkGAQgASgMKvgBCghDYXRlZ29yeRISCg5DQVRFR09SWV9PVEhFUhAAEhUKEUNBVEVHT1JZX0NPTkZMSUNUEAESFQoRQ0FURUdPUllfUE9MSVRJQ1MQAhIUChBDQVRFR09SWV9FQ09OT01ZEAMSEQoNQ0FURUdPUllfVEVDSBAEEhQKEENBVEVHT1JZX0NMSU1BVEUQBRIVChFDQVRFR09SWV9ESVNBU1RFUhAGEhMKD0NBVEVHT1JZX0hFQUxUSBAHEhQKEENBVEVHT1JZX1NDSUVOQ0UQCBITCg9DQVRFR09SWV9TUE9SVFMQCRIUChBDQVRFR09SWV9DVUxUVVJFEAoqdwoJUHJlY2lzaW9uEhUKEVBSRUNJU0lPTl9DT1VOVFJZEAASFAoQUFJFQ0lTSU9OX1JFR0lPThABEhIKDlBSRUNJU0lPTl9DSVRZEAISFAoQUFJFQ0lTSU9OX1NUUkVFVBADEhMKD1BSRUNJU0lPTl9QT0lOVBAEKl4KBFJvbGUSDgoKUk9MRV9WRU5VRRAAEg8KC1JPTEVfT1JJR0lOEAESDgoKUk9MRV9QQVJUWRACEhEKDVJPTEVfQUZGRUNURUQQAxISCg5ST0xFX01FTlRJT05FRBAEKlAKCExpbmtUeXBlEhQKEExJTktfVFlQRV9DQVVTQUwQABIWChJMSU5LX1RZUEVfUkVBQ1RJT04QARIWChJMSU5LX1RZUEVfVEhFTUFUSUMQAipOCglEaXJlY3Rpb24SFAoQRElSRUNUSU9OX0FfVE9fQhAAEhQKEERJUkVDVElPTl9CX1RPX0EQARIVChFESVJFQ1RJT05fVU5DTEVBUhACKjMKCEpvaW5LaW5kEhEKDUpPSU5fS0lORF9ORVcQABIUChBKT0lOX0tJTkRfSk9JTkVEEAEqtAEKClNvdXJjZUtpbmQSGwoXU09VUkNFX0tJTkRfVU5TUEVDSUZJRUQQABITCg9TT1VSQ0VfS0lORF9SU1MQARIVChFTT1VSQ0VfS0lORF9HREVMVBACEhQKEFNPVVJDRV9LSU5EX1VTR1MQAxIVChFTT1VSQ0VfS0lORF9HREFDUxAEEhUKEVNPVVJDRV9LSU5EX0VPTkVUEAUSGQoVU09VUkNFX0tJTkRfUkVMSUVGV0VCEAZCL1otZ2l0aHViLmNvbS9hbmtvamgvZG9yL2ludGVybmFsL3BiL2RvcnYxO2RvcnYxYgZwcm90bzM");
 
 /**
  * Location is one place attached to an article or story.
@@ -133,6 +133,19 @@ export type Article = Message<"dor.v1.Article"> & {
    * @generated from field: bool burst = 10;
    */
   burst: boolean;
+
+  /**
+   * Set only on article.placed; clean articles leave these at their zero
+   * values. Append-only so the existing publisher can still decode Article.
+   *
+   * @generated from field: string story_id = 11;
+   */
+  storyId: string;
+
+  /**
+   * @generated from field: dor.v1.JoinKind join = 12;
+   */
+  join: JoinKind;
 };
 
 /**
@@ -141,6 +154,163 @@ export type Article = Message<"dor.v1.Article"> & {
  */
 export const ArticleSchema: GenMessage<Article> = /*@__PURE__*/
   messageDesc(file_dor_v1_dor, 1);
+
+/**
+ * PlacedArticle is the plotter's output on article.place. It carries the
+ * article snapshot so the clusterer can join without a second read.
+ *
+ * @generated from message dor.v1.PlacedArticle
+ */
+export type PlacedArticle = Message<"dor.v1.PlacedArticle"> & {
+  /**
+   * @generated from field: dor.v1.Article article = 1;
+   */
+  article?: Article | undefined;
+
+  /**
+   * @generated from field: repeated dor.v1.Location locations = 2;
+   */
+  locations: Location[];
+
+  /**
+   * index into locations, 0 when global
+   *
+   * @generated from field: uint32 primary = 3;
+   */
+  primary: number;
+
+  /**
+   * @generated from field: bool multi_region = 4;
+   */
+  multiRegion: boolean;
+
+  /**
+   * a fallback path was used
+   *
+   * @generated from field: bool fallback = 5;
+   */
+  fallback: boolean;
+
+  /**
+   * no model/service; deterministic result only
+   *
+   * @generated from field: bool degraded = 6;
+   */
+  degraded: boolean;
+
+  /**
+   * jev, claude, gazetteer, hints, none
+   *
+   * @generated from field: string backend = 7;
+   */
+  backend: string;
+};
+
+/**
+ * Describes the message dor.v1.PlacedArticle.
+ * Use `create(PlacedArticleSchema)` to create a new message.
+ */
+export const PlacedArticleSchema: GenMessage<PlacedArticle> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 2);
+
+/**
+ * ClassifiedArticle is the classifier's output on article.class.
+ *
+ * @generated from message dor.v1.ClassifiedArticle
+ */
+export type ClassifiedArticle = Message<"dor.v1.ClassifiedArticle"> & {
+  /**
+   * @generated from field: dor.v1.Article article = 1;
+   */
+  article?: Article | undefined;
+
+  /**
+   * @generated from field: dor.v1.Category category = 2;
+   */
+  category: Category;
+
+  /**
+   * @generated from field: float confidence = 3;
+   */
+  confidence: number;
+
+  /**
+   * passed the configured threshold
+   *
+   * @generated from field: bool accepted = 4;
+   */
+  accepted: boolean;
+
+  /**
+   * @generated from field: bool fallback = 5;
+   */
+  fallback: boolean;
+
+  /**
+   * @generated from field: bool degraded = 6;
+   */
+  degraded: boolean;
+
+  /**
+   * @generated from field: string backend = 7;
+   */
+  backend: string;
+
+  /**
+   * @generated from field: string lang = 8;
+   */
+  lang: string;
+
+  /**
+   * @generated from field: repeated string entities = 9;
+   */
+  entities: string[];
+};
+
+/**
+ * Describes the message dor.v1.ClassifiedArticle.
+ * Use `create(ClassifiedArticleSchema)` to create a new message.
+ */
+export const ClassifiedArticleSchema: GenMessage<ClassifiedArticle> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 3);
+
+/**
+ * EmbeddedArticle is the embedder's output on article.vec.
+ *
+ * @generated from message dor.v1.EmbeddedArticle
+ */
+export type EmbeddedArticle = Message<"dor.v1.EmbeddedArticle"> & {
+  /**
+   * @generated from field: dor.v1.Article article = 1;
+   */
+  article?: Article | undefined;
+
+  /**
+   * 384-d
+   *
+   * @generated from field: repeated float vector = 2;
+   */
+  vector: number[];
+
+  /**
+   * @generated from field: string model = 3;
+   */
+  model: string;
+
+  /**
+   * deterministic hash fallback, not TEI
+   *
+   * @generated from field: bool degraded = 4;
+   */
+  degraded: boolean;
+};
+
+/**
+ * Describes the message dor.v1.EmbeddedArticle.
+ * Use `create(EmbeddedArticleSchema)` to create a new message.
+ */
+export const EmbeddedArticleSchema: GenMessage<EmbeddedArticle> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 4);
 
 /**
  * Story is a cluster of articles about one event.
@@ -206,7 +376,7 @@ export type Story = Message<"dor.v1.Story"> & {
  * Use `create(StorySchema)` to create a new message.
  */
 export const StorySchema: GenMessage<Story> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 2);
+  messageDesc(file_dor_v1_dor, 5);
 
 /**
  * Link is a typed relationship between two stories, with a < b.
@@ -257,7 +427,7 @@ export type Link = Message<"dor.v1.Link"> & {
  * Use `create(LinkSchema)` to create a new message.
  */
 export const LinkSchema: GenMessage<Link> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 3);
+  messageDesc(file_dor_v1_dor, 6);
 
 /**
  * LinkKey identifies a link without its mutable scores.
@@ -281,7 +451,7 @@ export type LinkKey = Message<"dor.v1.LinkKey"> & {
  * Use `create(LinkKeySchema)` to create a new message.
  */
 export const LinkKeySchema: GenMessage<LinkKey> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 4);
+  messageDesc(file_dor_v1_dor, 7);
 
 /**
  * AlertHit is a user alert firing for a story.
@@ -333,7 +503,7 @@ export type AlertHit = Message<"dor.v1.AlertHit"> & {
  * Use `create(AlertHitSchema)` to create a new message.
  */
 export const AlertHitSchema: GenMessage<AlertHit> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 5);
+  messageDesc(file_dor_v1_dor, 8);
 
 /**
  * WireRow is one row in the live wire.
@@ -394,7 +564,7 @@ export type WireRow = Message<"dor.v1.WireRow"> & {
  * Use `create(WireRowSchema)` to create a new message.
  */
 export const WireRowSchema: GenMessage<WireRow> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 6);
+  messageDesc(file_dor_v1_dor, 9);
 
 /**
  * Delta is one numbered change pushed to browsers.
@@ -454,7 +624,7 @@ export type Delta = Message<"dor.v1.Delta"> & {
  * Use `create(DeltaSchema)` to create a new message.
  */
 export const DeltaSchema: GenMessage<Delta> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 7);
+  messageDesc(file_dor_v1_dor, 10);
 
 /**
  * Snapshot is the full live state a client starts from.
@@ -490,7 +660,7 @@ export type Snapshot = Message<"dor.v1.Snapshot"> & {
  * Use `create(SnapshotSchema)` to create a new message.
  */
 export const SnapshotSchema: GenMessage<Snapshot> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 8);
+  messageDesc(file_dor_v1_dor, 11);
 
 /**
  * DeltaBatch carries deltas from a snapshot seq onwards.
@@ -509,7 +679,7 @@ export type DeltaBatch = Message<"dor.v1.DeltaBatch"> & {
  * Use `create(DeltaBatchSchema)` to create a new message.
  */
 export const DeltaBatchSchema: GenMessage<DeltaBatch> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 9);
+  messageDesc(file_dor_v1_dor, 12);
 
 /**
  * Resync tells a client to discard local state and start from a snapshot.
@@ -533,7 +703,7 @@ export type Resync = Message<"dor.v1.Resync"> & {
  * Use `create(ResyncSchema)` to create a new message.
  */
 export const ResyncSchema: GenMessage<Resync> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 10);
+  messageDesc(file_dor_v1_dor, 13);
 
 /**
  * ServerMessage is the envelope for everything the server sends.
@@ -570,7 +740,7 @@ export type ServerMessage = Message<"dor.v1.ServerMessage"> & {
  * Use `create(ServerMessageSchema)` to create a new message.
  */
 export const ServerMessageSchema: GenMessage<ServerMessage> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 11);
+  messageDesc(file_dor_v1_dor, 14);
 
 /**
  * Hello is the first client message.
@@ -594,7 +764,7 @@ export type Hello = Message<"dor.v1.Hello"> & {
  * Use `create(HelloSchema)` to create a new message.
  */
 export const HelloSchema: GenMessage<Hello> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 12);
+  messageDesc(file_dor_v1_dor, 15);
 
 /**
  * SetFilters replaces the client's wire filters.
@@ -628,7 +798,7 @@ export type SetFilters = Message<"dor.v1.SetFilters"> & {
  * Use `create(SetFiltersSchema)` to create a new message.
  */
 export const SetFiltersSchema: GenMessage<SetFilters> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 13);
+  messageDesc(file_dor_v1_dor, 16);
 
 /**
  * SetPrompts replaces the client's prompts. The server backfills 1 h.
@@ -647,7 +817,7 @@ export type SetPrompts = Message<"dor.v1.SetPrompts"> & {
  * Use `create(SetPromptsSchema)` to create a new message.
  */
 export const SetPromptsSchema: GenMessage<SetPrompts> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 14);
+  messageDesc(file_dor_v1_dor, 17);
 
 /**
  * Focus raises prefetch priority for one story.
@@ -666,7 +836,7 @@ export type Focus = Message<"dor.v1.Focus"> & {
  * Use `create(FocusSchema)` to create a new message.
  */
 export const FocusSchema: GenMessage<Focus> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 15);
+  messageDesc(file_dor_v1_dor, 18);
 
 /**
  * GetText asks for lazy text (story briefs and link "why").
@@ -690,7 +860,7 @@ export type GetText = Message<"dor.v1.GetText"> & {
  * Use `create(GetTextSchema)` to create a new message.
  */
 export const GetTextSchema: GenMessage<GetText> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 16);
+  messageDesc(file_dor_v1_dor, 19);
 
 /**
  * Ack acknowledges the last applied delta seq.
@@ -709,7 +879,7 @@ export type Ack = Message<"dor.v1.Ack"> & {
  * Use `create(AckSchema)` to create a new message.
  */
 export const AckSchema: GenMessage<Ack> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 17);
+  messageDesc(file_dor_v1_dor, 20);
 
 /**
  * ClientMessage is the envelope for everything the client sends.
@@ -764,7 +934,7 @@ export type ClientMessage = Message<"dor.v1.ClientMessage"> & {
  * Use `create(ClientMessageSchema)` to create a new message.
  */
 export const ClientMessageSchema: GenMessage<ClientMessage> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 18);
+  messageDesc(file_dor_v1_dor, 21);
 
 /**
  * RawHints are the fetcher's untrusted location and severity signals. The
@@ -863,7 +1033,7 @@ export type RawHints = Message<"dor.v1.RawHints"> & {
  * Use `create(RawHintsSchema)` to create a new message.
  */
 export const RawHintsSchema: GenMessage<RawHints> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 19);
+  messageDesc(file_dor_v1_dor, 22);
 
 /**
  * RawArticle is one fetched item before normalization. The fetchers write it
@@ -948,7 +1118,7 @@ export type RawArticle = Message<"dor.v1.RawArticle"> & {
  * Use `create(RawArticleSchema)` to create a new message.
  */
 export const RawArticleSchema: GenMessage<RawArticle> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 20);
+  messageDesc(file_dor_v1_dor, 23);
 
 /**
  * RecordFrame is one raw pipeline message inside a record-mode file. See
@@ -992,7 +1162,7 @@ export type RecordFrame = Message<"dor.v1.RecordFrame"> & {
  * Use `create(RecordFrameSchema)` to create a new message.
  */
 export const RecordFrameSchema: GenMessage<RecordFrame> = /*@__PURE__*/
-  messageDesc(file_dor_v1_dor, 21);
+  messageDesc(file_dor_v1_dor, 24);
 
 /**
  * Category is the topic of an article or story.

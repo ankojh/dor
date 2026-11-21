@@ -8,7 +8,11 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ankojh/dor/config"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/decide"
+	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/llm"
 )
 
 // EchoDurable is the durable consumer name of the sample echo agent.
@@ -52,6 +56,22 @@ func EchoOutputMsgID(inputID string) string {
 // always registered; --agents selects what runs.
 type Deps struct {
 	ArticleSink ArticleSink
+	StorySink   StorySink
+
+	// Gazetteer and Photon are optional; the plotter marks a deterministic
+	// fallback when either is absent.
+	Gazetteer *geo.Gazetteer
+	Photon    *geo.Photon
+
+	// Decider and Enricher are the real jev/Claude clients. Nil means no
+	// paid call is possible and the agent uses its explicit fallback.
+	Decider    decide.Decider
+	Enricher   *llm.Client
+	Thresholds config.Thresholds
+
+	// Embedding is the remote TEI client; nil or an error produces a degraded
+	// deterministic vector.
+	Embedding EmbeddingClient
 }
 
 func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config) (*Registry, error) {
@@ -91,6 +111,35 @@ func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *sl
 	}
 	if err := registry.Register(normalize); err != nil {
 
+		return nil, err
+	}
+
+	plot, err := NewPlotter(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(plot); err != nil {
+		return nil, err
+	}
+	classify, err := NewClassifier(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(classify); err != nil {
+		return nil, err
+	}
+	embed, err := NewEmbedder(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(embed); err != nil {
+		return nil, err
+	}
+	cluster, err := NewClusterer(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(cluster); err != nil {
 		return nil, err
 	}
 

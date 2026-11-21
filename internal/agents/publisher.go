@@ -291,11 +291,12 @@ func (c *publisherCore) onArticle(a *dorv1.Article) {
 	}
 	wire := &dorv1.WireRow{
 		ArticleId:    a.Id,
+		StoryId:      a.StoryId,
 		Title:        a.Title,
 		Source:       a.SourceId,
 		Category:     dorv1.Category_CATEGORY_OTHER,
 		At:           a.PublishedAt,
-		Join:         dorv1.JoinKind_JOIN_KIND_NEW,
+		Join:         a.Join,
 		PromptScores: nil,
 	}
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})

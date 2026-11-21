@@ -681,3 +681,36 @@ are appended to the proto `Article` for downstream plotters.
 drops and counts when full. A background goroutine flushes batches of 100 (or
 500 ms) and retries transient Postgres errors. Upserts are idempotent by
 `(article id, created_at)` and `(article_id, place_id, role)`.
+
+
+## Enrichment and stories (M2)
+
+**Three lanes run in parallel from `article.clean`.** `plot` writes
+`article.place`, `classify` writes `article.class`, and `embed` writes
+`article.vec`. Each message carries the clean `Article` snapshot, so the
+clusterer can join without a second read. All three use their own durable
+consumer and bounded concurrency.
+
+**The join is a KV deadline, not a blocking wait.** Partial results are stored
+at `joins join.<articleID>`; the clusterer is the single story writer and
+processes an article when all three lanes are present or after 2 s with what
+arrived. The 30 s TTL bucket is also swept after a restart. The clusterer
+never holds a handler for the deadline.
+
+**Fallbacks are explicitly marked.** Hazard/GDELT hints with coordinates are
+the fast path. Without a loaded Gazetteer or Photon, the plotter uses hints,
+dateline and country centroids and sets `degraded`/`fallback`; with no model it
+never invents a confident city. Without TEI the embedder emits a deterministic
+384-d feature hash marked `degraded=true`. Without jev/Claude the classifier
+uses keyword rules, also marked degraded.
+
+**Live state uses dots only.** The clusterer writes
+`live_state story.<id>` as binary `Story`, `storymeta.<id>` as JSON with
+`article_ids`, `source_ids`, `embedding`, `entities`, `first_seen`, `updated_at`,
+`article.<id>` as binary `Article` for the editor, and `storymap.<articleID>` as
+the story id. Frontend `Story` deltas never carry the 384-d vector or entities.
+`story.changed.<shard>` publishes the full current `Story`; `article.placed`
+stays an `Article` with append-only `story_id=11` and `join=12`. Stories are
+one per event, merge on similarity/time/place guards, keep the primary rule
+venue → dateline → first-named party, cap drawn parties at six and expire after
+48 h without updates. Heat is refreshed on merge and expires with the state.

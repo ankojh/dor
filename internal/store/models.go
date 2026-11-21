@@ -50,3 +50,22 @@ type SourceRecord struct {
 	Notes     string
 	Health    []byte // JSON object; empty becomes {}
 }
+
+// StoryRecord is one clusterer story update for the durable store. Centroid is
+// the 384-d article centroid; the writer formats it for pgvector.
+type StoryRecord struct {
+	ID          string
+	Title       string
+	Brief       string
+	Category    int16
+	PrimaryLoc  string
+	SourceCount int
+	Heat        float64
+	Centroid    []float32
+	Entities    []string
+	FirstSeen   time.Time
+	UpdatedAt   time.Time
+	ExpiresAt   time.Time
+	Locations   []LocationRecord
+	ArticleIDs  []string
+}

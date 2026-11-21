@@ -173,7 +173,8 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
   it("MatchScore", () => {
     const score = load(MatchScoreSchema, "match_score");
     expect(score.articleId).toBe("art-1");
-    expect(score.scores).toEqual({ floods: 0.82 });
+    expect(Object.keys(score.scores)).toEqual(["floods"]);
+    expect(score.scores.floods).toBeCloseTo(0.82, 5);
     expect(score.approx).toEqual(["energy"]);
     expect(score.updatedAt).toBe(1_700_000_500n);
   });

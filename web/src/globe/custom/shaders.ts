@@ -87,6 +87,10 @@ uniform float uStoryTexWidth;
 uniform float uLinkTexWidth;
 uniform float uHasFocus;
 uniform float uFloor;
+uniform float uDropGlow;
+uniform float uDropPulses;
+uniform float uDropThematic;
+uniform float uHeatOn;
 
 vec4 dorProject(vec2 hi, vec2 lo, float elevation) {
   if (uGlobe > 0.5) {
@@ -155,7 +159,12 @@ void main() {
   // World view: keep the hot stories, fade the long tail so 5k dots do not
   // turn the globe into a white ball.
   float lowZoom = 1.0 - smoothstep(2.5, 6.0, uZoom);
-  alpha *= mix(1.0, 0.5 + 0.5 * smoothstep(0.2, 0.6, story.y), lowZoom);
+  float heat = story.y * uHeatOn;
+  alpha *= mix(1.0, 0.5 + 0.5 * smoothstep(0.2, 0.6, heat), lowZoom);
+  // Stories cool slowly; a brand-new story fades in over ~1.2 s.
+  float storyAge = max(0.0, uTime - story.z);
+  alpha *= mix(0.55, 1.0, exp(-storyAge / 3600.0));
+  alpha *= mix(0.25, 1.0, smoothstep(0.0, 1.2, storyAge));
 
   vec4 clip = dorProject(aMercHi, aMercLo, 4.0);
   // story.x is the size factor; a freed runtime slot is zero.
@@ -169,7 +178,7 @@ void main() {
   vLocal = aCorner * quad;
   vRadius = radius;
   vAlpha = alpha;
-  vHeat = story.y;
+  vHeat = heat;
   vPhase = fract(sin(aIndex * 12.9898) * 43758.5453);
   vFocused = focused;
   vLive = exp(-max(0.0, uTime - story.z) / 6.0);
@@ -182,6 +191,7 @@ precision highp float;
 ${GLSL_CONSTANTS}
 
 uniform float uTime;
+uniform float uDropGlow;
 
 in vec2 vLocal;
 in float vRadius;
@@ -218,7 +228,7 @@ void main() {
   float alpha =
     core * vAlpha * 0.92 +
     white * vAlpha * 0.82 +
-    glow * 0.1 * vAlpha +
+    glow * 0.1 * vAlpha * (1.0 - uDropGlow) +
     ring * 0.22 * vLive * vAlpha +
     bracket * 0.9;
   if (alpha < 0.004) discard;
@@ -311,7 +321,8 @@ void main() {
   vDashed = step(1.5, aType);
   vReaction = step(0.5, aType) * step(aType, 1.5);
   vPulse = (1.0 - vDashed) * (1.0 - second) * step(DOR_PULSE_1, strength) *
-    (1.0 - (1.0 - step(0.5, state)) * uHasFocus);
+    (1.0 - (1.0 - step(0.5, state)) * uHasFocus) * (1.0 - uDropPulses);
+  if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
   vSeed = fract(sin(aLink * 3.71) * 43758.5453);
   vColor = uLinkColors[int(aType)];
 }

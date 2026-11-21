@@ -56,6 +56,9 @@ export type HudLink = {
   place: string;
   type: number;
   strength: number;
+  direction?: number;
+  confidence?: number;
+  distanceKm?: number;
   /** Similarity-only relation, not confirmed by the relation judge. */
   unverified?: boolean;
 };
@@ -115,8 +118,11 @@ export type LinkArrays = {
   focusAt: Float32Array;
   color: Uint8Array;
   width: Float32Array;
-  /** Optional: 1 when a real link is similarity-only/unverified. */
+  /** Optional real-protocol metadata used by the link panel/popover. */
   unverified?: Uint8Array;
+  direction?: Uint8Array;
+  confidence?: Float32Array;
+  distanceKm?: Float32Array;
 };
 
 export type ArcArrays = {

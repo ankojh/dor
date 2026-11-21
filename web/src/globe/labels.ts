@@ -71,6 +71,11 @@ export class StoryLabels {
     this.ready = true;
   }
 
+  setVisible(visible: boolean): void {
+    if (!this.ready) return;
+    this.map.setLayoutProperty(STORY_LABEL_LAYER, "visibility", visible ? "visible" : "none");
+  }
+
   setFocus(focus: HudFocus | null): void {
     if (!this.ready) return;
     if (!focus) {

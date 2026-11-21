@@ -105,6 +105,10 @@ const COMMON_UNIFORMS = [
   "uFloor",
   "uStoryTexWidth",
   "uLinkTexWidth",
+  "uDropGlow",
+  "uDropPulses",
+  "uDropThematic",
+  "uHeatOn",
 ];
 
 /**
@@ -124,6 +128,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
   private init: FakeInit | null = null;
   private hasFocus = false;
   private floor = DEFAULT_STRENGTH_FLOOR;
+  private linesVisible = true;
+  private tethersVisible = true;
+  private heatVisible = true;
+  private quality = 0;
 
   private dotProgram: ProgramInfo | null = null;
   private arcProgram: ProgramInfo | null = null;
@@ -152,6 +160,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     floor: DEFAULT_STRENGTH_FLOOR,
     storyTexWidth: 2048,
     linkTexWidth: 2048,
+    dropGlow: 0,
+    dropPulses: 0,
+    dropThematic: 0,
+    heatOn: 1,
     anchorHiX: 0,
     anchorHiY: 0,
     anchorLoX: 0,
@@ -385,6 +397,14 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     if (storyWidth) gl.uniform1f(storyWidth, state.storyTexWidth);
     const linkWidth = set("uLinkTexWidth");
     if (linkWidth) gl.uniform1f(linkWidth, state.linkTexWidth);
+    const dropGlow = set("uDropGlow");
+    if (dropGlow) gl.uniform1f(dropGlow, state.dropGlow);
+    const dropPulses = set("uDropPulses");
+    if (dropPulses) gl.uniform1f(dropPulses, state.dropPulses);
+    const dropThematic = set("uDropThematic");
+    if (dropThematic) gl.uniform1f(dropThematic, state.dropThematic);
+    const heatOn = set("uHeatOn");
+    if (heatOn) gl.uniform1f(heatOn, state.heatOn);
   }
 
   stream(patch: StreamPatch): void {
@@ -417,6 +437,28 @@ export class CustomGlobeLayer implements CustomLayerInterface {
 
   setStrengthFloor(floor: number): void {
     this.floor = floor;
+    this.map?.triggerRepaint();
+  }
+
+  setLinesVisible(visible: boolean): void {
+    this.linesVisible = visible;
+    this.map?.triggerRepaint();
+  }
+
+  setTethersVisible(visible: boolean): void {
+    this.tethersVisible = visible;
+    this.map?.triggerRepaint();
+  }
+
+  setHeatVisible(visible: boolean): void {
+    this.heatVisible = visible;
+    this.map?.triggerRepaint();
+  }
+
+  /** 0 = full, 1 = drop glow, 2 = drop pulses, 3 = drop thematic arcs. */
+  setQuality(level: number): void {
+    this.quality = Math.max(0, Math.min(3, Math.round(level)));
+    this.map?.triggerRepaint();
   }
 
   /**
@@ -581,6 +623,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     const widths = data.textureWidths;
     state.storyTexWidth = widths.story;
     state.linkTexWidth = widths.link;
+    state.dropGlow = this.quality >= 1 ? 1 : 0;
+    state.dropPulses = this.quality >= 2 ? 1 : 0;
+    state.dropThematic = this.quality >= 3 ? 1 : 0;
+    state.heatOn = this.heatVisible ? 1 : 0;
 
     gl.enable(gl.BLEND);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -603,20 +649,30 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, data.rippleMesh.instanceCount);
     }
 
-    if (this.tetherProgram && data.tetherMesh && data.tetherMesh.instanceCount > 0) {
+    if (
+      this.tethersVisible &&
+      this.tetherProgram &&
+      data.tetherMesh &&
+      data.tetherMesh.instanceCount > 0
+    ) {
       gl.useProgram(this.tetherProgram.program);
       this.applyCommon(gl, this.tetherProgram);
       gl.bindVertexArray(data.tetherMesh.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, data.tetherMesh.instanceCount);
     }
-    if (this.ringProgram && data.ringMesh && data.ringMesh.instanceCount > 0) {
+    if (
+      this.tethersVisible &&
+      this.ringProgram &&
+      data.ringMesh &&
+      data.ringMesh.instanceCount > 0
+    ) {
       gl.useProgram(this.ringProgram.program);
       this.applyCommon(gl, this.ringProgram);
       gl.bindVertexArray(data.ringMesh.vao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, data.ringMesh.instanceCount);
     }
 
-    if (this.arcProgram) {
+    if (this.linesVisible && this.arcProgram) {
       gl.useProgram(this.arcProgram.program);
       this.applyCommon(gl, this.arcProgram);
       gl.activeTexture(gl.TEXTURE0);

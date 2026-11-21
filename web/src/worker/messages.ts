@@ -1,4 +1,4 @@
-import type { Delta, Link, Story } from "../gen/dor/v1/dor_pb";
+import type { Delta, Link, Story, WireRow } from "../gen/dor/v1/dor_pb";
 
 /** Kept for the old worker-probe test; no longer used by the app. */
 export type WorkerReady = {
@@ -35,6 +35,8 @@ export type WorkerSnapshot = {
   builtAt: number;
   stories: Story[];
   links: Link[];
+  /** Cold-start wire history from Snapshot.recent_wire; no seq semantics. */
+  recentWire?: WireRow[];
 };
 
 export type WorkerDeltas = {

@@ -1,0 +1,48 @@
+name: eval
+
+# Model evaluation. A manual run may spend money and use live keys; a push run
+# is always mock-only and gets no secrets, so it cannot spend or rewrite
+# thresholds.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "internal/decide/**"
+      - "internal/llm/**"
+      - "internal/budget/**"
+      - "eval/**"
+      - "config/**"
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit tests
+        run: go test ./internal/decide/... ./internal/llm/... ./internal/budget/... ./eval/... ./config/...
+      - name: "Eval (push: mock only, no secrets)"
+        if: github.event_name == 'push'
+        run: go run ./eval/cmd/eval -mock
+      - name: "Eval (manual: live when secrets exist)"
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: make eval
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            eval/report.md
+            eval/report.json
+          if-no-files-found: warn

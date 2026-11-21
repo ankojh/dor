@@ -12,8 +12,9 @@ internal/agents/         agent interface, Base, registry, runner, metrics, traci
                          and the dev echo agent
 internal/bus/            embedded NATS, subjects, stream/KV, durable consumers,
                          idempotent publish
-internal/decide/         decide() interface and jev client          (later)
-internal/llm/            Claude client, prompts, structured outputs (later)
+internal/decide/         decide() interface, jev client, question builders
+internal/llm/            Claude client, prompts, structured outputs
+internal/budget/         model token buckets, daily spend cap, shed order
 internal/geo/            GeoNames, Photon, H3                        (later)
 internal/store/          pgx, migrations, batch writers              (later)
 internal/gateway/        WebSocket gateway, snapshot, resume        (later)
@@ -28,7 +29,8 @@ web/                     Vite + SolidJS + TypeScript
 tools/probe/             dev publisher/counter used by test-echo-restart
 tools/proto-check.sh     proto drift check used by CI
 scripts/                 dev/acceptance scripts (test-echo-restart.sh)
-eval/                    labelled sets and eval runner (later)
+eval/                    labelled sets, labelling CLI, eval runner
+config/                  thresholds, model pins and budget YAML
 deploy/docker-compose.yml  Postgres/pgvector, TEI, Photon profile
 deploy/postgres/init.sql   creates the vector extension on a fresh volume
 docs/
@@ -157,6 +159,7 @@ KV buckets (created by the provisioning owner):
 | `seen` | 48 h | dedupe hashes |
 | `joins` | 30 s | partial cluster joins with a deadline |
 | `budgets` | 1 h | short-lived token buckets only; never daily spend counters |
+| `spend` | 48 h | daily model spend, keyed by UTC day (`daily.YYYY-MM-DD`) |
 | `live_state` | 48 h | hot stories/links for snapshot rebuilds |
 
 ## Adding an agent
@@ -273,3 +276,31 @@ that line. Do not put data work on the main thread.
 because its index is large; `make dev-photon` starts it with an Andorra extract
 by default (`PHOTON_REGION` overrides). All three have healthchecks and every
 published port is bound to `127.0.0.1` only.
+
+## Models, budgets and eval (M0·3)
+
+| Package / dir | What it owns |
+| --- | --- |
+| `config/` | `thresholds.yaml`, `models.yaml`, `budget.yaml` and their loaders/validators |
+| `internal/decide/` | the `decide()` interface, jev client, the four question builders and the code-side combinations |
+| `internal/budget/` | token buckets, the daily USD cap, the shed order and the `budget`/`spend` KV adapters |
+| `internal/llm/` | Claude client, prompts, structured-output schemas and the mock Messages endpoint |
+| `eval/` | candidates, labels, labelling CLI, metrics, threshold selection and the report |
+
+`decide` and `llm` both take a budget hook and fail closed: a missing key, a
+refusal, an unknown answer type or a budget denial is never a negative answer.
+The report is produced by `make eval`; without keys it is the mock report and
+must keep its `MOCK BACKENDS — NOT A MEASUREMENT` first line. `make llm-smoke`
+verifies prompt caching live and skips without a key.
+
+Commands added:
+
+| Command | What it does |
+| --- | --- |
+| `make eval` | run classify/plot/relate/match for jev and Claude; writes `eval/report.md` and `eval/report.json` |
+| `make eval-collect` | rebuild `eval/data` candidates from public RSS (network; review the diff) |
+| `make eval-label` | interactive labelling; requires `LABELER=human:<name>` or `agent:<model>` |
+| `make llm-smoke` | two identical Haiku calls; prints the second cache read |
+
+KV bucket added by M0·3: `spend` (48 h TTL) for daily spend, keyed by UTC day.
+`budgets` remains short-lived token buckets only.

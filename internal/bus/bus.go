@@ -40,17 +40,19 @@ const (
 
 // KV bucket names and their TTLs. Values are JSON or protobuf blobs written by
 // agents; the bus only owns the bucket lifecycle. `budgets` is for short-lived
-// rate-limit buckets, never for daily spend counters (M0·3 persists those
-// durably).
+// rate-limit buckets; daily spend counters live in `spend`, which must outlive
+// idle hours (M0·3).
 const (
 	KVBucketSeen      = "seen"
 	KVBucketJoins     = "joins"
 	KVBucketBudgets   = "budgets"
+	KVBucketSpend     = "spend"
 	KVBucketLiveState = "live_state"
 
 	KVSeenTTL      = 48 * time.Hour
 	KVJoinsTTL     = 30 * time.Second
 	KVBudgetsTTL   = time.Hour
+	KVSpendTTL     = 48 * time.Hour
 	KVLiveStateTTL = 48 * time.Hour
 )
 
@@ -360,6 +362,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketSeen, KVSeenTTL},
 		{KVBucketJoins, KVJoinsTTL},
 		{KVBucketBudgets, KVBudgetsTTL},
+		{KVBucketSpend, KVSpendTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
 	}
 }

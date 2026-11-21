@@ -1,0 +1,45 @@
+# Decision thresholds, loaded by internal/decide.
+#
+# provisional: true means these are the plan's starting values, not values
+# selected from a human-labelled eval. M0·3 could only seed ~30 articles and
+# ~30 pairs with agent labels; the full human labelling is a follow-up.
+#
+# The selection rule is implemented and tested (eval/metrics.go): pick, per
+# question, the lowest threshold where accepted cases reach the target
+# accuracy, then require the projected Claude fallback rate to stay under
+# target.claude_fallback_rate. A live `make eval` rewrites this file.
+version: 1
+provisional: true
+label_source: "agent:deepseek-v4.1-flash (provisional)"
+sample_size: 80
+samples:
+  articles: 30
+  pairs: 30
+  match: 20
+selected_at: "2026-11-20"
+
+classify:
+  # minimum P(category) for jev's answer to be accepted
+  accept: 0.70
+
+plot:
+  # minimum P(primary candidate) for the place pick to be accepted
+  primary: 0.60
+  # minimum P(party) for a candidate to count as a party
+  party: 0.65
+
+relate:
+  # minimum P(related) for a pair to be judged related at all
+  accept: 0.60
+
+match:
+  # minimum P(match) for an alert hit (strict on purpose)
+  strictness: 0.80
+
+targets:
+  # place picks accepted by threshold must be at least this accurate
+  place_pick_accuracy: 0.90
+  # relation types accepted by threshold must be at least this accurate
+  relation_type_accuracy: 0.85
+  # share of articles falling back to Claude must stay under this
+  claude_fallback_rate: 0.15

@@ -1,0 +1,33 @@
+# Budget limits, loaded by internal/budget.
+#
+# Two layers:
+#   1. A token bucket per API, kept in the `budgets` NATS KV bucket (1 h TTL,
+#      short-lived by design; a missing key simply starts full).
+#   2. A daily spend counter keyed by UTC day in the `spend` NATS KV bucket
+#      (48 h TTL), so the cap survives idle hours and process restarts.
+#
+# The hard cap denies at 100%. Short of it, the shed order applies: story
+# briefs at shed_brief_at, "why" prefetch at shed_why_at, thematic links at
+# shed_thematic_at. Each stage is configurable.
+version: 1
+daily_usd: 5.00
+# `make eval` refuses to start a live run whose estimate exceeds this.
+# 0 means deny live evals; it never falls back to daily_usd.
+eval_usd: 2.00
+shed_brief_at: 0.80
+shed_why_at: 0.90
+shed_thematic_at: 0.95
+# Reservations older than this are eligible for best-effort collection and stay
+# charged at the estimate. Aborted updates can retain expired entries until a
+# later successful write; completed reservations do not accumulate.
+pending_ttl: 15m
+token_buckets:
+  jev:
+    capacity: 200000
+    refill_per_second: 4000
+  claude-haiku:
+    capacity: 400000
+    refill_per_second: 8000
+  claude-opus:
+    capacity: 200000
+    refill_per_second: 2000

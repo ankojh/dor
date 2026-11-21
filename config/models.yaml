@@ -1,0 +1,53 @@
+# Model pins, endpoints and the price schedule used for budget estimates.
+#
+# The jev model is pinned on purpose. The floating alias ~typesafe/jev-latest
+# is rejected by internal/decide: thresholds are model-specific and must be
+# re-tuned per pinned version (docs/jev-api.md).
+#
+# Claude prices are config placeholders used to estimate spend before a call
+# and to report cost per item. They are NOT authoritative; check the current
+# price list before a paid run. jev reports usage.cost from the API, which is
+# authoritative for jev. Claude cached input is priced at the documented 0.1x
+# (read) and 1.25x (write) multiples of input unless
+# cache_read_per_mtok / cache_write_per_mtok override them. The result is an
+# estimate, not an invoice.
+version: 1
+
+jev:
+  model: typesafe/jev-1.14
+  # OpenRouter is the supported live path. TypeSafe direct is NOT implemented:
+  # a TYPESAFE_API_KEY needs DOR_JEV_BASE_URL, DOR_JEV_PATH and
+  # DOR_JEV_REQUEST_SHAPE=openrouter-decisions, and fails early otherwise. The
+  # direct /v1/systemone shape is unknown and is not guessed.
+  base_url: https://openrouter.ai
+  path: /api/alpha/decisions
+  timeout: 30s
+  max_retries: 4
+  min_backoff: 250ms
+  max_backoff: 8s
+  # Used only to estimate spend before the call. Live jev cost comes from
+  # usage.cost in the response.
+  price:
+    input_per_mtok: 0.10
+    output_per_mtok: 0.00
+    provisional: true
+
+claude:
+  haiku_model: claude-haiku-5-5
+  opus_model: claude-opus-5-5
+  # Both models get an explicit effort. Opus 5.5 cannot disable thinking, so
+  # effort (not thinking.budget_tokens) controls cost.
+  effort: low
+  timeout: 120s
+  max_retries: 4
+  min_backoff: 500ms
+  max_backoff: 15s
+  price:
+    claude-haiku-5-5:
+      input_per_mtok: 1.00
+      output_per_mtok: 5.00
+      provisional: true
+    claude-opus-5-5:
+      input_per_mtok: 15.00
+      output_per_mtok: 75.00
+      provisional: true

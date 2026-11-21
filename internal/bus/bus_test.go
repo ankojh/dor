@@ -116,6 +116,7 @@ func TestStreamAndBuckets(t *testing.T) {
 		bus.KVBucketSeen:      bus.KVSeenTTL,
 		bus.KVBucketJoins:     bus.KVJoinsTTL,
 		bus.KVBucketBudgets:   bus.KVBudgetsTTL,
+		bus.KVBucketSpend:     bus.KVSpendTTL,
 		bus.KVBucketLiveState: bus.KVLiveStateTTL,
 	}
 	for bucket, ttl := range wantTTL {

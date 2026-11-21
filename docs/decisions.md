@@ -115,8 +115,8 @@ metrics agree on the delay.
 
 **KV TTLs.** `seen` 48 h (dedupe window), `joins` 30 s (partial joins with a
 ~2 s deadline), `budgets` 1 h (short-lived token buckets only; **daily spend
-counters must not live here** and M0·3 must persist them durably), `live_state`
-48 h (snapshot rebuilds). TTLs are constants in `internal/bus/bus.go` for now;
+counters must not live here**), `spend` 48 h (daily model spend, added by
+M0·3), `live_state` 48 h (snapshot rebuilds). TTLs are constants in `internal/bus/bus.go` for now;
 a later config ticket can expose them.
 
 **Subject shard function.** `StoryShard` is FNV-1a 32-bit mod 16, exactly as
@@ -291,3 +291,190 @@ healthy.
   backoff, cooperative-handler shutdown cancellation, retry-wait lag, component
   URL redaction, throughput, ordered Terminal unblocking, and same-durable crash
   dedupe.
+
+## Models and eval (M0·3)
+
+**jev is pinned, fail-closed.** `config/models.yaml` pins `typesafe/jev-1.14`;
+`config.ValidateModelPin` rejects `~typesafe/jev-latest` and any id without a
+version suffix. A response records the served dated snapshot (`model`). A
+refusal, a missing answer, a missing key or an unknown answer type is "not
+answered" and never a negative. Thresholds are model-specific and are re-tuned
+per pinned release.
+
+**All jev meaning lives in instructions and criteria.** Question keys are never
+assumed to reach the model. The four builders in `internal/decide` put the
+question, the option definitions and the publisher text in `instructions` /
+`criteria`, and append the documented prompt-injection guard to every
+instruction that quotes publisher or user text. Combinations happen in code:
+type only if related, precision and parties only if the primary place is
+accepted, strength = score/3 × P(related) nudged by entity Jaccard, tiers
+0.3 / 0.5 / 0.75.
+
+**Budgets have two layers.** Short-lived token buckets per API live in the
+`budgets` KV bucket (1 h TTL). Daily spend lives in the new `spend` bucket
+(48 h TTL) keyed `daily.YYYY-MM-DD` in UTC, so the cap survives idle hours and
+restarts; a process restart does not reset the day. Admission reserves the
+estimated dollars and tokens and returns a `budget.Reservation`; `Record`
+reconciles it. The shed order is briefs at 80%, why prefetch at 90% and thematic
+links at 95% of `daily_usd`, with a hard deny at 100%; each threshold is
+configurable. `make eval` uses `budget.NewMemory` with `eval_usd` as the cap, so
+a paid run cannot exceed the eval budget; `eval_usd: 0` denies live evals. KV
+updates are CAS on the bucket revision, so multiple processes no longer lose
+updates.
+
+**Claude goes through the beta Messages endpoint for both models.** The SDK is
+`github.com/anthropics/anthropic-sdk-go/v2`; model ids are plain strings. The
+beta endpoint is used even for Haiku so structured outputs, effort and the
+server-side fallback share one code path. Effort is explicit (`low`) on both
+models. Opus jobs send `fallbacks: "default"` with the
+`server-side-fallback-2026-07-01` beta header; Haiku job builders never set
+fallbacks. No thinking budget, no disabled thinking, no assistant prefill and no
+forced tool choice. `stop_reason` is checked before content: `refusal` reads
+`stop_details`, `max_tokens` is a typed error, anything unexpected is a typed
+error. Retries are ours (`option.WithMaxRetries(0)`): 429/5xx/transport with
+jittered backoff, never 400/401/403/404. The budget is checked before every
+attempt.
+
+**Prompt caching is designed, not assumed.** Every job has one byte-stable
+system block with `cache_control: ephemeral` on it; the volatile item text is
+only in the user message, and schemas are marshalled from deterministic maps.
+Each production prompt is >3 KB (about 770+ tokens by the conservative byte/4
+estimate), above the 512-token model minimum. Usage logs and eval tables record
+`cache_read_input_tokens` and `cache_creation_input_tokens`. Live verification
+is `make llm-smoke`; without a key it prints `skipped: no ANTHROPIC_API_KEY`.
+The mock Messages endpoint simulates cache reads from a prefix hash, which
+proves the plumbing, not the real cache.
+
+**Eval labels are honest by construction.** The labelling CLI requires
+`--labeler human:<name>` or `agent:<model>`. Agent labels default to
+`provisional: true`; a non-provisional label whose labeler is not `human:` is
+rejected by the loader. The committed seed is 30 articles and 30 pairs labelled
+by `agent:deepseek-v4.1-flash` and marked provisional. The ~300 + ~300 human
+labelling is a user follow-up; `eval/README.md` documents the flow. A pair that
+is same-event coverage by two outlets is labelled `duplicate: true` and excluded
+from the relation metrics, because clustering handles it in production.
+
+**The eval gazetteer is deliberately minimal.** It matches canonical GeoNames
+`cities15000` names plus country names, title matches first, with a
+capitalisation requirement that removes the worst alternate-name collisions.
+It is not a geocoder and has low recall for regions and for places not named
+exactly. M2·1 replaces it; the plot numbers are bounded by its candidate recall.
+The downloaded data lives in `eval/data/.cache/geonames` (gitignored).
+
+**Match labels are derived.** `match.candidates.jsonl` is generated from the
+seeded article categories: one prompt from the article's category (relevant)
+and one deliberately distant category (irrelevant), both marked
+`derived: true`. It is a smoke set for the match question, not a tuned alert
+corpus.
+
+**Threshold selection is code, not a spreadsheet.** `eval.SelectThresholds`
+picks the lowest threshold on a 0.50–0.95 grid where accepted place picks reach
+90% or relation types reach 85%, with at least 10 accepted cases. The classify
+threshold is then chosen as the lowest value that keeps the projected union
+fallback rate under 15%. A live run writes `config/thresholds.yaml`. A mock run
+never selects and keeps the plan's starting values (classify 0.70, plot primary
+0.60, party 0.65, relate 0.60, match 0.80), marked provisional.
+
+**Mock mode exercises the real clients.** `make eval` without
+`OPENROUTER_API_KEY` / `TYPESAFE_API_KEY` / `ANTHROPIC_API_KEY` starts an
+in-process fake jev endpoint and a fake Claude Messages endpoint, then points
+the real HTTP/SDK clients at them. The report's first line is
+`MOCK BACKENDS — NOT A MEASUREMENT`, and it says so again in the caveats. This
+is plumbing evidence only; it is never used to claim accuracy or to change a
+threshold. The Claude price schedule in `config/models.yaml` is a provisional
+estimate (the API returns tokens, not money); jev cost is `usage.cost` from the
+response.
+
+**Bus change:** `bus.KVBucketSpend` (`spend`, 48 h TTL) is new in M0·3 and is
+the only addition to provisioning. M1·1 also touches agents/sources; this is
+additive and does not change existing bucket policies.
+
+## M0·3 fixup 1 (review findings)
+
+**Wire schemas are sanitized and validated in code.** Structured outputs reject
+JSON-Schema keywords such as `maxItems`, `maxLength`, `minimum` and `maximum`.
+`llm.ValidateSchema` is the fail-closed gate: it accepts only the deliberately
+narrow contract (six types, closed objects with every property required,
+non-empty scalar enums, and the constraints handled locally), and rejects
+`format`, `const`, `multipleOf`, `allOf`/`anyOf`/`oneOf`/`not`, `$ref`/`$defs`
+and open objects. `llm.SanitizeSchema` strips the handled constraints before the
+SDK call and moves them into the property description; `llm.ValidateValue`
+checks the original constraints after decoding and returns a typed
+`*llm.SchemaError`. Discrete strength is an integer enum `[0,1,2,3]`. The mock
+Messages server rejects unsupported keywords and invalid structure with a 400,
+like the real API. A wire test covers all seven real job builders.
+
+**Budgets are atomic and exactly-once.** `Check` reserves the estimated USD in
+the daily counter and the estimated tokens in the API bucket, and returns a
+`budget.Reservation`. The daily document and each token-bucket document carry a
+`pending` map keyed by reservation id. `Record` removes the daily entry and the
+token entry in separate CAS updates; a missing entry is a no-op, so each store is
+independently idempotent and a retry after a partial success completes the
+unfinished phase. KV updates are compare-and-swap on the bucket revision with
+bounded retry; the memory store holds one mutex across the whole
+read-modify-write. Completed reservations are removed rather than accumulated.
+Stale pending entries become eligible for best-effort garbage collection after
+`pending_ttl` (15m default); their estimates stay charged. Known deferred issue:
+GC changes inside aborted updates are not persisted, so expired entries can
+remain until a later successful write. `StaleCollected` currently counts
+attempted removals and can overcount aborted updates or CAS retries; it is not
+a committed-collection metric. Pending maps can therefore retain expired
+reservations as well as in-flight calls. The daily key is still the UTC day in
+the 48 h `spend` bucket. Shed order: briefs at 80%, "why" at 90%, thematic links at
+95%, hard deny at 100%; each threshold is configurable in `config/budget.yaml`.
+
+**Links connect distinct events.** `related` is true for a direct or indirect
+cause/response, or a specific shared condition or theme. Same-event coverage is
+false (the Clusterer merges it) and broad/coincidental topic overlap is false.
+The causal type is symmetric in A/B; direction is answered separately. An
+indirect causal chain still has a direction; `unclear` is for thematic links or
+when no direction is supported. Every
+question is self-contained because the model answers them independently. The
+Claude eval baseline uses the same semantics. `eval/testdata/relate_contrast.json`
+holds same-event, specific-theme, broad-topic, indirect-chain and reversed-causal
+contrast fixtures.
+
+**Probability, not concentration.** Gates and metrics use the selected option's
+probability: `probabilities[choice]` for a choice, `noul` for a noul, and the
+level probability for a score. jev's `confidence` is a normalized concentration;
+it is recorded as `mean_concentration` and never used as P. The mock jev returns
+distinct probability and confidence values on purpose.
+
+**Relation threshold selection uses raw answers.** It no longer drops
+gold-unrelated pairs or reuses predictions gated by the current threshold. At
+each candidate threshold it recomputes the accepted link set with the production
+gate, includes false positives, and measures accepted type accuracy.
+
+**The fallback projection is complete.** Every labelled article has a category
+and place projection record. Errors, refusals, missing answers and missing ids
+count as fallback and stay in the denominator. `CombinePlot` returns
+`Fallback=true` for a missing, refused, unknown or invalid primary, a `none`
+pick, a missing probability and a missing/invalid precision. `eval_usd: 0`
+denies live evals; the preflight estimate covers only live backends and is
+enforced whenever either backend is live; a backend that returns no usable
+answer makes the CLI exit non-zero.
+
+**Calibration has two kinds.** Event-probability calibration is P against
+observed truth; decision-confidence calibration uses the confidence for the
+answer that was given (never flipped). For jev decision calibration on a binary
+question, that is p for a predicted yes and 1−p for a predicted no; Claude's
+self-reported confidence already means P(this answer is correct), so it is used
+directly, with relatedness AND type as the correct target for relate. Coverage
+and strictness curves are recomputed from raw probabilities and labels (and
+from the Claude decision observations for the Claude baselines). Relatedness
+calibration is separate from type correctness.
+
+**Accounting is complete.** Cost, input/output tokens, cache tokens, served
+model and latency are recorded for every call, including paid refusals,
+unusable answers, `max_tokens` and other typed stops (the typed stop error also
+carries usage). Latency is total elapsed time including retries/backoff;
+`last_attempt_latency` is the final attempt. `$/1k` divides total cost by
+labelled items (N), not answered items.
+
+**Retries cover the whole 5xx range.** Both clients retry 429 and 500–599,
+including 524/529, plus per-attempt transport timeouts while the parent context
+is alive. A cancelled or expired parent is never retried. TypeSafe direct is not
+implemented: a `TYPESAFE_API_KEY` needs an explicit base URL, path and request
+shape (`openrouter-decisions`) and otherwise fails early; the direct
+`/v1/systemone` shape is not guessed. Push CI is mock-only and gets no secrets;
+only manual `workflow_dispatch` runs live.

@@ -25,3 +25,9 @@ web/dist/
 /data/
 /.dor/
 *.log
+
+# Eval generated artifacts and the downloaded gazetteer cache
+/eval/report.md
+/eval/report.json
+/eval/data/.cache/
+/eval/data/*.tmp

@@ -8,7 +8,7 @@ WEB := web
 BIN := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean
+.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -81,6 +81,19 @@ ci: web-install proto-check vet test-race go-build web-lint web-format-check web
 
 test-echo-restart: ## Kill -9 the echo agent mid-stream and verify no duplicate output
 	./scripts/test-echo-restart.sh
+
+eval: ## Run the model eval (mock backends when no API keys are set)
+	$(GO) run ./eval/cmd/eval
+
+eval-collect: ## Rebuild eval/data candidates from public RSS (network; reviewed diff)
+	$(GO) run ./eval/cmd/collect
+
+eval-label: ## Label the eval set interactively (SET=articles|pairs LABELER=human:<name>)
+	@test -n "$(LABELER)" || (echo "LABELER is required, e.g. make eval-label LABELER=human:your-name" && exit 1)
+	$(GO) run ./eval/cmd/label -set $(or $(SET),articles) -labeler "$(LABELER)"
+
+llm-smoke: ## Verify Claude prompt caching; skips without ANTHROPIC_API_KEY
+	$(GO) run ./eval/cmd/llm-smoke
 
 clean: ## Remove build outputs
 	rm -rf $(BIN) $(WEB)/dist

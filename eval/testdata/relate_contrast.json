@@ -1,0 +1,37 @@
+[
+  {
+    "name": "same event coverage",
+    "why": "Both stories report the same strike; clustering merges them, so this is not a link.",
+    "a": {"title": "Strike at Rotterdam refinery enters fourth day", "brief": "Union workers at the refinery walked out on Monday.", "entities": ["Rotterdam", "Union"], "place": "Rotterdam", "category": "economy"},
+    "b": {"title": "Rotterdam refinery strike halts fuel exports", "brief": "The walkout has stopped fuel shipments for four days.", "entities": ["Rotterdam", "Union"], "place": "Rotterdam", "category": "economy"},
+    "label": {"related": false, "type": "none", "direction": "unclear", "strength": 0}
+  },
+  {
+    "name": "specific shared theme",
+    "why": "Distinct events share a specific condition (the same drought) rather than a broad topic.",
+    "a": {"title": "Spain's olive harvest falls by half after drought", "brief": "Growers in Andalusia report the smallest crop in a decade.", "entities": ["Spain", "Andalusia"], "place": "Andalusia", "category": "climate"},
+    "b": {"title": "Olive oil prices climb in Italy as Mediterranean drought bites", "brief": "Italian bottlers are paying record prices for oil.", "entities": ["Italy"], "place": "Italy", "category": "economy"},
+    "label": {"related": true, "type": "thematic", "direction": "unclear", "strength": 0}
+  },
+  {
+    "name": "broad coincidental topic",
+    "why": "Both are energy stories, but the events are unrelated.",
+    "a": {"title": "Solar firm announces new factory in Ohio", "brief": "The plant will make panels for the US market.", "entities": ["Ohio"], "place": "Ohio", "category": "tech"},
+    "b": {"title": "Oil prices slip as demand forecasts weaken", "brief": "Traders pointed to slower Chinese imports.", "entities": [], "place": "Global", "category": "economy"},
+    "label": {"related": false, "type": "none", "direction": "unclear", "strength": 0}
+  },
+  {
+    "name": "indirect chain",
+    "why": "A decision in Brussels reaches a Nigerian fuel market through an indirect chain, not a direct effect.",
+    "a": {"title": "EU agrees new shipping emissions levy", "brief": "The levy applies to vessels entering EU ports from 2028.", "entities": ["European Union"], "place": "Brussels", "category": "climate"},
+    "b": {"title": "Nigerian fuel importers warn of higher pump prices", "brief": "Importers say shipping costs are already rising.", "entities": ["Nigeria"], "place": "Lagos", "category": "economy"},
+    "label": {"related": true, "type": "causal", "direction": "a_to_b", "strength": 1}
+  },
+  {
+    "name": "reversed causal pair",
+    "why": "The second story is the cause; the first is the effect. Causal type is symmetric, direction is not.",
+    "a": {"title": "Floods displace thousands in Bangladesh", "brief": "Monsoon rain has submerged low-lying districts.", "entities": ["Bangladesh"], "place": "Dhaka", "category": "disaster"},
+    "b": {"title": "Monsoon rains intensify across South Asia", "brief": "Forecasters warn of another week of heavy rain.", "entities": ["South Asia"], "place": "South Asia", "category": "climate"},
+    "label": {"related": true, "type": "causal", "direction": "b_to_a", "strength": 2}
+  }
+]

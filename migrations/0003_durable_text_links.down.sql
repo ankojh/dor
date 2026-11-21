@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS stories_updated_idx;
+ALTER TABLE links   DROP COLUMN IF EXISTS unverified;
+ALTER TABLE sources DROP COLUMN IF EXISTS name;

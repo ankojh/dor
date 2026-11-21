@@ -168,9 +168,10 @@ func (s *Store) UpsertSources(ctx context.Context, records []SourceRecord) error
 	defer tx.Rollback(ctx)
 	batch := &pgx.Batch{}
 	const sql = `
-INSERT INTO sources (id, kind, url, country, region, lang, interval_s, enabled, terms_ok, terms_note, hazard, notes, health_json)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'{}'::jsonb))
+INSERT INTO sources (id, name, kind, url, country, region, lang, interval_s, enabled, terms_ok, terms_note, hazard, notes, health_json)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,'{}'::jsonb))
 ON CONFLICT (id) DO UPDATE SET
+    name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE sources.name END,
     kind = EXCLUDED.kind, url = EXCLUDED.url, country = EXCLUDED.country,
     region = EXCLUDED.region, lang = EXCLUDED.lang, interval_s = EXCLUDED.interval_s,
     enabled = EXCLUDED.enabled, terms_ok = EXCLUDED.terms_ok,
@@ -181,7 +182,7 @@ ON CONFLICT (id) DO UPDATE SET
 		if len(r.Health) > 0 {
 			health = string(r.Health)
 		}
-		batch.Queue(sql, r.ID, r.Kind, r.URL, r.Country, r.Region, r.Lang, r.IntervalS,
+		batch.Queue(sql, r.ID, r.Name, r.Kind, r.URL, r.Country, r.Region, r.Lang, r.IntervalS,
 			r.Enabled, r.TermsOK, r.TermsNote, r.Hazard, r.Notes, health)
 	}
 	br := tx.SendBatch(ctx, batch)
@@ -212,7 +213,7 @@ INSERT INTO stories (id, title, brief, category, primary_loc, source_count, heat
 VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::vector,$9,$10,$11,$12)
 ON CONFLICT (id) DO UPDATE SET
     title = EXCLUDED.title,
-    brief = EXCLUDED.brief,
+    brief = CASE WHEN stories.brief = '' THEN EXCLUDED.brief ELSE stories.brief END,
     category = EXCLUDED.category,
     primary_loc = EXCLUDED.primary_loc,
     source_count = EXCLUDED.source_count,

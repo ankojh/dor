@@ -61,11 +61,30 @@ func NewTEIClient(url string, timeout time.Duration) *TEIClient {
 // Model returns the embedding model label written on the bus.
 func (t *TEIClient) Model() string { return t.model }
 
-// Embed sends one batch. TEI returns a JSON array of vectors.
+// Embed sends one logical batch. The main TEI instance rejects HTTP requests
+// larger than 32 inputs, so the 64-item agent window is split into bounded
+// requests while preserving order.
 func (t *TEIClient) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if t == nil {
 		return nil, fmt.Errorf("embed: TEI disabled")
 	}
+	const maxBatch = 32
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += maxBatch {
+		end := start + maxBatch
+		if end > len(texts) {
+			end = len(texts)
+		}
+		part, err := t.embedBatch(ctx, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, part...)
+	}
+	return out, nil
+}
+
+func (t *TEIClient) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}

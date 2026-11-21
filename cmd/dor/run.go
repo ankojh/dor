@@ -291,6 +291,9 @@ func runCommand(args []string) error {
 	if dbStore != nil {
 		enrichmentDeps.StoryIndex = dbStore
 	}
+	if dbWriter != nil {
+		enrichmentDeps.LinkSink = dbWriter
+	}
 	enrichmentDeps.RelationShards = cfg.relationShards
 	enrichmentDeps.RelationShard = cfg.relationShard
 	enrichmentDeps.RelationDebounce = cfg.relationDebounce
@@ -299,6 +302,9 @@ func runCommand(args []string) error {
 		seedSources(ctx, dbStore, cfg.sourcesFile, logger)
 	}
 	textSvc := enrichmentDeps.Text
+	if textSvc != nil && dbWriter != nil {
+		textSvc.WithSink(dbWriter)
+	}
 
 	var alertStore *alert.Store
 	if store, err := alert.New(ctx, b, dbStore, logger); err != nil {
@@ -334,7 +340,7 @@ func runCommand(args []string) error {
 
 	var gw *gateway.Server
 	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
-		gw, err = gateway.New(gateway.Config{
+		gwCfg := gateway.Config{
 			Addr:    cfg.gatewayAddr,
 			Origins: splitList(cfg.gatewayOrigins),
 			Bus:     b,
@@ -349,7 +355,11 @@ func runCommand(args []string) error {
 				// reports 503 with a reason rather than faking delivery.
 				Delivery: false,
 			},
-		})
+		}
+		if dbStore != nil {
+			gwCfg.Store = dbStore
+		}
+		gw, err = gateway.New(gwCfg)
 		if err != nil {
 			return err
 		}

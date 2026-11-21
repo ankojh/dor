@@ -125,7 +125,7 @@ func seedSources(ctx context.Context, st *store.Store, path string, log *slog.Lo
 	records := make([]store.SourceRecord, 0, len(file.Sources))
 	for _, s := range file.Sources {
 		records = append(records, store.SourceRecord{
-			ID: s.ID, Kind: string(s.Kind), URL: s.URL, Country: s.Country,
+			ID: s.ID, Name: displaySourceName(s.ID), Kind: string(s.Kind), URL: s.URL, Country: s.Country,
 			Region: s.Region, Lang: s.Lang, IntervalS: s.IntervalS,
 			Enabled: s.Enabled, TermsOK: s.TermsOK, TermsNote: s.TermsNote,
 			Hazard: s.Hazard, Notes: s.Notes, Health: []byte(`{}`),
@@ -163,4 +163,17 @@ func wantsAgent(selection, name string) bool {
 		}
 	}
 	return false
+}
+
+// displaySourceName gives the reviewed source id a panel-friendly label when
+// the YAML has no separate display name.
+func displaySourceName(id string) string {
+	words := strings.Fields(strings.ReplaceAll(strings.TrimSpace(id), "-", " "))
+	for i, w := range words {
+		if w == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(w[:1]) + w[1:]
+	}
+	return strings.Join(words, " ")
 }

@@ -83,6 +83,7 @@ type Config struct {
 	Alerts  *alert.Store
 	Matcher *matcher.Service
 	Push    PushConfig
+	Store   StoryStore
 }
 
 // Server is one gateway replica.
@@ -121,6 +122,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/text", s.handleText)
+	mux.HandleFunc("GET /api/stories", s.handleStories)
+	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/alerts", s.handleAlertsList)
 	mux.HandleFunc("POST /api/alerts", s.handleAlertsCreate)

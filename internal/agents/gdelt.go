@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ankojh/dor/internal/bus"
@@ -25,11 +26,92 @@ const gdeltMaxCSVBytes = 128 << 20
 // with its own goroutine and HTTP client path, so a GDELT outage can never
 // block RSS.
 func newGDELTFetcher(rt *fetcherRuntime) (Agent, error) {
-	return NewBase(rt.bus, rt.metrics, rt.log, Spec{
+	base, err := NewBase(rt.bus, rt.metrics, rt.log, Spec{
 		Name:     GDELTAgentName,
 		Producer: true,
 		Produce:  rt.produceGDELT,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &gdeltAgent{Base: base, rt: rt}, nil
+}
+
+// gdeltAgent exposes the narrow backpressure control the Supervisor uses
+// under pipeline backlog. It never touches plotting or the wire.
+type gdeltAgent struct {
+	*Base
+	rt *fetcherRuntime
+}
+
+func (g *gdeltAgent) SetBackpressure(level int) { g.rt.gdelt.setLevel(level) }
+func (g *gdeltAgent) Backpressure() int         { return g.rt.gdelt.level() }
+
+// gdeltGate is deliberately small: level 0 is normal, level 1 caps a file at
+// gdeltReducedItems, and level 2 pauses new files until the pipeline drains.
+// A paused GDELT producer stays healthy; only its fetching stops.
+type gdeltGate struct {
+	mu    sync.Mutex
+	n     int
+	drain chan struct{}
+}
+
+const gdeltReducedItems = 50
+
+func newGDELTGate() *gdeltGate { return &gdeltGate{drain: make(chan struct{}, 1)} }
+
+func (g *gdeltGate) setLevel(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > 2 {
+		n = 2
+	}
+	g.mu.Lock()
+	changed := g.n != n
+	g.n = n
+	g.mu.Unlock()
+	if changed && n < 2 {
+		select {
+		case g.drain <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (g *gdeltGate) level() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.n
+}
+
+func (g *gdeltGate) capItems(base int) int {
+	switch g.level() {
+	case 0:
+		return base
+	case 1:
+		if base > gdeltReducedItems {
+			return gdeltReducedItems
+		}
+		return base
+	default:
+		return 0
+	}
+}
+
+// wait blocks while the gate is paused and returns false when ctx ends.
+func (g *gdeltGate) wait(ctx context.Context) bool {
+	for {
+		if g.level() < 2 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-g.drain:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 func (r *fetcherRuntime) produceGDELT(ctx context.Context, out *Emitter) error {
@@ -59,9 +141,15 @@ func (r *fetcherRuntime) produceGDELT(ctx context.Context, out *Emitter) error {
 		} else if !waitUntil(ctx, r.now, state.Next()) {
 			return nil
 		}
+		// The Supervisor pauses new GDELT files when the pipeline is
+		// backlogged. The producer keeps its health and resumes here.
+		if !r.gdelt.wait(ctx) {
+			return nil
+		}
 		now = r.now().UTC()
 		state.Begin(now)
 		state.ResetQuarantine(now)
+		capItems := r.gdelt.capItems(r.cfg.GDELTMaxItems)
 
 		var (
 			newFile    string
@@ -89,7 +177,13 @@ func (r *fetcherRuntime) produceGDELT(ctx context.Context, out *Emitter) error {
 				newFile = ""
 				break
 			}
-			items, err = r.processGDELTFile(ctx, out, src, newFile, seen, now)
+			if capItems == 0 {
+				// Paused between the lastupdate check and processing. Leave
+				// lastFile unchanged so the same file is picked up on resume.
+				newFile = ""
+				break
+			}
+			items, err = r.processGDELTFile(ctx, out, src, newFile, seen, now, capItems)
 			if err != nil {
 				// GDELT lists a file in lastupdate.txt before it finishes
 				// uploading, so a 404 (or a partial zip) is transient. Never
@@ -153,7 +247,7 @@ func (r *fetcherRuntime) produceGDELT(ctx context.Context, out *Emitter) error {
 	return nil
 }
 
-func (r *fetcherRuntime) processGDELTFile(ctx context.Context, out *Emitter, src sources.Source, fileURL string, seen *seenSet, now time.Time) (int, error) {
+func (r *fetcherRuntime) processGDELTFile(ctx context.Context, out *Emitter, src sources.Source, fileURL string, seen *seenSet, now time.Time, capItems int) (int, error) {
 	resp, err := r.client.Get(ctx, fileURL, fetch.Conditional{}, fetch.WithMaxBytes(64<<20))
 	if err != nil {
 		return 0, fmt.Errorf("gdelt: download %s: %w", fileURL, err)
@@ -177,7 +271,7 @@ func (r *fetcherRuntime) processGDELTFile(ctx context.Context, out *Emitter, src
 	published := 0
 	skippedNotLocated, skippedDomain, skippedTheme, skippedSeen := 0, 0, 0, 0
 	for _, item := range parsed {
-		if published >= r.cfg.GDELTMaxItems {
+		if published >= capItems {
 			break
 		}
 		if !item.Located {
@@ -234,7 +328,7 @@ func (r *fetcherRuntime) processGDELTFile(ctx context.Context, out *Emitter, src
 	}
 	r.log.Info("gdelt file filtered", "file", fileURL, "rows", len(parsed), "published", published,
 		"not_located", skippedNotLocated, "domain", skippedDomain, "theme", skippedTheme, "seen", skippedSeen,
-		"cap", r.cfg.GDELTMaxItems)
+		"cap", capItems, "configured_cap", r.cfg.GDELTMaxItems, "backpressure", r.gdelt.level())
 	return published, nil
 }
 

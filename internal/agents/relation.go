@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/config"
+	"github.com/ankojh/dor/internal/budget"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/live"
@@ -116,7 +117,7 @@ func relationFilters(shards, shard int) ([]string, error) {
 type relationAgent struct {
 	name string
 	core *relationCore
-	base Agent
+	base *Base
 
 	started atomic.Bool
 	stopped atomic.Bool
@@ -136,18 +137,22 @@ func (r *relationAgent) Start(ctx context.Context) error {
 	if r.stopped.Load() {
 		return fmt.Errorf("agents: %s is stopped", r.name)
 	}
+	if err := r.core.init(ctx); err != nil {
+		return err
+	}
+	if err := r.base.Start(ctx); err != nil {
+		return err
+	}
+	r.startLoops(ctx)
+	r.core.log.Info("relation judge started", "shard", r.core.cfg.Shard, "shards", r.core.cfg.Shards)
+	return nil
+}
+
+func (r *relationAgent) startLoops(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	r.mu.Lock()
 	r.cancel = cancel
 	r.mu.Unlock()
-	if err := r.core.init(runCtx); err != nil {
-		cancel()
-		return err
-	}
-	if err := r.base.Start(ctx); err != nil {
-		cancel()
-		return err
-	}
 	r.running.Store(true)
 	r.wg.Add(1 + r.core.cfg.Workers)
 	go func() {
@@ -160,7 +165,23 @@ func (r *relationAgent) Start(ctx context.Context) error {
 			r.core.worker(runCtx)
 		}()
 	}
-	r.core.log.Info("relation judge started", "shard", r.core.cfg.Shard, "shards", r.core.cfg.Shards)
+}
+
+func (r *relationAgent) Restart(ctx context.Context) error {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	r.wg.Wait()
+	r.running.Store(false)
+	r.stopped.Store(false)
+	if err := r.base.Restart(ctx); err != nil {
+		return err
+	}
+	r.startLoops(context.WithoutCancel(ctx))
+	r.core.log.Info("relation judge restarted", "shard", r.core.cfg.Shard, "shards", r.core.cfg.Shards)
 	return nil
 }
 
@@ -192,12 +213,12 @@ func (r *relationAgent) Publish(ctx context.Context, subject string, data []byte
 }
 
 func (r *relationAgent) Running() bool {
-	return r.running.Load() && !r.stopped.Load() && r.base.(HealthReporter).Running()
+	return r.running.Load() && !r.stopped.Load() && r.base.Running()
 }
 
-func (r *relationAgent) LastError() error { return r.base.(HealthReporter).LastError() }
+func (r *relationAgent) LastError() error { return r.base.LastError() }
 func (r *relationAgent) TerminalCount() int64 {
-	return r.base.(HealthReporter).TerminalCount()
+	return r.base.TerminalCount()
 }
 
 type relationEntry struct {
@@ -355,7 +376,7 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 		c.fallback(ctx, a, b)
 		return
 	}
-	resp, err := c.cfg.Decider.Decide(ctx, decide.RelateRequest(inA, inB))
+	resp, err := c.cfg.Decider.Decide(ctx, relateRequest(inA, inB))
 	if err != nil {
 		c.log.Debug("relation: jev unavailable; similarity-only link", "a", aid, "b", bid, "err", err)
 		c.fallback(ctx, a, b)
@@ -384,6 +405,15 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 
 // fallback emits a similarity-only thematic link, explicitly unverified. It
 // never invents a causal or reaction type.
+// relateRequest marks the pair judgement thematic so the documented budget
+// shed order can stop it at the last stage without touching plotting or the
+// wire. A decider implementation that ignores Request.Priority still works.
+func relateRequest(a, b decide.Story) decide.Request {
+	req := decide.RelateRequest(a, b)
+	req.Priority = budget.PriorityThematic
+	return req
+}
+
 func (c *relationCore) fallback(ctx context.Context, a, b *relationEntry) {
 	score := cheapScore(a, b, c.now())
 	if score < 0.3 {

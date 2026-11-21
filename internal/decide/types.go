@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/ankojh/dor/internal/budget"
 )
 
 // QuestionType is one of the documented jev question kinds. `box` is not used
@@ -57,6 +59,10 @@ type Request struct {
 	Questions map[string]Question
 	SessionID string
 	User      string
+	// Priority labels the budget check for this request. Zero keeps the
+	// client's configured default. The relation judge sets thematic so the
+	// documented shed order can stop it without touching plotting or the wire.
+	Priority budget.Priority
 }
 
 // Answer is one answer from a response, normalized across the answer union.

@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dor · Ops</title>
+<style>
+  :root {
+    --bg: #03060e;
+    --panel: rgba(5, 9, 19, .92);
+    --panel-2: rgba(9, 15, 29, .82);
+    --line: rgba(94, 242, 255, .14);
+    --text: #e8f1ff;
+    --text-2: #9fb2cc;
+    --text-3: #647792;
+    --accent: #5ef2ff;
+    --ok: #45f0a6;
+    --warn: #ffc25c;
+    --bad: #ff5d78;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ui: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 600px at 12% -10%, rgba(94, 242, 255, .10), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(69, 240, 166, .06), transparent 55%),
+      var(--bg);
+  }
+  .shell { max-width: 1360px; margin: 0 auto; padding: 22px 20px 60px; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: .18em; font-size: 14px; }
+  .mark { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  .cap { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); }
+  .right { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); background: rgba(255,255,255,.02); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 7px var(--warn); }
+  .dot.bad { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+  .card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 14px 16px; min-width: 0; }
+  .span4 { grid-column: span 4; }
+  .span6 { grid-column: span 6; }
+  .span8 { grid-column: span 8; }
+  .span12 { grid-column: span 12; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; letter-spacing: .02em; }
+  h2 .cap { margin-left: 8px; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; font-size: 12.5px; color: var(--text-2); }
+  .kv b { font-family: var(--mono); font-weight: 500; color: var(--text); text-align: right; }
+  .kv b.ok { color: var(--ok); }
+  .kv b.warn { color: var(--warn); }
+  .kv b.bad { color: var(--bad); }
+  .banner { border: 1px solid rgba(255,194,92,.35); background: rgba(255,194,92,.07); color: #ffd992; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; margin-top: 12px; }
+  .banner.bad { border-color: rgba(255,93,120,.4); background: rgba(255,93,120,.08); color: #ffb3c0; }
+  .scroll { overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; color: var(--text-3); font-weight: 500; padding: 5px 7px; border-bottom: 1px solid var(--line); text-transform: uppercase; white-space: nowrap; }
+  td { padding: 7px 7px; border-bottom: 1px solid rgba(120,200,255,.06); font-family: var(--mono); font-size: 11px; color: var(--text-2); white-space: nowrap; }
+  td:first-child { font-family: var(--ui); font-size: 12.5px; color: var(--text); }
+  tr:last-child td { border-bottom: 0; }
+  .st { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: var(--text-3); }
+  .st.running { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .st.error { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+  .st.stopped, .st.unknown { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  td.warn { color: var(--warn); }
+  td.bad { color: var(--bad); }
+  .meter { display: grid; grid-template-columns: 92px 1fr 120px; gap: 10px; align-items: center; font-size: 12.5px; color: var(--text-2); }
+  .meter + .meter { margin-top: 8px; }
+  .bar { height: 7px; border-radius: 4px; background: rgba(255,255,255,.07); position: relative; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); box-shadow: 0 0 8px var(--accent); transition: width .35s ease; }
+  .bar > i.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .bar > i.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+  .meter span:last-child { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-align: right; }
+  .log { font-family: var(--mono); font-size: 11px; color: var(--text-2); display: flex; flex-direction: column; gap: 5px; max-height: 260px; overflow: auto; }
+  .log span { display: block; padding: 2px 0; border-bottom: 1px solid rgba(120,200,255,.05); }
+  .log time { color: var(--text-3); margin-right: 8px; }
+  .log b { color: var(--accent); font-weight: 500; }
+  .log .advisory { color: var(--warn); }
+  .log .err { color: var(--bad); }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { border: 1px solid var(--line); background: rgba(255,255,255,.03); color: var(--text); border-radius: 8px; padding: 6px 10px; font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; cursor: pointer; }
+  button:hover { border-color: rgba(94,242,255,.45); background: rgba(94,242,255,.06); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.small { padding: 3px 7px; font-size: 9.5px; }
+  .sub { color: var(--text-3); font-size: 11px; margin-top: 6px; line-height: 1.5; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--text-3); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--text-3); font-family: var(--mono); font-size: 10.5px; }
+  .toast { position: fixed; right: 18px; bottom: 18px; max-width: 360px; border: 1px solid var(--line); background: #081120; color: var(--text); padding: 10px 12px; border-radius: 10px; font-size: 12px; display: none; z-index: 10; }
+  .toast.show { display: block; }
+  @media (max-width: 1050px) {
+    .span4, .span6, .span8 { grid-column: span 12; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="brand"><span class="mark"></span><span>DOR</span></div>
+    <div>
+      <h1>Ops · agent health, budgets and supervisor actions</h1>
+      <span class="cap" id="generated">waiting for the first sample</span>
+    </div>
+    <div class="right">
+      <span class="pill"><span class="dot" id="health-dot"></span><span id="health-label">connecting</span></span>
+      <span class="pill">auto refresh 3 s</span>
+      <button id="refresh">Refresh now</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card span4">
+      <h2>Process <span class="cap">gateway + bus</span></h2>
+      <div class="kv" id="process"></div>
+    </section>
+    <section class="card span4">
+      <h2>Model budget <span class="cap">daily</span></h2>
+      <div id="budget"></div>
+      <div class="sub" id="budget-note"></div>
+    </section>
+    <section class="card span4">
+      <h2>Sources <span class="cap">source_health</span></h2>
+      <div class="kv" id="sources-summary"></div>
+      <div class="sub" id="sources-note"></div>
+    </section>
+
+    <section class="card span12">
+      <h2>Agents <span class="cap">from this process's Prometheus registry</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Agent</th><th>Status</th><th>Conc</th><th>Flow/s</th><th>Queue lag</th><th>p95</th><th>Err</th><th>Pending</th><th>Inflight</th><th>Terminal</th><th></th></tr></thead>
+          <tbody id="agents"></tbody>
+        </table>
+      </div>
+      <div class="sub" id="agents-note"></div>
+    </section>
+
+    <section class="card span8">
+      <h2>Supervisor actions <span class="cap" id="action-count"></span></h2>
+      <div class="log" id="actions"><span class="muted">No actions yet.</span></div>
+      <details>
+        <summary>Thresholds and runtime controls</summary>
+        <div class="sub" id="thresholds"></div>
+        <div class="controls" style="margin-top:10px">
+          <button data-gdelt="2">Pause GDELT</button>
+          <button data-gdelt="1">Reduce GDELT</button>
+          <button data-gdelt="0">Resume GDELT</button>
+        </div>
+        <div class="sub" id="gdelt-note"></div>
+      </details>
+    </section>
+
+    <section class="card span4">
+      <h2>Wrong-link queue <span class="cap">pending eval</span></h2>
+      <div class="kv" id="wrong"></div>
+      <div class="sub" id="wrong-note"></div>
+    </section>
+
+    <section class="card span12">
+      <h2>Failing sources <span class="cap">non-ok or recent error</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Source</th><th>Kind</th><th>State</th><th>Failures</th><th>Last success</th><th>Last error</th></tr></thead>
+          <tbody id="sources"></tbody>
+        </table>
+      </div>
+      <div class="sub">Source down is a fetch-layer backoff/quarantine; the wire stays up. The table is capped at 25 rows.</div>
+    </section>
+  </div>
+  <div class="sub" style="margin-top:18px">
+    Metrics are process-local Prometheus series. The replayer is a separate tool (<span class="mono">tools/replayer</span>) and is not tracked by this page.
+    Missing values are shown as “—”; the page never substitutes a plausible number.
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const dash = (v) => (v === null || v === undefined || v === "" ? "—" : v);
+  const num = (v, digits = 0) => (v === null || v === undefined ? "—" : Number(v).toFixed(digits));
+  const pct = (v) => (v === null || v === undefined ? "—" : (Number(v) * 100).toFixed(1) + "%");
+  const ms = (v) => {
+    if (v === null || v === undefined) return "—";
+    const n = Number(v);
+    return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 1 : 2) + " s" : Math.round(n) + " ms";
+  };
+  const when = (s) => {
+    if (!s) return "—";
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+    return d.toLocaleTimeString([], { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  };
+  const text = (node, value) => { node.textContent = dash(value); };
+  const row = (cells) => {
+    const tr = document.createElement("tr");
+    for (const c of cells) {
+      if (c && c.nodeType) tr.appendChild(c);
+      else { const td = document.createElement("td"); td.textContent = dash(c); tr.appendChild(td); }
+    }
+    return tr;
+  };
+  const td = (value, cls) => { const el = document.createElement("td"); el.textContent = dash(value); if (cls) el.className = cls; return el; };
+  let toastTimer = 0;
+  const toast = (msg, bad = false) => {
+    const t = $("toast");
+    t.textContent = msg;
+    t.style.borderColor = bad ? "rgba(255,93,120,.55)" : "rgba(94,242,255,.35)";
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 4200);
+  };
+  const post = async (path, body) => {
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const data = await res.json().catch(() => ({ ok: false, error: "invalid response" }));
+    if (!res.ok || !data.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  };
+  const renderProcess = (d) => {
+    const g = d.gateway || {};
+    const sup = d.supervisor;
+    const el = $("process");
+    el.replaceChildren();
+    const add = (k, v, cls) => {
+      const kk = document.createElement("span"); kk.textContent = k;
+      const vv = document.createElement("b"); text(vv, v); if (cls) vv.className = cls;
+      el.append(kk, vv);
+    };
+    add("Gateway", g.available ? "listening" : "unavailable", g.available ? "ok" : "bad");
+    add("Clients", g.available ? dash(g.clients) : "—");
+    add("Delta seq", g.available ? dash(g.seq) : "—");
+    add("Replay ring", g.available ? dash(g.ring) : "—");
+    add("Supervisor", sup ? "running" : "unavailable", sup ? "ok" : "warn");
+    add("Uptime", sup ? Math.round(sup.uptime_seconds) + " s" : "—");
+    if (g.error) add("Gateway note", g.error, "warn");
+    if (d.supervisor_unavailable) add("Supervisor note", d.supervisor_unavailable, "warn");
+  };
+  const renderBudget = (sup) => {
+    const el = $("budget");
+    el.replaceChildren();
+    if (!sup) { $("budget-note").textContent = "Supervisor unavailable."; return; }
+    const b = sup.budget || {};
+    if (!b.available) {
+      $("budget-note").textContent = b.error || "Budget manager unavailable.";
+      return;
+    }
+    const ratio = Math.max(0, Math.min(1, Number(b.ratio) || 0));
+    const bar = document.createElement("div"); bar.className = "meter";
+    const name = document.createElement("span"); name.textContent = "daily USD";
+    const track = document.createElement("span"); track.className = "bar";
+    const fill = document.createElement("i");
+    fill.style.width = (ratio * 100).toFixed(1) + "%";
+    if (ratio >= 0.95) fill.className = "bad"; else if (ratio >= 0.8) fill.className = "warn";
+    track.appendChild(fill);
+    const val = document.createElement("span"); val.textContent = "$" + Number(b.spend_usd).toFixed(2) + " / $" + Number(b.cap_usd).toFixed(2);
+    bar.append(name, track, val);
+    el.appendChild(bar);
+    const kv = document.createElement("div"); kv.className = "kv";
+    const add = (k, v, cls) => {
+      const kk = document.createElement("span"); kk.textContent = k;
+      const vv = document.createElement("b"); text(vv, v); if (cls) vv.className = cls;
+      kv.append(kk, vv);
+    };
+    const level = Number(b.shed_level) || 0;
+    add("Shed stage", level === 0 ? "none" : level + " · " + (b.shedding || []).join(" → "), level > 0 ? "warn" : "ok");
+    add("Calls today", b.calls);
+    add("Pending reservations", b.pending);
+    add("Stale collected", b.stale_collected);
+    add("Thresholds", Math.round(b.shed_brief_at * 100) + "% / " + Math.round(b.shed_why_at * 100) + "% / " + Math.round(b.shed_thematic_at * 100) + "%");
+    el.appendChild(kv);
+    $("budget-note").textContent = level > 0
+      ? "Shed order is enforced by the budget manager at Check: briefs first, then “why”, then thematic links. Plotting and the wire are never shed."
+      : "Hard cap denies at 100%. Shed stages are enforced by the budget manager.";
+  };
+  const renderAgents = (sup) => {
+    const body = $("agents");
+    body.replaceChildren();
+    if (!sup) { $("agents-note").textContent = "Supervisor unavailable in this process."; return; }
+    const rows = sup.agents || [];
+    if (!rows.length) { $("agents-note").textContent = "No agents selected in this process."; return; }
+    for (const a of rows) {
+      const name = document.createElement("td");
+      const dot = document.createElement("span"); dot.className = "st " + (a.status || "unknown");
+      name.append(dot, document.createTextNode(a.name));
+      if (a.status_detail) name.title = a.status_detail;
+      const status = td(a.status, a.status === "error" ? "bad" : (a.status === "running" ? "" : "warn"));
+      const conc = td(a.concurrency === undefined ? "—" : (a.concurrency + (a.max_concurrency ? "/" + a.max_concurrency : "")), a.scale_supported ? "" : "muted");
+      const flow = a.producer ? (num(a.out_per_sec, 1) + (a.out_per_sec === undefined ? "" : " out")) : (num(a.in_per_sec, 1) + (a.in_per_sec === undefined ? "" : " in"));
+      const inRate = td(flow);
+      const lag = td(ms(a.queue_lag_ms), a.queue_lag_ms > 5000 ? "bad" : (a.queue_lag_ms > 2000 ? "warn" : ""));
+      const p95 = td(ms(a.p95_ms), a.p95_ms > 1000 ? "warn" : "");
+      const err = td(pct(a.error_rate), a.error_rate > 0.05 ? "warn" : "");
+      const pending = td(num(a.pending));
+      const inflight = td(num(a.inflight));
+      const terminal = td(num(a.terminal_total));
+      const action = document.createElement("td");
+      if (a.status !== "running") {
+        const btn = document.createElement("button");
+        btn.className = "small"; btn.textContent = "restart";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            const r = await post("/api/ops/control", { action: "restart", agent: a.name });
+            toast(r.message || (a.name + " restarted"));
+          } catch (e) { toast(String(e.message || e), true); }
+          btn.disabled = false;
+          refresh();
+        });
+        action.appendChild(btn);
+      } else {
+        action.textContent = "—";
+      }
+      body.appendChild(row([name, status, conc, inRate, lag, p95, err, pending, inflight, terminal, action]));
+    }
+    const missing = rows.filter(a => !a.metrics_available).map(a => a.name);
+    $("agents-note").textContent = missing.length
+      ? "No Prometheus series for: " + missing.join(", ") + " (shown as “—”)."
+      : "Flow/s is the last sampling window (in for consumers, out for producers); p95 is the process-lifetime histogram.";
+  };
+  const renderSources = (d) => {
+    const s = d.sources || {};
+    const kv = $("sources-summary");
+    kv.replaceChildren();
+    const add = (k, v, cls) => {
+      const kk = document.createElement("span"); kk.textContent = k;
+      const vv = document.createElement("b"); text(vv, v); if (cls) vv.className = cls;
+      kv.append(kk, vv);
+    };
+    if (!s.available) {
+      $("sources-note").textContent = s.error || "Source health unavailable.";
+    } else {
+      const states = s.by_state || {};
+      add("Tracked", s.total);
+      add("OK", states.ok || 0, "ok");
+      add("Backoff", states.backoff || 0, (states.backoff || 0) > 0 ? "warn" : "");
+      add("Quarantined", states.quarantined || 0, (states.quarantined || 0) > 0 ? "warn" : "");
+      $("sources-note").textContent = "Read from the source_health KV bucket. Non-ok sources are listed below.";
+    }
+    const body = $("sources");
+    body.replaceChildren();
+    const failing = s.failing || [];
+    if (!failing.length) {
+      const tr = document.createElement("tr");
+      const c = document.createElement("td"); c.colSpan = 6; c.className = "muted"; c.textContent = s.available ? "No failing sources." : "Unavailable.";
+      tr.appendChild(c); body.appendChild(tr);
+      return;
+    }
+    for (const f of failing) {
+      const last = f.last_success_unix ? new Date(f.last_success_unix * 1000).toLocaleString() : "—";
+      body.appendChild(row([f.id, f.kind, f.state, f.failures, last, f.last_error || "—"]));
+    }
+  };
+  const renderWrong = (d) => {
+    const w = d.wrong_links || {};
+    const kv = $("wrong");
+    kv.replaceChildren();
+    const add = (k, v, cls) => {
+      const kk = document.createElement("span"); kk.textContent = k;
+      const vv = document.createElement("b"); text(vv, v); if (cls) vv.className = cls;
+      kv.append(kk, vv);
+    };
+    if (!w.available) {
+      $("wrong-note").textContent = w.error || "Wrong-link queue unavailable.";
+      return;
+    }
+    add("Pending reports", w.count, w.count > 0 ? "warn" : "ok");
+    const latest = (w.latest || [])[0];
+    if (latest) {
+      add("Latest pair", latest.a + " ↔ " + latest.b);
+      add("Reported", when(latest.reported_at));
+      add("Needs", latest.needs);
+    } else {
+      add("Latest", "—");
+    }
+    $("wrong-note").textContent = "Reports are queued with status pending and needs=agent-label. Nothing here claims a human label.";
+  };
+  const renderActions = (sup) => {
+    const el = $("actions");
+    el.replaceChildren();
+    if (!sup) { el.innerHTML = '<span class="muted">Supervisor unavailable.</span>'; $("action-count").textContent = ""; return; }
+    const actions = sup.actions || [];
+    $("action-count").textContent = actions.length + " shown";
+    if (!actions.length) { el.innerHTML = '<span class="muted">No actions yet.</span>'; return; }
+    for (const a of actions) {
+      const span = document.createElement("span");
+      const time = document.createElement("time"); time.textContent = when(a.at);
+      span.appendChild(time);
+      const kind = document.createElement("b"); kind.textContent = a.kind; span.appendChild(kind);
+      const msg = document.createTextNode(" " + (a.target ? a.target + " · " : "") + a.message);
+      span.appendChild(msg);
+      if (a.advisory) {
+        const adv = document.createElement("span"); adv.className = "advisory"; adv.textContent = " · advisory"; span.appendChild(adv);
+      }
+      if (a.error) {
+        const err = document.createElement("span"); err.className = "err"; err.textContent = " · " + a.error; span.appendChild(err);
+      }
+      el.appendChild(span);
+    }
+  };
+  const renderGDELT = (sup) => {
+    const g = sup ? (sup.gdelt || {}) : {};
+    const note = $("gdelt-note");
+    if (!sup) { note.textContent = "Supervisor unavailable."; return; }
+    note.textContent = "GDELT: " + (g.label || "unknown") + (g.supported ? "" : " · control unavailable") + (g.error ? " · " + g.error : "");
+  };
+  const renderThresholds = (sup) => {
+    if (!sup) { $("thresholds").textContent = ""; return; }
+    const t = sup.thresholds || {};
+    $("thresholds").textContent =
+      "sample " + t.sample_ms + " ms · scale > " + t.scale_lag_ms + " ms · alarm > " + t.alarm_lag_ms +
+      " ms for " + Math.round((t.alarm_for_ms || 0) / 1000) + " s · GDELT backlog " + Math.round((t.backlog_for_ms || 0) / 1000) +
+      " s · restart backoff " + Math.round((t.restart_backoff_min_ms || 0) / 1000) + "–" + Math.round((t.restart_backoff_max_ms || 0) / 1000) + " s.";
+  };
+  const render = (d) => {
+    $("generated").textContent = "sampled " + when(d.generated_at);
+    const g = d.gateway || {};
+    const sup = d.supervisor;
+    const ok = !!(g.available && sup);
+    $("health-dot").className = "dot " + (ok ? "ok" : "warn");
+    $("health-label").textContent = ok ? "live" : (g.available ? "supervisor unavailable" : "gateway unavailable");
+    renderProcess(d);
+    renderBudget(sup);
+    renderAgents(sup);
+    renderSources(d);
+    renderWrong(d);
+    renderActions(sup);
+    renderGDELT(sup);
+    renderThresholds(sup);
+  };
+  let inFlight = false;
+  const refresh = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const res = await fetch("/api/ops", { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      render(await res.json());
+    } catch (e) {
+      $("health-dot").className = "dot bad";
+      $("health-label").textContent = "unreachable";
+      $("generated").textContent = "last refresh failed: " + String(e.message || e);
+    } finally {
+      inFlight = false;
+    }
+  };
+  document.querySelectorAll("[data-gdelt]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const level = Number(btn.dataset.gdelt);
+      const labels = { 0: "resumed", 1: "reduced to 50 items/file", 2: "paused new files" };
+      btn.disabled = true;
+      try {
+        const r = await post("/api/ops/control", { action: "gdelt.backpressure", value: level });
+        toast(r.message || ("GDELT " + labels[level]));
+      } catch (e) { toast(String(e.message || e), true); }
+      btn.disabled = false;
+      refresh();
+    });
+  });
+  $("refresh").addEventListener("click", refresh);
+  refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>

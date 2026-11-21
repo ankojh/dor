@@ -8,17 +8,21 @@ WEB := web
 BIN := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke sources-check
+.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke sources-check replay
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
 
-build: go-build ## Build bin/dor and bin/probe
+build: go-build ## Build bin/dor, bin/probe and bin/replayer
 
 go-build:
 	@mkdir -p $(BIN)
 	$(GO) build -o $(BIN)/dor ./cmd/dor
 	$(GO) build -o $(BIN)/probe ./tools/probe
+	$(GO) build -o $(BIN)/replayer ./tools/replayer
+
+replay: go-build ## Replay the latest recorded day at 10× into the local stack (DAY=, RATE=)
+	./$(BIN)/replayer -dir $${DOR_RECORD_DIR:?set DOR_RECORD_DIR} $(if $(DAY),-day $(DAY),) -rate $(or $(RATE),10)
 
 test: ## Go tests
 	$(GO) test ./...

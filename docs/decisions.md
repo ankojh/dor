@@ -116,7 +116,9 @@ metrics agree on the delay.
 **KV TTLs.** `seen` 48 h (dedupe window), `joins` 30 s (partial joins with a
 ~2 s deadline), `budgets` 1 h (short-lived token buckets only; **daily spend
 counters must not live here**), `spend` 48 h (daily model spend, added by
-M0·3), `live_state` 48 h (snapshot rebuilds). TTLs are constants in `internal/bus/bus.go` for now;
+M0·3), `live_state` 48 h (snapshot rebuilds), `source_health` 7 d, and
+`eval_pending` with no TTL for operator-reported wrong links awaiting an
+explicit agent label. TTLs are constants in `internal/bus/bus.go` for now;
 a later config ticket can expose them.
 
 **Subject shard function.** `StoryShard` is FNV-1a 32-bit mod 16, exactly as
@@ -413,13 +415,13 @@ independently idempotent and a retry after a partial success completes the
 unfinished phase. KV updates are compare-and-swap on the bucket revision with
 bounded retry; the memory store holds one mutex across the whole
 read-modify-write. Completed reservations are removed rather than accumulated.
-Stale pending entries become eligible for best-effort garbage collection after
-`pending_ttl` (15m default); their estimates stay charged. Known deferred issue:
-GC changes inside aborted updates are not persisted, so expired entries can
-remain until a later successful write. `StaleCollected` currently counts
-attempted removals and can overcount aborted updates or CAS retries; it is not
-a committed-collection metric. Pending maps can therefore retain expired
-reservations as well as in-flight calls. The daily key is still the UTC day in
+Stale pending entries become eligible for garbage collection after
+`pending_ttl` (15m default); their estimates stay charged. GC removals are
+persisted in a standalone CAS when the admission or reconciliation write that
+found them is denied, and `StaleCollected` counts only committed removals, so
+CAS retries and cap-denied `Check` calls do not overcount. Pending maps can
+still hold in-flight calls until `Record`, but expired entries no longer wait
+for a later successful write to be pruned. The daily key is still the UTC day in
 the 48 h `spend` bucket. Shed order: briefs at 80%, "why" at 90%, thematic links at
 95%, hard deny at 100%; each threshold is configurable in `config/budget.yaml`.
 

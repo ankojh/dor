@@ -198,3 +198,13 @@ Known limits:
   the documented 0.1x read / 1.25x write multiples of input by default.
 - The seed labels are agent labels. Do not use the report as a model
   comparison until the human set exists.
+
+## Runtime wrong-link reports
+
+`POST /api/report-wrong-link` on the gateway queues a report in the
+`eval_pending` KV bucket with `status: "pending"` and `needs: "agent-label"`.
+It does not write a label, and it never claims a human label. The `/ops` page
+shows the pending count. Export/labelling remains an explicit step: copy or
+convert reviewed reports into the candidate set, then label them with
+`-labeler agent:<model>` (provisional) or `-labeler human:<name>` only when a
+person actually did the labelling.

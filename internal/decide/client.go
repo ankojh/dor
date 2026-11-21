@@ -194,12 +194,16 @@ func (c *Client) Decide(ctx context.Context, req Request) (Response, error) {
 	costEstimate := c.cfg.Price.Cost(inputEstimate, 0)
 	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + c.cfg.Path
 	startTotal := c.now()
+	priority := c.cfg.Priority
+	if req.Priority != "" {
+		priority = req.Priority
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
 		verdict, err := c.budget.Check(ctx, budget.Request{
 			API:                   "jev",
-			Priority:              c.cfg.Priority,
+			Priority:              priority,
 			EstimatedInputTokens:  inputEstimate,
 			EstimatedOutputTokens: 0,
 			EstimatedUSD:          costEstimate,

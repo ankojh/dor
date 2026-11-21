@@ -24,6 +24,7 @@ import (
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
+	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -52,6 +53,9 @@ type Config struct {
 	Bus     *bus.Bus
 	Logger  *slog.Logger
 	Text    TextService
+	// Ops mounts /ops, /api/ops, the narrow runtime controls and the
+	// wrong-link report queue. Nil serves only the gateway endpoints.
+	Ops *ops.HTTP
 }
 
 // Server is one gateway replica.
@@ -91,6 +95,18 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	if cfg.Ops != nil {
+		cfg.Ops.Gateway = func() ops.GatewayInfo {
+			return ops.GatewayInfo{
+				Available:   true,
+				Clients:     s.hub.clientCount(),
+				Seq:         s.hub.latest(),
+				Ring:        s.hub.ringLen(),
+				SnapshotSeq: s.hub.snapshotSeq(),
+			}
+		}
+		cfg.Ops.Mount(mux)
+	}
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }

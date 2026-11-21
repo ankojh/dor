@@ -17,9 +17,10 @@ eval_usd: 2.00
 shed_brief_at: 0.80
 shed_why_at: 0.90
 shed_thematic_at: 0.95
-# Reservations older than this are eligible for best-effort collection and stay
-# charged at the estimate. Aborted updates can retain expired entries until a
-# later successful write; completed reservations do not accumulate.
+# Reservations older than this are eligible for garbage collection and stay
+# charged at the estimate. Removals are persisted even when the admission or
+# reconciliation that found them was denied, and `stale_collected` in /ops
+# counts only committed removals (CAS retries never overcount).
 pending_ttl: 15m
 token_buckets:
   jev:

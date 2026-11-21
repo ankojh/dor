@@ -105,8 +105,8 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 type publisherAgent struct {
 	name   string
 	core   *publisherCore
-	enrich Agent
-	story  Agent
+	enrich *Base
+	story  *Base
 
 	started atomic.Bool
 	stopped atomic.Bool
@@ -130,22 +130,28 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 	if err := p.core.loadSeq(ctx); err != nil {
 		p.core.log.Warn("publisher: could not restore seq; starting from the stream tail", "err", err)
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	p.mu.Lock()
-	p.cancel = cancel
-	p.mu.Unlock()
-
 	if err := p.enrich.Start(ctx); err != nil {
-		cancel()
 		return err
 	}
 	if err := p.story.Start(ctx); err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = p.enrich.Stop(stopCtx)
 		stopCancel()
-		cancel()
 		return err
 	}
+	p.startLoops(ctx)
+	p.core.log.Info("publisher started")
+	// Publish the first snapshot immediately so a gateway started in the same
+	// process never serves an empty cold-start snapshot longer than necessary.
+	p.core.writeSnapshot(ctx)
+	return nil
+}
+
+func (p *publisherAgent) startLoops(ctx context.Context) {
+	runCtx, cancel := context.WithCancel(ctx)
+	p.mu.Lock()
+	p.cancel = cancel
+	p.mu.Unlock()
 	p.running.Store(true)
 	p.wg.Add(3)
 	go func() {
@@ -160,10 +166,30 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 		defer p.wg.Done()
 		p.core.expireLoop(runCtx, time.Minute)
 	}()
-	p.core.log.Info("publisher started")
-	// Publish the first snapshot immediately so a gateway started in the same
-	// process never serves an empty cold-start snapshot longer than necessary.
+}
+
+func (p *publisherAgent) Restart(ctx context.Context) error {
+	p.mu.Lock()
+	cancel := p.cancel
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	p.wg.Wait()
+	p.running.Store(false)
+	p.stopped.Store(false)
+	p.mu.Lock()
+	p.lastErr = nil
+	p.mu.Unlock()
+	if err := p.enrich.Restart(ctx); err != nil {
+		return err
+	}
+	if err := p.story.Restart(ctx); err != nil {
+		return err
+	}
+	p.startLoops(context.WithoutCancel(ctx))
 	p.core.writeSnapshot(ctx)
+	p.core.log.Info("publisher restarted")
 	return nil
 }
 
@@ -220,14 +246,14 @@ func (p *publisherAgent) LastError() error {
 	if p.lastErr != nil {
 		return p.lastErr
 	}
-	if err := p.enrich.(HealthReporter).LastError(); err != nil {
+	if err := p.enrich.LastError(); err != nil {
 		return err
 	}
-	return p.story.(HealthReporter).LastError()
+	return p.story.LastError()
 }
 
 func (p *publisherAgent) TerminalCount() int64 {
-	return p.enrich.(HealthReporter).TerminalCount() + p.story.(HealthReporter).TerminalCount()
+	return p.enrich.TerminalCount() + p.story.TerminalCount()
 }
 
 // publisherCore owns the delta sequence, per-entity coalescing, the in-memory

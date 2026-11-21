@@ -129,7 +129,7 @@ func (c *editorCore) worker(ctx context.Context) {
 type editorAgent struct {
 	name string
 	core *editorCore
-	base Agent
+	base *Base
 
 	started atomic.Bool
 	stopped atomic.Bool
@@ -149,14 +149,19 @@ func (e *editorAgent) Start(ctx context.Context) error {
 	if e.stopped.Load() {
 		return fmt.Errorf("agents: %s is stopped", e.name)
 	}
+	if err := e.base.Start(ctx); err != nil {
+		return err
+	}
+	e.startLoops(ctx)
+	e.core.log.Info("editor started")
+	return nil
+}
+
+func (e *editorAgent) startLoops(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.cancel = cancel
 	e.mu.Unlock()
-	if err := e.base.Start(ctx); err != nil {
-		cancel()
-		return err
-	}
 	e.running.Store(true)
 	e.wg.Add(2)
 	go func() {
@@ -167,7 +172,23 @@ func (e *editorAgent) Start(ctx context.Context) error {
 		defer e.wg.Done()
 		e.core.worker(runCtx)
 	}()
-	e.core.log.Info("editor started")
+}
+
+func (e *editorAgent) Restart(ctx context.Context) error {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	e.wg.Wait()
+	e.running.Store(false)
+	e.stopped.Store(false)
+	if err := e.base.Restart(ctx); err != nil {
+		return err
+	}
+	e.startLoops(context.WithoutCancel(ctx))
+	e.core.log.Info("editor restarted")
 	return nil
 }
 
@@ -199,10 +220,10 @@ func (e *editorAgent) Publish(ctx context.Context, subject string, data []byte, 
 }
 
 func (e *editorAgent) Running() bool {
-	return e.running.Load() && !e.stopped.Load() && e.base.(HealthReporter).Running()
+	return e.running.Load() && !e.stopped.Load() && e.base.Running()
 }
 
-func (e *editorAgent) LastError() error { return e.base.(HealthReporter).LastError() }
+func (e *editorAgent) LastError() error { return e.base.LastError() }
 func (e *editorAgent) TerminalCount() int64 {
-	return e.base.(HealthReporter).TerminalCount()
+	return e.base.TerminalCount()
 }

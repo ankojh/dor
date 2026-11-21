@@ -21,8 +21,9 @@ import (
 
 // buildEnrichmentDeps wires the real model clients when keys exist and leaves
 // them nil otherwise. The agents always run; nil is an explicit, logged
-// fallback, never a fake model answer.
-func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.Logger, articleSink agents.ArticleSink, storySink agents.StorySink) agents.Deps {
+// fallback, never a fake model answer. It also returns the one budget manager
+// this process uses so the Supervisor reads the same daily counter.
+func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.Logger, articleSink agents.ArticleSink, storySink agents.StorySink) (agents.Deps, *budget.Manager, dorconfig.Budget) {
 	deps := agents.Deps{
 		ArticleSink: articleSink,
 		StorySink:   storySink,
@@ -98,7 +99,7 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	if deps.Embedding != nil {
 		log.Info("TEI embedder enabled", "url", cfg.teiURL)
 	}
-	return deps
+	return deps, manager, budgetCfg
 }
 
 func newBudgetManager(ctx context.Context, b *bus.Bus, cfg dorconfig.Budget, log *slog.Logger) *budget.Manager {

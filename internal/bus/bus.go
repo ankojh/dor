@@ -56,6 +56,11 @@ const (
 	KVLiveStateTTL       = 48 * time.Hour
 	KVBucketSourceHealth = "source_health"
 	KVSourceHealthTTL    = 7 * 24 * time.Hour
+	// KVBucketEvalPending is the durable queue of operator-reported wrong
+	// links. Records are candidates for labelling; they never claim a human
+	// label. No TTL: a report stays until the eval workflow consumes it.
+	KVBucketEvalPending = "eval_pending"
+	KVEvalPendingTTL    = 0
 
 	KVLiveStateSnapshotKey = "snapshot"
 	KVPublisherSeqKey      = "publisher.seq"
@@ -73,6 +78,11 @@ const (
 	HeaderOriginalSubject = "Dor-Original-Subject"
 	HeaderOriginalMsgID   = "Dor-Original-Msg-Id"
 	HeaderError           = "Dor-Error"
+	// HeaderReplayID identifies a replayed message without replacing the
+	// original raw subject or payload. HeaderReplaySourceMsgID preserves the
+	// recorded producer id so provenance survives a replay.
+	HeaderReplayID          = "Dor-Replay-Id"
+	HeaderReplaySourceMsgID = "Dor-Replay-Source-Msg-Id"
 )
 
 // Options configures a Bus.
@@ -370,6 +380,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketSpend, KVSpendTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
 		{KVBucketSourceHealth, KVSourceHealthTTL},
+		{KVBucketEvalPending, KVEvalPendingTTL},
 	}
 }
 

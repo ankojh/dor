@@ -16,8 +16,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ankojh/dor/config"
+	"github.com/ankojh/dor/internal/budget"
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/llm"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -308,6 +311,80 @@ func TestPrecisePhotonFallbacksStayAtCityPrecision(t *testing.T) {
 	})
 }
 
+func TestValidPhotonPlaceHonorsIdentityAndGeographicEvidence(t *testing.T) {
+	g := plotFixtureGazetteer(t)
+	p := &plotter{deps: Deps{Gazetteer: g}}
+	article := &dorv1.Article{Dateline: "Philadelphia, Pennsylvania"}
+	for _, tc := range []struct {
+		name    string
+		place   geo.Place
+		article *dorv1.Article
+		country string
+		want    bool
+	}{
+		{"wrong country", geo.Place{Name: "Toronto", Lat: 43.65, Lon: -79.38, CountryCode: "CA", Country: "Canada", Feature: "PPL"}, article, "US", false},
+		{"missing country identity", geo.Place{Name: "Somewhere", Lat: 39.95, Lon: -75.16, Feature: "PPL"}, article, "US", false},
+		{"far from known dateline", geo.Place{Name: "Washington", Lat: 38.9072, Lon: -77.0369, CountryCode: "US", Country: "United States", Feature: "PPL"}, article, "US", false},
+		{"far from valid hint anchor", geo.Place{Name: "Philadelphia", Lat: 39.9526, Lon: -75.1652, CountryCode: "US", Country: "United States", Feature: "street"}, &dorv1.Article{Hints: &dorv1.RawHints{Located: true, Lat: 46.2044, Lon: 6.1432}}, "US", false},
+		{"nearby supported street", geo.Place{Name: "Broad Street", Lat: 39.953, Lon: -75.164, CountryCode: "US", Country: "United States", Feature: "street"}, article, "US", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := p.validPhotonPlace(tc.place, tc.country, tc.article); got != tc.want {
+				t.Fatalf("validPhotonPlace(%+v, %q, %+v) = %v, want %v", tc.place, tc.country, tc.article, got, tc.want)
+			}
+		})
+	}
+	street := geo.Place{Feature: "street"}
+	if got := geo.PrecisionOf(street); got != geo.StreetResolution {
+		t.Errorf("accepted Photon street feature should map to street precision, got %v", got)
+	}
+}
+
+func TestFromClaudeRejectsPhotonCountryMismatchAndFallsBackToCountry(t *testing.T) {
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"text","text":"{\"place_name\":\"Unmapped Harbor\",\"country\":\"US\",\"entities\":[],\"category\":\"politics\"}"}],"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
+	}))
+	defer llmServer.Close()
+	photonServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"features":[{"geometry":{"coordinates":[-79.3832,43.6532]},"properties":{"name":"Toronto","country":"Canada","countrycode":"CA","type":"city"}}]}`)
+	}))
+	defer photonServer.Close()
+
+	client, err := llm.New(llm.Config{
+		APIKey: "test-key", BaseURL: llmServer.URL,
+		HaikuModel: "claude-haiku-5-5", OpusModel: "claude-opus-5-5", Effort: "low",
+		MaxRetries: 0,
+		Price: map[string]config.Price{
+			"claude-haiku-5-5": {InputPerMTok: 1, OutputPerMTok: 5},
+			"claude-opus-5-5":  {InputPerMTok: 15, OutputPerMTok: 75},
+		},
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}, plotTestBudget{})
+	if err != nil {
+		t.Fatalf("create mock Claude client: %v", err)
+	}
+	g := plotFixtureGazetteer(t)
+	p := &plotter{deps: Deps{Gazetteer: g, Photon: geo.NewPhoton(photonServer.URL), Enricher: client}, log: testLogger()}
+	article := &dorv1.Article{Id: "claude-photon-mismatch", Title: "Officials discuss an agreement", Dateline: "Philadelphia, Pennsylvania"}
+	placed, ok := p.fromClaude(context.Background(), article, nil, "")
+	if !ok || placed == nil || len(placed.Locations) != 1 {
+		t.Fatalf("Claude should fall back after rejecting the wrong-country Photon result: placed=%+v ok=%v", placed, ok)
+	}
+	loc := placed.Locations[0]
+	if loc.PlaceId != "country:US" || loc.Precision != dorv1.Precision_PRECISION_COUNTRY {
+		t.Fatalf("rejected foreign Photon point should fall back to country precision: %+v", loc)
+	}
+}
+
+type plotTestBudget struct{}
+
+func (plotTestBudget) Check(_ context.Context, req budget.Request) (budget.Verdict, error) {
+	return budget.Verdict{Allowed: true, Reason: "test", Reservation: &budget.Reservation{ID: "plot-test", API: req.API}}, nil
+}
+
+func (plotTestBudget) Record(context.Context, budget.Reservation, budget.Usage) error { return nil }
+
 func TestInvalidHintsFallBackToCountryOrGlobal(t *testing.T) {
 	g := plotFixtureGazetteer(t)
 	for _, tc := range []struct {
@@ -345,6 +422,9 @@ func TestDeterministicPlottingRejectsTextCollisions(t *testing.T) {
 		{"CA officials reject the proposal", "The decision followed a lengthy debate.", ""},
 		{"PA lawmakers announce a new bill", "The measure will be debated next week.", ""},
 		{"IL officials confirm the report", "No additional details were provided.", ""},
+		{"Zimbabwe revenue rises to US$1.239bn", "The figure was reported in annual accounts.", ""},
+		{"Company reports earnings in US dollars", "Revenue increased over the prior year.", ""},
+		{"The U.S.C. filing was released today", "Attorneys reviewed the document.", ""},
 		{"my team is ready to compete", "The coach spoke to reporters.", ""},
 		{"We need to act as soon as possible", "The announcement came on Tuesday.", ""},
 		{"They travelled to the capital", "Officials declined to comment.", ""},
@@ -364,6 +444,14 @@ func TestDeterministicPlottingRejectsTextCollisions(t *testing.T) {
 	for i, tc := range falseMatches {
 		t.Run(fmt.Sprintf("false_%02d", i), func(t *testing.T) {
 			placed := p.place(context.Background(), &dorv1.Article{Id: fmt.Sprintf("false-%d", i), Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if strings.Contains(tc.title, "US$1.239bn") {
+				for _, loc := range placed.Locations {
+					if place, ok := g.ByID(loc.PlaceId); ok && place.CountryCode == "US" {
+						t.Errorf("currency text must not produce a United States match: title=%q locations=%+v", tc.title, placed.Locations)
+					}
+				}
+				return
+			}
 			if len(placed.Locations) != 0 {
 				t.Errorf("ordinary text should not plot as a town: title=%q lede=%q dateline=%q locations=%+v", tc.title, tc.lede, tc.dateline, placed.Locations)
 			}
@@ -412,6 +500,29 @@ func TestDeterministicPlottingUsesFullArticleEvidenceForRealPlaces(t *testing.T)
 	}
 }
 
+func TestAutomaticCountryInitialismsRemainSupported(t *testing.T) {
+	g := plotMatchingFixture(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	for _, tc := range []struct{ name, title, code string }{
+		{"U.S.", "Officials announced a policy change in U.S.", "US"},
+		{"U.K.", "Officials announced a policy change in U.K.", "GB"},
+		{"U.S.A.", "Officials announced a policy change in U.S.A.", "US"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "initialism-" + tc.name, Title: tc.title})
+			for _, loc := range placed.Locations {
+				if loc.Precision != dorv1.Precision_PRECISION_COUNTRY {
+					continue
+				}
+				if place, ok := g.ByID(loc.PlaceId); ok && place.CountryCode == tc.code && place.CountryID {
+					return
+				}
+			}
+			t.Fatalf("proper country initialism should resolve as country %s: %+v", tc.code, placed.Locations)
+		})
+	}
+}
+
 func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 	dir := os.Getenv("DOR_TEST_GEONAMES_DIR")
 	if dir == "" {
@@ -432,16 +543,47 @@ func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 		want                        string
 	}{
 		{"lowercase common word", "Residents complain in drug", "Officials opened an investigation.", "", ""},
+		{"lowercase paradise", "Travel troubles in paradise", "The resort is under new management.", "", ""},
+		{"lowercase March", "Debate continues in March", "A proposal remains under review.", "", ""},
+		{"learn from it", "Coach says team will learn from it", "The club announced a change.", "", ""},
 		{"possessive country word", "Africa’s growth outlook improves", "Analysts expect another strong year.", "", ""},
+		{"possessive short country code SA", "SA’s first female deputy president dies", "The announcement was made today.", "", ""},
+		{"possessive short country code It", "It’s a dream come true", "The singer thanked her supporters.", "", ""},
+		{"short code CA", "CA officials reject the proposal", "The decision followed a lengthy debate.", "", ""},
+		{"short code PA", "PA lawmakers announce a new bill", "The measure will be debated next week.", "", ""},
+		{"short code IL", "IL officials confirm the report", "No additional details were provided.", "", ""},
+		{"lowercase my", "my team is ready to compete", "The coach spoke to reporters.", "", ""},
+		{"lowercase to", "Officials travelled to the capital", "The delegation arrived on Tuesday.", "", ""},
+		{"lowercase as", "We need to act as soon as possible", "The announcement came on Tuesday.", "", ""},
+		{"lowercase at", "The meeting starts at noon", "The agenda was released yesterday.", "", ""},
+		{"US dollar currency symbol", "Zimbabwe revenue rises to US$1.239bn", "The figure was reported in annual accounts.", "", "!US"},
+		{"US dollars currency name", "Company reports earnings in US dollars", "Revenue increased over the prior year.", "", ""},
+		{"USC dotted initialism prefix", "The U.S.C. filing was released today", "Attorneys reviewed the document.", "", ""},
 		{"person name", "Michael Jackson film breaks box office records", "The biopic opened this weekend.", "", ""},
+		{"person surname alias", "Victoria Beckham launches a new collection", "The designer spoke at the event.", "", ""},
 		{"brand name", "Toyota recalls vehicles over airbag fault", "The recall covers several models.", "", ""},
+		{"brand Google", "Google announces a new AI model", "The company shared details online.", "", ""},
+		{"politician Lula", "Lula vetoes pension bill", "The president issued a statement.", "", ""},
+		{"STAT plus", "STAT+ reports new clinical findings", "Researchers said more study is needed.", "", ""},
 		{"international", "International flights face long delays", "Airports reported disruptions.", "", ""},
+		{"Eastern Europe", "Eastern Europe braces for winter", "Forecasters expect freezing conditions.", "", ""},
+		{"Western leaders", "Western leaders meet to discuss aid", "The talks lasted several hours.", "", ""},
+		{"Northern Lights", "Northern Lights visible tonight", "The display may continue through morning.", "", ""},
+		{"Delta Air Lines", "Delta Air Lines cancels hundreds of flights", "The airline cited a technical issue.", "", ""},
 		{"new york dateline alias", "New York weighs tougher e-bike rules", "Officials announced the proposal.", "NEW YORK", "new york"},
 		{"frome qualified dateline", "Frome residents discuss local plan", "The meeting was held in Frome.", "Frome, England", "frome"},
 		{"nis qualified dateline", "Niš residents welcome new rail service", "The station is in Niš, Serbia.", "Niš, Serbia", "niš"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			placed := p.place(context.Background(), &dorv1.Article{Id: tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if tc.want == "!US" {
+				for _, loc := range placed.Locations {
+					if place, ok := g.ByID(loc.PlaceId); ok && place.CountryCode == "US" {
+						t.Errorf("currency text must not produce a United States match: locations=%+v", placed.Locations)
+					}
+				}
+				return
+			}
 			if tc.want == "" {
 				if len(placed.Locations) != 0 {
 					t.Errorf("false match produced location %+v", placed.Locations)
@@ -451,6 +593,53 @@ func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 			if len(placed.Locations) == 0 || normalizePlotName(placed.Locations[0].Name) != tc.want || placed.Locations[0].Role != dorv1.Role_ROLE_VENUE {
 				t.Errorf("explicit place/dateline should resolve as venue %q: %+v", tc.want, placed)
 			}
+		})
+	}
+	for _, tc := range []struct {
+		name, title, lede, dateline, country string
+		nameContains                         string
+	}{
+		{"Uganda versus Mahdia", "Uganda faces Mahdia in friendly", "The match was played in Mahdia, Tunisia.", "Mahdia, Tunisia", "TN", "mahdia"},
+		{"Florida versus Floridablanca", "Florida lawmakers debate policy", "The protest took place in Floridablanca, Colombia.", "Floridablanca, Colombia", "CO", "floridablanca"},
+		{"Armenia country versus city", "Armenia signs an accord with Azerbaijan", "Talks continued in Yerevan, Armenia.", "Yerevan, Armenia", "AM", "yerevan"},
+		{"Armenia city in Colombia", "Armenia residents await election", "Officials met in Armenia, Colombia.", "Armenia, Colombia", "CO", "armenia"},
+		{"India versus Indjija", "India delegation visits Indjija", "The ceremony took place in Indjija, Serbia.", "Indjija, Serbia", "RS", "inđija"},
+		{"Egypt versus Goodyear", "Egypt reacts to Goodyear announcement", "Officials spoke in Cairo, Egypt.", "Cairo, Egypt", "EG", "cairo"},
+		{"York inside New York", "New York considers a congestion charge", "The plan affects New York City residents.", "NEW YORK", "US", "new york"},
+	} {
+		t.Run("geographic_"+tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "full-cache-" + tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			var venue *dorv1.Location
+			for _, loc := range placed.Locations {
+				if loc.Role == dorv1.Role_ROLE_VENUE {
+					venue = loc
+					break
+				}
+			}
+			if venue == nil {
+				t.Fatalf("expected a venue for %s, got %+v", tc.name, placed.Locations)
+			}
+			resolved, known := g.ByID(venue.PlaceId)
+			if !known || resolved.CountryCode != tc.country || !strings.Contains(strings.ToLower(venue.Name), tc.nameContains) {
+				t.Errorf("%s resolved to %q/%q (known=%v), want country=%s and name containing %q; all=%+v", tc.name, venue.Name, resolved.CountryCode, known, tc.country, tc.nameContains, placed.Locations)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, title, country string }{
+		{"U.S.", "Officials discuss new regulations in U.S.", "US"},
+		{"U.K.", "Officials discuss new regulations in U.K.", "GB"},
+		{"U.S.A.", "Officials discuss new regulations in U.S.A.", "US"},
+	} {
+		t.Run("country_initialism_"+tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "full-cache-initialism-" + tc.name, Title: tc.title})
+			for _, loc := range placed.Locations {
+				if loc.Precision == dorv1.Precision_PRECISION_COUNTRY {
+					if place, ok := g.ByID(loc.PlaceId); ok && place.CountryID && place.CountryCode == tc.country {
+						return
+					}
+				}
+			}
+			t.Fatalf("proper %s form should resolve as country %s: %+v", tc.name, tc.country, placed.Locations)
 		})
 	}
 }

@@ -27,8 +27,18 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 		for n := 8; n > 0; n-- {
 			for i := 0; i+n <= len(words); i++ {
 				separated := false
+				initialism := true
+				for k := i; k < i+n; k++ {
+					if len(words[k].raw) != 1 || words[k].raw != strings.ToUpper(words[k].raw) {
+						initialism = false
+					}
+				}
 				for k := i + 1; k < i+n; k++ {
-					if strings.ContainsAny(words[k].sep, "\n.;:!?") {
+					separator := words[k].sep
+					if initialism {
+						separator = strings.ReplaceAll(separator, ".", "")
+					}
+					if strings.ContainsAny(separator, "\n.;:!?") {
 						separated = true
 						break
 					}
@@ -138,12 +148,21 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 	countryName := p.CountryID && p.RegionAlias == "" && canonical
 	// ISO/IATA aliases describe explicit lookup vocabulary, not ordinary prose.
 	if p.CountryID && !canonical && p.RegionAlias == "" {
-		if !strings.Contains(" us usa uk u s u k ", " "+phrase+" ") ||
+		if !strings.Contains(" us usa uk u s u k u s a ", " "+phrase+" ") ||
 			p.CountryCode != "US" && p.CountryCode != "GB" {
 			return 0
 		}
 		for _, w := range words[start : start+count] {
 			if w.raw != strings.ToUpper(w.raw) {
+				return 0
+			}
+		}
+		if end := start + count; end < len(words) {
+			// US$ and US dollars are a currency, not event geography. Also
+			// reject a contained U.S. match inside a longer dotted acronym.
+			next := words[end]
+			if strings.ContainsAny(next.sep, "$£€") || next.norm == "dollar" || next.norm == "dollars" ||
+				len(next.raw) == 1 && next.raw == strings.ToUpper(next.raw) && strings.Contains(next.sep, ".") {
 				return 0
 			}
 		}

@@ -29,7 +29,7 @@ func NewPhoton(base string) *Photon {
 }
 
 // Geocode returns up to limit Photon features for query, biased near lat/lon
-// when both are non-zero.
+// when the bias is valid.
 func (p *Photon) Geocode(ctx context.Context, query string, lat, lon float64, limit int) ([]Place, error) {
 	if p == nil {
 		return nil, fmt.Errorf("geo: photon disabled")

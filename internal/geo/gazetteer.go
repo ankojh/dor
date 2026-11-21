@@ -186,8 +186,10 @@ func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool)
 		g.addAlias(c.ISO3, cp)
 		if code == "US" {
 			g.addAlias("U.S.", cp)
+			g.addAlias("U.S.A.", cp)
 		} else if code == "GB" {
 			g.addAlias("UK", cp)
+			g.addAlias("U.K.", cp)
 		}
 		cp.ID = "country:" + code
 		if ValidCoordinates(cp.Lat, cp.Lon) {
@@ -473,9 +475,9 @@ func (g *Gazetteer) Fallback(limit int) []Place {
 }
 
 // Candidates returns up to max places mentioned in title/lede/dateline,
-// ranked with the title and dateline as priors. countryHint is an ISO code or
-// English country name; when it matches candidates, non-matching candidates
-// are dropped so "Paris" resolves to Paris, France.
+// ranked with the title and dateline as priors. countryHint is an explicit
+// country qualifier for ambiguous cities. Distinct country/party mentions
+// remain available to the plotter.
 func (g *Gazetteer) Candidates(text, title, dateline, countryHint string, max int) []Place {
 	if max <= 0 {
 		max = 8
@@ -804,8 +806,10 @@ func readCities(path string, countries map[string]rawCountry, admin1 map[string]
 	return out, sc.Err()
 }
 
+var latinFold = strings.NewReplacer("đ", "dj", "ł", "l", "ø", "o", "æ", "ae", "œ", "oe", "ß", "ss", "ð", "d", "þ", "th")
+
 func normalize(s string) string {
-	s = norm.NFD.String(strings.ToLower(strings.TrimSpace(s)))
+	s = latinFold.Replace(norm.NFD.String(strings.ToLower(strings.TrimSpace(s))))
 	s = strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Mn, r) {
 			return -1
@@ -901,10 +905,7 @@ func ambiguousNames() map[string]struct{} {
 	for _, n := range names {
 		out[n] = struct{}{}
 	}
-	// These are real places but also very common words; they stay in the index.
-	for _, n := range []string{"paris", "london", "berlin", "rome", "athens", "victoria"} {
-		delete(out, n)
-	}
+
 	return out
 }
 

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Dor · globe renderer spike</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/styles/spike.css" />
+  </head>
+  <body>
+    <div id="map" aria-label="Dor globe renderer spike"></div>
+
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span><span class="word">DOR</span></div>
+      <span class="live">LIVE</span>
+      <span class="chip" id="renderer-chip">renderer</span>
+      <span class="chip" id="mode-chip">AMBIENT · NO SELECTION</span>
+      <span class="hint">↑ ↓ focus · Esc clear · drag / zoom / rotate · ⇧P perf</span>
+      <span class="counts mono" id="counts">5,000 stories · 2,000 links</span>
+    </header>
+
+    <aside class="focus-card glass" id="focus-card" hidden>
+      <div class="row">
+        <span class="cap" id="focus-kicker">● ECONOMY · STORY</span>
+        <button class="close" id="focus-close" title="Clear focus (Esc)">×</button>
+      </div>
+      <h1 id="focus-title"></h1>
+      <div class="facts mono">
+        <span><b id="focus-sources">0</b> sources</span>
+        <span><b id="focus-links">0</b> links</span>
+        <span id="focus-place">—</span>
+      </div>
+      <div class="links" id="focus-link-list"></div>
+    </aside>
+
+    <div class="legend glass">
+      <span class="cap">Categories</span>
+      <div class="legend-grid" id="category-legend"></div>
+      <span class="cap">Links</span>
+      <div class="legend-grid" id="link-legend"></div>
+      <span class="cap">Strength</span>
+      <div class="strength-key">
+        <span><i style="border-top-width: 1px; opacity: 0.5"></i>loose</span>
+        <span><i style="border-top-width: 2px; opacity: 0.85"></i>related</span>
+        <span><i style="border-top-width: 3px"></i>strong</span>
+      </div>
+      <span class="cap">Ripple = article · ring = live · tether = this story's places</span>
+    </div>
+
+    <span class="attribution mono" id="attribution">
+      © OpenFreeMap · © OpenMapTiles · © OpenStreetMap contributors · MapLibre GL JS v5
+    </span>
+
+    <div class="spike-error" id="error" hidden></div>
+    <pre class="spike-debug mono" id="debug" hidden></pre>
+
+    <script type="module" src="/src/globe/spike.ts"></script>
+  </body>
+</html>

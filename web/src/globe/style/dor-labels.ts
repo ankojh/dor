@@ -1,0 +1,205 @@
+import type { StyleSpecification } from "maplibre-gl";
+import type { GlobeConfig } from "../config";
+
+export const STORY_LABEL_SOURCE = "dor-story-labels";
+export const STORY_LABEL_LAYER = "dor-story-labels";
+export const GLOBE_STYLE_ID = "dor-labels";
+
+const FONT = ["Noto Sans Regular"];
+
+/**
+ * Our own labels-only style: place, country and water names, a faint water
+ * fill and a coastline/riverbank hairline. No roads, buildings, terrain or
+ * landuse. OpenMapTiles schema on OpenFreeMap.
+ */
+export function buildLabelsOnlyStyle(config: GlobeConfig): StyleSpecification {
+  return {
+    version: 8,
+    name: GLOBE_STYLE_ID,
+    metadata: { "dor:provider": "openfreemap", "dor:style": "labels-only" },
+    glyphs: config.glyphsUrl,
+    projection: { type: "globe" },
+    sky: {
+      "sky-color": "#03050b",
+      "horizon-color": "#0c1e3a",
+      "fog-color": "#03050b",
+      "fog-ground-blend": 0.85,
+      "horizon-fog-blend": 0.9,
+      "sky-horizon-blend": 0.55,
+      "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 1, 8, 0.85, 12, 0.25, 14, 0],
+    },
+    sources: {
+      openmaptiles: {
+        type: "vector",
+        url: config.tilesUrl,
+        attribution: config.attribution,
+      },
+    },
+    layers: [
+      {
+        id: "background",
+        type: "background",
+        paint: { "background-color": "#03050b" },
+      },
+      {
+        id: "water",
+        type: "fill",
+        source: "openmaptiles",
+        "source-layer": "water",
+        paint: {
+          "fill-color": "#071226",
+          "fill-opacity": 0.92,
+          "fill-outline-color": "rgba(94,242,255,0.22)",
+        },
+      },
+      {
+        id: "waterway",
+        type: "line",
+        source: "openmaptiles",
+        "source-layer": "waterway",
+        minzoom: 6,
+        paint: {
+          "line-color": "rgba(94,242,255,0.2)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.3, 14, 0.9],
+        },
+      },
+      {
+        id: "water-name",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "water_name",
+        minzoom: 2,
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 2, 10, 8, 12, 16, 14],
+          "text-letter-spacing": 0.18,
+          "text-transform": "uppercase",
+          "text-allow-overlap": false,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "rgba(94,242,255,0.55)",
+          "text-halo-color": "rgba(3,5,11,0.85)",
+          "text-halo-width": 1.2,
+        },
+      },
+      {
+        id: "country-names",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "place",
+        filter: ["==", ["get", "class"], "country"],
+        minzoom: 1.2,
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 1, 9, 4, 11, 8, 13],
+          "text-transform": "uppercase",
+          "text-letter-spacing": 0.16,
+          "text-max-width": 8,
+          "text-allow-overlap": false,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,0.66)",
+          "text-halo-color": "rgba(3,5,11,0.75)",
+          "text-halo-width": 1.4,
+        },
+      },
+      {
+        id: "city-names",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "place",
+        filter: ["in", ["get", "class"], ["literal", ["city", "town"]]],
+        minzoom: 2.5,
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 2.5, 10, 7, 12, 12, 14, 17, 15],
+          "text-letter-spacing": 0.04,
+          "text-max-width": 9,
+          "text-allow-overlap": false,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "#9fb3cf",
+          "text-halo-color": "rgba(3,5,11,0.9)",
+          "text-halo-width": 1.3,
+        },
+      },
+      {
+        id: "street-names",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "transportation_name",
+        minzoom: 14,
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 14, 9.5, 17, 11.5],
+          "text-letter-spacing": 0.04,
+          "symbol-placement": "line",
+          "text-rotation-alignment": "map",
+          "text-pitch-alignment": "viewport",
+          "text-allow-overlap": false,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,0.78)",
+          "text-halo-color": "rgba(3,5,11,0.92)",
+          "text-halo-width": 1.2,
+        },
+      },
+      {
+        id: "poi-names",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "poi",
+        minzoom: 15,
+        filter: ["<=", ["get", "rank"], 3],
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 15, 9.5, 18, 11.5],
+          "text-letter-spacing": 0.06,
+          "text-max-width": 10,
+          "text-allow-overlap": false,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,0.7)",
+          "text-halo-color": "rgba(3,5,11,0.92)",
+          "text-halo-width": 1.2,
+        },
+      },
+      {
+        id: "suburb-names",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "place",
+        filter: [
+          "in",
+          ["get", "class"],
+          ["literal", ["suburb", "neighbourhood", "quarter", "village", "hamlet"]],
+        ],
+        minzoom: 12,
+        layout: {
+          "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+          "text-font": FONT,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 12, 10, 17, 13],
+          "text-letter-spacing": 0.12,
+          "text-transform": "uppercase",
+          "text-max-width": 10,
+          "text-allow-overlap": false,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,0.85)",
+          "text-halo-color": "rgba(3,5,11,0.9)",
+          "text-halo-width": 1.2,
+        },
+      },
+    ],
+  };
+}

@@ -7,6 +7,12 @@ the production boundary. Protobuf messages never become main-thread maps.
 
 - `init` is a full renderer snapshot, only for a gateway snapshot/resync.
   The worker transfers copies and retains its authoritative buffers.
+  A gateway Resync promises the next Snapshot and covered tail on the same
+  socket. The worker resets resume sequence to zero and suspends delta applies
+  and frame flushes until that Snapshot; it does not send another Hello.
+  A 30-second watchdog retires a stalled socket and reconnects from sequence
+  zero. Socket closure cancels the watchdog, and stale connection events cannot
+  mutate the replacement session.
 - Main grants one `frame` credit per animation frame, with at most one request
   in flight, after the map is ready. The worker coalesces changes by slot until
   that credit. `patch` carries operations, encoded geometry ranges, heat/source

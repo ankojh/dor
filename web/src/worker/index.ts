@@ -53,12 +53,17 @@ const socketUrl =
 const apiBase = (env.VITE_API_URL || "").replace(/\/$/, "");
 const healthUrl = env.VITE_HEALTH_URL || `${apiBase}/api/health`;
 
+/** A missing promised snapshot retires the socket; never restart recovery with Hello on it. */
+export const SNAPSHOT_RECOVERY_TIMEOUT_MS = 30_000;
+
 const state = new LiveState();
 let lastSeq = 0;
 let activeFilters: WireFilters | null = null;
 let activePrompts: string[] = [];
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+let awaitingSnapshot = false;
 let reconnectAttempt = 0;
 let reconnectAt = 0;
 let stopped = false;
@@ -125,10 +130,34 @@ function sendAck(): void {
   sendClient({ case: "ack", value: create(AckSchema, { seq: BigInt(lastSeq) }) });
 }
 
-async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
+function clearSnapshotTimer(): void {
+  if (snapshotTimer !== null) clearTimeout(snapshotTimer);
+  snapshotTimer = null;
+}
+
+function awaitSnapshot(connection: WebSocket): void {
+  awaitingSnapshot = true;
+  debug.recovery = "awaiting snapshot";
+  // Repeated Resync frames cannot extend the first recovery deadline.
+  if (snapshotTimer !== null) return;
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    if (socket !== connection || !awaitingSnapshot || stopped) return;
+    // Retire before close: buffered frames and delayed close callbacks from
+    // this connection must not mutate state or affect a replacement socket.
+    socket = null;
+    debug.socket = "snapshot timeout";
+    connection.close(4000, "snapshot recovery timed out");
+    scheduleReconnect();
+  }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
+}
+
+async function handleBinary(data: Blob | ArrayBuffer, connection: WebSocket): Promise<void> {
+  if (socket !== connection) return;
   debug.raw = Number(debug.raw) + 1;
   const bytes =
     data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
+  if (socket !== connection) return;
   let message;
   try {
     message = fromBinary(ServerMessageSchema, bytes);
@@ -141,15 +170,22 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
   switch (message.body.case) {
     case "snapshot": {
       const snapshot = message.body.value;
-      lastSeq = Number(snapshot.seq);
+      const seq = Number(snapshot.seq);
+      const init = state.snapshot(snapshot.stories, snapshot.links, snapshot.recentWire, seq);
+      lastSeq = seq;
+      awaitingSnapshot = false;
+      clearSnapshotTimer();
+      debug.recovery = "ready";
       debug.snapshots = Number(debug.snapshots) + 1;
-      const init = state.snapshot(snapshot.stories, snapshot.links, snapshot.recentWire, lastSeq);
       statusScope.postMessage(init, transferablesOf(init));
       sendAck();
       postStatus("online");
       break;
     }
     case "deltas": {
+      // The recovery snapshot is authoritative. No tail/live delta may be
+      // applied or ACKed until it arrives, including unexpected stale frames.
+      if (awaitingSnapshot) return;
       const batch = message.body.value.deltas;
       debug.batches = Number(debug.batches) + 1;
       debug.deltas = Number(debug.deltas) + batch.length;
@@ -162,12 +198,13 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
     }
     case "resync": {
       lastSeq = 0;
+      state.seq = 0;
+      awaitSnapshot(connection);
       statusScope.postMessage({
         type: "resync",
         seq: Number(message.body.value.seq),
         reason: message.body.value.reason,
       });
-      sendHello();
       postStatus("online");
       break;
     }
@@ -203,23 +240,29 @@ function connect(): void {
     scheduleReconnect();
     return;
   }
-  socket.binaryType = "arraybuffer";
+  const connection = socket;
+  connection.binaryType = "arraybuffer";
   debug.socket = "connecting";
-  socket.onopen = () => {
+  connection.onopen = () => {
+    if (socket !== connection) return;
     debug.socket = "open";
     reconnectAttempt = 0;
     reconnectAt = 0;
     postStatus("online");
+    if (lastSeq === 0) awaitSnapshot(connection);
     sendHello();
   };
-  socket.onmessage = (event) => {
+  connection.onmessage = (event) => {
     if (typeof event.data === "string") return;
-    void handleBinary(event.data as Blob | ArrayBuffer);
+    void handleBinary(event.data as Blob | ArrayBuffer, connection);
   };
-  socket.onerror = () => {
+  connection.onerror = () => {
+    if (socket !== connection) return;
     postStatus("reconnecting", "gateway socket error");
   };
-  socket.onclose = (event) => {
+  connection.onclose = (event) => {
+    if (socket !== connection) return;
+    clearSnapshotTimer();
     debug.socket = `closed:${event.code}`;
     socket = null;
     if (stopped) return;
@@ -321,7 +364,7 @@ commandScope.onmessage = (event) => {
   if (command?.type === "start") {
     void start(command.mode);
   } else if (command?.type === "frame") {
-    const patch = state.flush();
+    const patch = awaitingSnapshot ? null : state.flush();
     if (patch) statusScope.postMessage(patch, transferablesOf(patch));
     statusScope.postMessage({ type: "frameDone" });
   } else if (command?.type === "focus" && command.storyId) {
@@ -340,6 +383,7 @@ commandScope.onmessage = (event) => {
 self.addEventListener("beforeunload", () => {
   stopped = true;
   if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  clearSnapshotTimer();
   socket?.close();
   stopFeed?.();
   if (healthTimer) clearInterval(healthTimer);

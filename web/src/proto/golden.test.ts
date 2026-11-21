@@ -8,6 +8,8 @@ import {
   AlertHit,
   AlertHitSchema,
   ArticleSchema,
+  ClassifiedArticleSchema,
+  EmbeddedArticleSchema,
   Category,
   ClientMessageSchema,
   DeltaBatchSchema,
@@ -23,6 +25,7 @@ import {
   LinkSchema,
   LinkType,
   MatchScoreSchema,
+  PlacedArticleSchema,
   Precision,
   RawArticleSchema,
   RecordFrameSchema,
@@ -115,6 +118,9 @@ function expectAlert(alert: AlertHit): void {
   expect(alert.firedAt).toBe(1_700_000_300n);
   expect(alert.title).toBe("Flooding in Paris");
   expect(alert.prompt).toBe("Tell me about floods");
+  expect(alert.generation).toBe(2n);
+  expect(alert.approx).toBe(true);
+  expect(alert.sourceCount).toBe(8);
 }
 
 function deltaBody(delta: Delta, expected: string): Delta["body"] {
@@ -135,6 +141,59 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
     expect(article.dateline).toBe("PARIS, Nov 20");
     expect(article.storyId).toBe("story-1");
     expect(article.join).toBe(JoinKind.JOINED);
+    expect(article.burst).toBe(true);
+    const hints = article.hints;
+    if (!hints) throw new Error("missing article hints");
+    expect(hints.located).toBe(true);
+    expect(hints.lat).toBe(48.5);
+    expect(hints.lon).toBe(2.25);
+    expect(hints.precision).toBe(Precision.CITY);
+    expect(hints.themes).toEqual(["PROTEST", "ECON_ENERGY"]);
+    expect(hints.country).toBe("FR");
+    expect(hints.hazard).toBe("flood");
+    expect(hints.magnitude).toBe(5.4);
+    expect(hints.severity).toBe(0.75);
+    expect(hints.eventId).toBe("us7000abcd");
+    expect(hints.magnitudeUnit).toBe("Mw");
+    expect(hints.place).toBe("Paris, France");
+    expect(hints.revision).toBe("1700000030");
+  });
+
+  it("PlacedArticle", () => {
+    const placed = load(PlacedArticleSchema, "placed_article");
+    if (!placed.article) throw new Error("missing placed article");
+    expect(placed.article.id).toBe("art-1");
+    expect(placed.locations).toHaveLength(2);
+    expect(placed.locations[0]?.name).toBe("France");
+    expect(placed.locations[1]?.name).toBe("Paris");
+    expect(placed.primary).toBe(1);
+    expect(placed.multiRegion).toBe(true);
+    expect(placed.fallback).toBe(true);
+    expect(placed.degraded).toBe(true);
+    expect(placed.backend).toBe("hints");
+  });
+
+  it("ClassifiedArticle", () => {
+    const classified = load(ClassifiedArticleSchema, "classified_article");
+    expect(classified.article?.id).toBe("art-1");
+    expect(classified.category).toBe(Category.CLIMATE);
+    expect(classified.confidence).toBeCloseTo(0.875, 5);
+    expect(classified.accepted).toBe(true);
+    expect(classified.fallback).toBe(true);
+    expect(classified.degraded).toBe(true);
+    expect(classified.backend).toBe("mock");
+    expect(classified.lang).toBe("en");
+    expect(classified.entities).toEqual(["Paris", "wildfire"]);
+  });
+
+  it("EmbeddedArticle", () => {
+    const embedded = load(EmbeddedArticleSchema, "embedded_article");
+    expect(embedded.article?.id).toBe("art-1");
+    expect(embedded.vector).toEqual([0.125, -0.25, 0.5]);
+    expect(embedded.model).toBe("bge-small-en-v1.5");
+    expect(embedded.degraded).toBe(true);
+    expect(embedded.storyId).toBe("story-1");
+    expect(embedded.join).toBe(JoinKind.JOINED);
   });
 
   it("Story, including every location field", () => {
@@ -173,7 +232,8 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
   it("MatchScore", () => {
     const score = load(MatchScoreSchema, "match_score");
     expect(score.articleId).toBe("art-1");
-    expect(score.scores).toEqual({ floods: 0.82 });
+    expect(Object.keys(score.scores)).toEqual(["floods"]);
+    expect(score.scores.floods).toBeCloseTo(0.82, 5);
     expect(score.approx).toEqual(["energy"]);
     expect(score.updatedAt).toBe(1_700_000_500n);
   });

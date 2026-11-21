@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 const (
@@ -36,11 +38,16 @@ type hub struct {
 	seq     uint64
 	stories map[string]*dorv1.Story
 
-	snapMu    sync.Mutex
-	snapBytes []byte
-	snapVal   *dorv1.Snapshot
-	snapSeq   uint64
-	snapAt    time.Time
+	snapMu       sync.Mutex
+	snapBytes    []byte
+	snapVal      *dorv1.Snapshot
+	snapSeq      uint64
+	snapAt       time.Time
+	snapLoad     chan struct{}
+	snapErr      error
+	snapRetryAt  time.Time
+	snapFailures int
+	readSnapshot func(context.Context) (*dorv1.Snapshot, error) // injectable KV read
 }
 
 func newHub(b *bus.Bus, log *slog.Logger) *hub {
@@ -61,6 +68,9 @@ func (h *hub) addClient(c *client) {
 func (h *hub) removeClient(c *client) {
 	h.mu.Lock()
 	delete(h.clients, c)
+	if c.resumeCancel != nil {
+		c.resumeCancel()
+	}
 	h.mu.Unlock()
 }
 
@@ -100,14 +110,29 @@ func (h *hub) closeAll() {
 	}
 }
 
-// addBatch records a publisher batch in the replay ring and broadcasts it to
-// every ready client. A client whose bounded queue is full is disconnected;
-// it reconnects with Hello(last_seq) and gets a snapshot if the ring cannot
-// cover the gap, so one slow client never blocks the others.
+// addBatch records fresh deltas and broadcasts without blocking on clients.
+// Overflow suspends live delivery, discards the queue and starts resync.
 func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 	if batch == nil || len(batch.Deltas) == 0 {
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	fresh := &dorv1.DeltaBatch{}
+	gap := false
+	for _, d := range batch.Deltas {
+		if d != nil && d.Seq > h.seq {
+			if d.Seq != h.seq+1 {
+				gap = true
+			}
+			fresh.Deltas = append(fresh.Deltas, d)
+			h.seq = d.Seq
+		}
+	}
+	if len(fresh.Deltas) == 0 {
+		return
+	}
+	batch = fresh
 	msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: batch}}
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
@@ -122,8 +147,6 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 		}
 	}
 
-	var slow []*client
-	h.mu.Lock()
 	h.observeBatchLocked(batch)
 	for _, d := range batch.Deltas {
 		h.ring = append(h.ring, d)
@@ -137,6 +160,10 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 	}
 	for c := range h.clients {
 		if !c.ready {
+			continue
+		}
+		if gap {
+			h.startResumeLocked(c.context(), c, 0, "gap in delta stream")
 			continue
 		}
 		payload := data
@@ -155,12 +182,8 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 			}
 		}
 		if !c.enqueue(payload) {
-			slow = append(slow, c)
+			h.startResumeLocked(c.context(), c, 0, "slow client")
 		}
-	}
-	h.mu.Unlock()
-	for _, c := range slow {
-		c.kick("slow client")
 	}
 }
 
@@ -186,100 +209,139 @@ func (h *hub) observeStoryLocked(story *dorv1.Story) {
 	}
 }
 
-// resume implements Hello. It runs under the hub lock after fetching the
-// snapshot, so live deltas cannot interleave with the snapshot/replay.
-func (h *hub) resume(c *client, lastSeq uint64) {
-	snapBytes, snap := h.loadSnapshot(context.Background())
-
+// startResume serializes recovery attempts per client while leaving its reader
+// and the hub free to process disconnects, other clients and new deltas.
+func (h *hub) startResume(ctx context.Context, c *client, lastSeq uint64, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, story := range snap.Stories {
-		h.observeStoryLocked(story)
-	}
-
-	replay := func(from uint64) {
-		deltas, ok := h.sinceLocked(from)
-		if !ok || len(deltas) == 0 {
-			return
-		}
-		for start := 0; start < len(deltas); start += replayChunk {
-			end := start + replayChunk
-			if end > len(deltas) {
-				end = len(deltas)
-			}
-			chunk := &dorv1.DeltaBatch{Deltas: deltas[start:end]}
-			if f := c.filterState(); f.active() {
-				chunk = filterDeltaBatch(chunk, f, h.stories)
-				if chunk == nil {
-					continue
-				}
-			}
-			msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: chunk}}
-			data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
-			if err != nil {
-				continue
-			}
-			if !c.enqueue(data) {
-				c.kick("slow client during replay")
-				return
-			}
-		}
-	}
-	sendSnapshot := func() {
-		payload := snapBytes
-		if f := c.filterState(); f.active() {
-			if filtered := filterSnapshot(snap, f, h.stories); filtered != nil {
-				msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: filtered}}
-				if data, err := (proto.MarshalOptions{Deterministic: true}).Marshal(msg); err == nil {
-					payload = data
-				}
-			}
-		}
-		if !c.enqueue(payload) {
-			c.kick("slow client for snapshot")
-			return
-		}
-		if snap.Seq > 0 && snap.Seq < h.seq {
-			replay(snap.Seq + 1)
-		}
-	}
-
-	if lastSeq == 0 || lastSeq > h.seq {
-		sendSnapshot()
-		c.ready = true
-		return
-	}
-	if lastSeq == h.seq {
-		c.ready = true
-		return
-	}
-	if deltas, ok := h.sinceLocked(lastSeq + 1); ok && len(deltas) > 0 {
-		c.ready = true
-		replay(lastSeq + 1)
-		if !c.closed.Load() {
-			return
-		}
-		return
-	}
-	// The ring cannot cover the gap: reset the client to the cached snapshot.
-	if snap.Seq > 0 && snap.Seq < lastSeq {
-		resync := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Resync{Resync: &dorv1.Resync{
-			Seq: snap.Seq, Reason: "client behind the replay ring",
-		}}}
-		opts := proto.MarshalOptions{Deterministic: true}
-		if data, err := opts.Marshal(resync); err == nil {
-			if !c.enqueue(data) {
-				c.kick("slow client for resync")
-				return
-			}
-		}
-	}
-	sendSnapshot()
-	c.ready = true
+	h.startResumeLocked(ctx, c, lastSeq, reason)
 }
 
-// sinceLocked returns the ring deltas from seq onwards. ok is false when the
-// ring cannot cover seq (a gap), in which case the caller sends a snapshot.
+func (h *hub) startResumeLocked(ctx context.Context, c *client, lastSeq uint64, reason string) {
+	if c.resumeCancel != nil {
+		c.resumeCancel()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	c.resumeCancel = cancel
+	c.ready = false
+	c.resetQueueLocked()
+	go h.resumeContext(runCtx, c, lastSeq, reason)
+}
+
+// resume is also useful to synchronous protocol callers.
+func (h *hub) resume(c *client, lastSeq uint64) {
+	h.resumeContext(c.context(), c, lastSeq, "")
+}
+
+func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reason string) {
+	forceSnapshot := reason != ""
+	for {
+		if ctx.Err() != nil || c.closed.Load() {
+			return
+		}
+		snapBytes, snap, err := h.loadSnapshot(ctx)
+		if err == nil {
+			h.mu.Lock()
+			if ctx.Err() != nil || c.closed.Load() {
+				h.mu.Unlock()
+				return
+			}
+			for _, story := range snap.Stories {
+				h.observeStoryLocked(story)
+			}
+			// A new gateway may not have consumed the retained stream yet. Snapshot
+			// provides a baseline; late arrivals <= its seq must not be sent twice.
+			if snap.Seq > h.seq {
+				h.seq = snap.Seq
+			}
+			from := lastSeq + 1
+			snapshotNeeded := forceSnapshot || lastSeq == 0 || lastSeq > h.seq
+			deltas, covered := h.sinceLocked(from)
+			if !snapshotNeeded && !covered {
+				snapshotNeeded = true
+				reason = "client behind the replay ring"
+			}
+			// Coverage alone is insufficient: the bounded socket queue must hold
+			// the replay. Escalate now instead of retrying the same large range.
+			if !snapshotNeeded && len(deltas) > replayChunk*(cap(c.send)-2) {
+				snapshotNeeded = true
+				reason = "replay exceeds client queue"
+			}
+			if snapshotNeeded {
+				from = snap.Seq + 1 // seq zero is a real baseline, never a replay sentinel
+				deltas, covered = h.sinceLocked(from)
+			}
+			if covered {
+				messages := make([][]byte, 0, 2+(len(deltas)+replayChunk-1)/replayChunk)
+				encode := func(msg *dorv1.ServerMessage) {
+					data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+					if err == nil {
+						messages = append(messages, data)
+					}
+				}
+				if reason != "" {
+					encode(&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Resync{Resync: &dorv1.Resync{Seq: snap.Seq, Reason: reason}}})
+				}
+				if snapshotNeeded {
+					payload := snapBytes
+					if f := c.filterState(); f.active() {
+						if filtered := filterSnapshot(snap, f, h.stories); filtered != nil {
+							msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: filtered}}
+							payload, _ = proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+						}
+					}
+					messages = append(messages, payload)
+				}
+				for start := 0; start < len(deltas); start += replayChunk {
+					end := min(start+replayChunk, len(deltas))
+					chunk := &dorv1.DeltaBatch{Deltas: deltas[start:end]}
+					if f := c.filterState(); f.active() {
+						chunk = filterDeltaBatch(chunk, f, h.stories)
+					}
+					if chunk != nil {
+						encode(&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: chunk}})
+					}
+				}
+				// Reserve the whole snapshot+tail atomically. Never mark ready after a
+				// partial replay; request a newer snapshot if it exceeds the queue.
+				if len(messages) <= cap(c.send) {
+					c.resetQueueLocked()
+					for _, data := range messages {
+						c.enqueueRecovery(data)
+					}
+					c.ready = true
+					h.mu.Unlock()
+					return
+				}
+			}
+			h.mu.Unlock()
+			// Cache might predate the ring; retry from publisher state, without sending
+			// an incomplete snapshot or silently declaring this client caught up.
+			forceSnapshot = true
+			if reason == "" {
+				reason = "snapshot tail is unavailable"
+			}
+			h.requestSnapshotAfter(snap.Seq)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// A delayed client cannot invalidate a newer snapshot fetched by another
+// recovery. Reload rate is shared by the hub, rather than multiplied by clients.
+func (h *hub) requestSnapshotAfter(seq uint64) {
+	h.snapMu.Lock()
+	if h.snapSeq <= seq {
+		h.snapAt = time.Time{}
+	}
+	h.snapMu.Unlock()
+}
+
+// sinceLocked validates every sequence through the tail, not just the first.
 func (h *hub) sinceLocked(from uint64) ([]*dorv1.Delta, bool) {
 	if from == 0 {
 		return nil, false
@@ -287,63 +349,100 @@ func (h *hub) sinceLocked(from uint64) ([]*dorv1.Delta, bool) {
 	if from > h.seq {
 		return nil, true
 	}
-	if len(h.ring) == 0 {
-		return nil, false
-	}
-	if h.ring[0].Seq > from {
-		return nil, false
-	}
 	idx := sort.Search(len(h.ring), func(i int) bool { return h.ring[i].Seq >= from })
-	if idx >= len(h.ring) {
-		return nil, true
+	next := from
+	for _, d := range h.ring[idx:] {
+		if d.Seq != next {
+			return nil, false
+		}
+		next++
 	}
-	if h.ring[idx].Seq != from {
+	if next != h.seq+1 {
 		return nil, false
 	}
 	return h.ring[idx:], true
 }
 
-// loadSnapshot returns the publisher's cached snapshot, or an empty snapshot
-// at the current seq when none exists yet. The cache is short-lived so a
-// reconnect sees a recent snapshot without a KV hit on every hello.
-func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot) {
-	h.snapMu.Lock()
-	if len(h.snapBytes) > 0 && time.Since(h.snapAt) < snapshotTTL && h.snapVal != nil {
-		bytes := append([]byte(nil), h.snapBytes...)
-		snap := h.snapVal
-		h.snapMu.Unlock()
-		return bytes, snap
-	}
-	h.snapMu.Unlock()
-
-	var bytes []byte
-	snap := &dorv1.Snapshot{}
-	if kv, err := h.bus.KV(ctx, bus.KVBucketLiveState); err == nil {
-		getCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-		entry, err := kv.Get(getCtx, bus.KVLiveStateSnapshotKey)
-		cancel()
-		if err == nil {
-			if proto.Unmarshal(entry.Value(), snap) == nil {
-				bytes = append([]byte(nil), entry.Value()...)
+// loadSnapshot returns only a successfully decoded publisher snapshot. Missing
+// keys, read failures and corrupt bytes leave clients waiting for recovery.
+func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error) {
+	for {
+		h.snapMu.Lock()
+		if h.snapVal != nil && time.Since(h.snapAt) < snapshotTTL {
+			data, snap := append([]byte(nil), h.snapBytes...), h.snapVal
+			h.snapMu.Unlock()
+			return data, snap, nil
+		}
+		if loading := h.snapLoad; loading != nil {
+			h.snapMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-loading:
+				continue
 			}
 		}
+		if time.Now().Before(h.snapRetryAt) {
+			err := h.snapErr
+			if err == nil {
+				err = fmt.Errorf("gateway: waiting for newer snapshot")
+			}
+			h.snapMu.Unlock()
+			return nil, nil, err
+		}
+		h.snapLoad = make(chan struct{})
+		h.snapMu.Unlock()
+		data, snap, err := h.fetchSnapshot(context.WithoutCancel(ctx))
+		h.snapMu.Lock()
+		if err == nil {
+			h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = data, snap, snap.Seq, time.Now()
+			h.snapFailures = 0
+		} else {
+			h.snapFailures++
+		}
+		h.snapErr = err
+		delay := 100 * time.Millisecond
+		for i := 1; i < h.snapFailures && delay < 2*time.Second; i++ {
+			delay *= 2
+		}
+		if delay > 2*time.Second {
+			delay = 2 * time.Second
+		}
+		h.snapRetryAt = time.Now().Add(delay)
+		close(h.snapLoad)
+		h.snapLoad = nil
+		h.snapMu.Unlock()
+		return data, snap, err
 	}
-	if len(bytes) == 0 {
-		snap = &dorv1.Snapshot{Seq: h.latest(), BuiltAt: time.Now().Unix()}
-		bytes, _ = proto.MarshalOptions{Deterministic: true}.Marshal(snap)
+}
+
+func (h *hub) fetchSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error) {
+	opCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var snap *dorv1.Snapshot
+	var err error
+	if h.readSnapshot != nil {
+		snap, err = h.readSnapshot(opCtx)
+	} else {
+		kv, kvErr := h.bus.KV(opCtx, bus.KVBucketLiveState)
+		if kvErr != nil {
+			return nil, nil, kvErr
+		}
+		publisher, getErr := h.bus.KV(opCtx, bus.KVBucketPublisher)
+		err = getErr
+		if err == nil {
+			snap, err = publication.Snapshot(opCtx, publisher, kv)
+		}
 	}
-	msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: snap}}
-	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
-		// Fall back to the snapshot alone; a client that cannot decode this
-		// reconnects and tries again.
-		return bytes, snap
+		return nil, nil, err
 	}
-	h.snapMu.Lock()
-	h.snapBytes = wire
-	h.snapVal = snap
-	h.snapSeq = snap.Seq
-	h.snapAt = time.Now()
-	h.snapMu.Unlock()
-	return wire, snap
+	if snap == nil {
+		return nil, nil, fmt.Errorf("gateway: snapshot unavailable")
+	}
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: snap}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return wire, snap, nil
 }

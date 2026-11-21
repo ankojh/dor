@@ -17,16 +17,19 @@ const (
 type Metrics struct {
 	registry *prometheus.Registry
 
-	in         *prometheus.CounterVec
-	out        *prometheus.CounterVec
-	errors     *prometheus.CounterVec
-	terminal   *prometheus.CounterVec
-	redelivery *prometheus.CounterVec
-	handle     *prometheus.HistogramVec
-	queueLag   *prometheus.GaugeVec
-	pending    *prometheus.GaugeVec
-	ackPending *prometheus.GaugeVec
-	inflight   *prometheus.GaugeVec
+	in                  *prometheus.CounterVec
+	out                 *prometheus.CounterVec
+	errors              *prometheus.CounterVec
+	terminal            *prometheus.CounterVec
+	redelivery          *prometheus.CounterVec
+	handle              *prometheus.HistogramVec
+	queueLag            *prometheus.GaugeVec
+	pending             *prometheus.GaugeVec
+	ackPending          *prometheus.GaugeVec
+	inflight            *prometheus.GaugeVec
+	publicationDuration *prometheus.HistogramVec
+	publicationWritten  *prometheus.CounterVec
+	publicationStorage  prometheus.Gauge
 }
 
 // NewMetrics builds a registry with the process and Go collectors plus the
@@ -37,7 +40,10 @@ func NewMetrics() *Metrics {
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	m := &Metrics{
-		registry: reg,
+		publicationDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "dor_publisher_storage_seconds", Help: "Publisher journal, base, lease and cache encode/write duration.", Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5}}, []string{"operation"}),
+		publicationWritten:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "dor_publisher_storage_bytes_total", Help: "Encoded publisher storage bytes by operation."}, []string{"operation"}),
+		publicationStorage:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "dor_publisher_storage_bytes", Help: "Current publisher KV physical message bytes; backpressure begins before the bucket limit."}),
+		registry:            reg,
 		in: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "dor_agent_in_total",
 			Help: "Messages delivered to an agent, including redeliveries.",
@@ -84,7 +90,7 @@ func NewMetrics() *Metrics {
 		}, []string{"agent"}),
 	}
 	reg.MustRegister(m.in, m.out, m.errors, m.terminal, m.redelivery, m.handle,
-		m.queueLag, m.pending, m.ackPending, m.inflight)
+		m.queueLag, m.pending, m.ackPending, m.inflight, m.publicationDuration, m.publicationWritten, m.publicationStorage)
 	return m
 }
 

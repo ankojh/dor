@@ -175,6 +175,9 @@ message AlertHit {
   int64 fired_at = 4;  // unix seconds
   string title = 5;    // story title at fire time
   string prompt = 6;   // the alert prompt
+  uint64 generation = 7; // 0=new, then one per sources doubling
+  bool approx = 8; // embedding/lexical match without jev
+  uint32 source_count = 9;
 }
 
 // WireRow is one row in the live wire.

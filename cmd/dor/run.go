@@ -273,6 +273,9 @@ func runCommand(args []string) error {
 	if dbStore != nil {
 		enrichmentDeps.StoryIndex = dbStore
 	}
+	if dbWriter != nil {
+		enrichmentDeps.LinkSink = dbWriter
+	}
 	enrichmentDeps.RelationShards = cfg.relationShards
 	enrichmentDeps.RelationShard = cfg.relationShard
 	enrichmentDeps.RelationDebounce = cfg.relationDebounce
@@ -281,6 +284,9 @@ func runCommand(args []string) error {
 		seedSources(ctx, dbStore, cfg.sourcesFile, logger)
 	}
 	textSvc := enrichmentDeps.Text
+	if textSvc != nil && dbWriter != nil {
+		textSvc.WithSink(dbWriter)
+	}
 
 	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, enrichmentDeps)
 	if err != nil {
@@ -297,13 +303,17 @@ func runCommand(args []string) error {
 
 	var gw *gateway.Server
 	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
-		gw, err = gateway.New(gateway.Config{
+		gwCfg := gateway.Config{
 			Addr:    cfg.gatewayAddr,
 			Origins: splitList(cfg.gatewayOrigins),
 			Bus:     b,
 			Logger:  logger,
 			Text:    textSvc,
-		})
+		}
+		if dbStore != nil {
+			gwCfg.Store = dbStore
+		}
+		gw, err = gateway.New(gwCfg)
 		if err != nil {
 			return err
 		}

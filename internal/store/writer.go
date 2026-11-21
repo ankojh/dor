@@ -48,12 +48,22 @@ type WriterStats struct {
 // Writer is the non-blocking path from agents to Postgres. Enqueue only sends
 // on a bounded channel; it never touches the database. A full queue drops the
 // record and increments DroppedQueue.
+// auxMutation is a small durable side record (link/text) queued on the same
+// non-blocking writer as articles and stories.
+type auxMutation struct {
+	kind      uint8
+	link      LinkRecord
+	storyText StoryTextRecord
+	linkText  LinkTextRecord
+}
+
 type Writer struct {
 	store      *Store
 	opts       WriterOptions
 	log        *slog.Logger
 	queue      chan ArticleRecord
 	storyQueue chan StoryRecord
+	auxQueue   chan auxMutation
 	done       chan struct{}
 	ready      chan struct{}
 
@@ -104,6 +114,7 @@ func NewWriter(s *Store, opts WriterOptions) (*Writer, error) {
 		log:        opts.Logger,
 		queue:      make(chan ArticleRecord, opts.QueueSize),
 		storyQueue: make(chan StoryRecord, max(64, opts.QueueSize/4)),
+		auxQueue:   make(chan auxMutation, max(64, opts.QueueSize/4)),
 		done:       make(chan struct{}),
 		ready:      make(chan struct{}),
 	}, nil
@@ -152,7 +163,37 @@ func (w *Writer) EnqueueStory(rec StoryRecord) bool {
 	}
 }
 
-// Close stops accepting records, drains both queues and waits for the final
+// EnqueueLink mirrors one link upsert/removal. It never blocks.
+func (w *Writer) EnqueueLink(rec LinkRecord) bool {
+	return w.enqueueAux(auxMutation{kind: 1, link: rec})
+}
+
+// EnqueueStoryText mirrors a story brief.
+func (w *Writer) EnqueueStoryText(rec StoryTextRecord) bool {
+	return w.enqueueAux(auxMutation{kind: 2, storyText: rec})
+}
+
+// EnqueueLinkText mirrors a link "why".
+func (w *Writer) EnqueueLinkText(rec LinkTextRecord) bool {
+	return w.enqueueAux(auxMutation{kind: 3, linkText: rec})
+}
+
+func (w *Writer) enqueueAux(m auxMutation) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.closed {
+		return false
+	}
+	select {
+	case w.auxQueue <- m:
+		return true
+	default:
+		w.droppedQueue.Add(1)
+		return false
+	}
+}
+
+// Close stops accepting records, drains all queues and waits for the final
 // batch. It is bounded by ctx; a slow database does not hold shutdown forever.
 func (w *Writer) Close(ctx context.Context) error {
 	w.closeOnce.Do(func() {
@@ -160,6 +201,7 @@ func (w *Writer) Close(ctx context.Context) error {
 		w.closed = true
 		close(w.queue)
 		close(w.storyQueue)
+		close(w.auxQueue)
 		w.mu.Unlock()
 	})
 	if !w.started.Load() {
@@ -199,6 +241,9 @@ func (w *Writer) loop() {
 	defer ticker.Stop()
 	buffer := make([]ArticleRecord, 0, w.opts.BatchSize)
 	stories := make([]StoryRecord, 0, max(8, w.opts.BatchSize/4))
+	var links []LinkRecord
+	var storyTexts []StoryTextRecord
+	var linkTexts []LinkTextRecord
 	flush := func() {
 		if len(buffer) > 0 {
 			w.flush(buffer)
@@ -208,11 +253,24 @@ func (w *Writer) loop() {
 			w.flushStories(stories)
 			stories = stories[:0]
 		}
+		if len(links) > 0 {
+			w.flushLinks(links)
+			links = nil
+		}
+		if len(storyTexts) > 0 {
+			w.flushStoryTexts(storyTexts)
+			storyTexts = nil
+		}
+		if len(linkTexts) > 0 {
+			w.flushLinkTexts(linkTexts)
+			linkTexts = nil
+		}
 	}
-	articlesOpen, storiesOpen := true, true
+	articlesOpen, storiesOpen, auxOpen := true, true, true
 	articles := w.queue
 	storyUpdates := w.storyQueue
-	for articlesOpen || storiesOpen {
+	aux := w.auxQueue
+	for articlesOpen || storiesOpen || auxOpen {
 		select {
 		case rec, ok := <-articles:
 			if !ok {
@@ -236,11 +294,79 @@ func (w *Writer) loop() {
 				w.flushStories(stories)
 				stories = stories[:0]
 			}
+		case m, ok := <-aux:
+			if !ok {
+				auxOpen = false
+				aux = nil
+				continue
+			}
+			switch m.kind {
+			case 1:
+				links = append(links, m.link)
+			case 2:
+				storyTexts = append(storyTexts, m.storyText)
+			case 3:
+				linkTexts = append(linkTexts, m.linkText)
+			}
+			if len(links)+len(storyTexts)+len(linkTexts) >= w.opts.BatchSize {
+				flush()
+			}
 		case <-ticker.C:
 			flush()
 		}
 	}
 	flush()
+}
+
+func (w *Writer) flushLinks(batch []LinkRecord) {
+	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
+		err := w.store.UpsertLinks(ctx, batch)
+		cancel()
+		if err == nil {
+			return
+		}
+		w.errors.Add(1)
+		w.log.Warn("store link batch failed", "attempt", attempt+1, "rows", len(batch), "err", err)
+		if attempt < w.opts.MaxRetries {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+	}
+	w.droppedBatch.Add(int64(len(batch)))
+}
+
+func (w *Writer) flushStoryTexts(batch []StoryTextRecord) {
+	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
+		err := w.store.UpsertStoryTexts(ctx, batch)
+		cancel()
+		if err == nil {
+			return
+		}
+		w.errors.Add(1)
+		w.log.Warn("store story text batch failed", "attempt", attempt+1, "rows", len(batch), "err", err)
+		if attempt < w.opts.MaxRetries {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+	}
+	w.droppedBatch.Add(int64(len(batch)))
+}
+
+func (w *Writer) flushLinkTexts(batch []LinkTextRecord) {
+	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
+		err := w.store.UpsertLinkTexts(ctx, batch)
+		cancel()
+		if err == nil {
+			return
+		}
+		w.errors.Add(1)
+		w.log.Warn("store link text batch failed", "attempt", attempt+1, "rows", len(batch), "err", err)
+		if attempt < w.opts.MaxRetries {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+	}
+	w.droppedBatch.Add(int64(len(batch)))
 }
 
 func (w *Writer) flushStories(batch []StoryRecord) {

@@ -37,6 +37,7 @@ type LocationRecord struct {
 // SourceRecord is one reviewed source row.
 type SourceRecord struct {
 	ID        string
+	Name      string
 	Kind      string
 	URL       string
 	Country   string
@@ -68,4 +69,34 @@ type StoryRecord struct {
 	ExpiresAt   time.Time
 	Locations   []LocationRecord
 	ArticleIDs  []string
+}
+
+// LinkRecord is one durable link upsert or removal. A record with Remove=true
+// deletes the pair; a zero-strength tombstone is represented by Remove, not by
+// storing a fake link in the durable table.
+type LinkRecord struct {
+	A          string
+	B          string
+	Type       int16
+	Direction  int16
+	Confidence float32
+	Strength   float32
+	Unverified bool
+	UpdatedAt  time.Time
+	DecaysAt   time.Time
+	Remove     bool
+}
+
+// StoryTextRecord is the durable mirror of the storytext KV cache. An empty
+// brief leaves the existing editor brief untouched.
+type StoryTextRecord struct {
+	ID    string
+	Brief string
+}
+
+// LinkTextRecord is the durable mirror of the linktext KV cache.
+type LinkTextRecord struct {
+	A   string
+	B   string
+	Why string
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/llm"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/store"
 )
 
 // Completer is the subset of *llm.Client used here.
@@ -25,12 +26,20 @@ type Completer interface {
 	Complete(ctx context.Context, job llm.Job) (llm.Result, error)
 }
 
+// TextSink is the narrow durable mirror for the KV text cache. Nil keeps the
+// service fully functional with KV only.
+type TextSink interface {
+	EnqueueStoryText(store.StoryTextRecord) bool
+	EnqueueLinkText(store.LinkTextRecord) bool
+}
+
 // Service reads and fills the storytext/linktext caches in live_state.
 type Service struct {
-	bus *bus.Bus
-	log *slog.Logger
-	llm Completer
-	now func() time.Time
+	bus  *bus.Bus
+	log  *slog.Logger
+	llm  Completer
+	sink TextSink
+	now  func() time.Time
 
 	kvOnce sync.Once
 	kv     jetstream.KeyValue
@@ -54,6 +63,13 @@ func New(b *bus.Bus, log *slog.Logger, l Completer) *Service {
 		sem:    make(chan struct{}, 2),
 		flight: make(map[string]bool),
 	}
+}
+
+// WithSink attaches the optional durable mirror. Call it before the service
+// starts serving; the sink itself must be non-blocking.
+func (s *Service) WithSink(sink TextSink) *Service {
+	s.sink = sink
+	return s
 }
 
 func (s *Service) keyValue(ctx context.Context) jetstream.KeyValue {
@@ -117,7 +133,7 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 	sources := s.sources(ctx, kv, meta)
 	if story.SourceCount < 2 || s.llm == nil || len(sources) < 2 {
 		out := fallbackStory(story, sources, int(story.SourceCount), s.nowString())
-		live.PutStoryText(ctx, kv, out)
+		s.putStoryText(ctx, kv, out)
 		return out, true
 	}
 
@@ -131,14 +147,14 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 	if err != nil {
 		s.log.Debug("text: brief unavailable", "story", id, "err", err)
 		out := fallbackStory(story, sources, int(story.SourceCount), s.nowString())
-		live.PutStoryText(ctx, kv, out)
+		s.putStoryText(ctx, kv, out)
 		return out, true
 	}
 	var draft llm.Draft
 	if err := res.Decode(&draft); err != nil {
 		s.log.Debug("text: brief decode failed", "story", id, "err", err)
 		out := fallbackStory(story, sources, int(story.SourceCount), s.nowString())
-		live.PutStoryText(ctx, kv, out)
+		s.putStoryText(ctx, kv, out)
 		return out, true
 	}
 	title := strings.TrimSpace(draft.Title)
@@ -155,7 +171,7 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 		GeneratedAt: s.nowString(),
 		Model:       res.Model,
 	}
-	live.PutStoryText(ctx, kv, out)
+	s.putStoryText(ctx, kv, out)
 	return out, true
 }
 
@@ -193,7 +209,7 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 	}
 	fallback := live.LinkText{Kind: "link", A: a, B: b, Available: false, GeneratedAt: s.nowString()}
 	if s.llm == nil {
-		live.PutLinkText(ctx, kv, fallback)
+		s.putLinkText(ctx, kv, fallback)
 		return fallback, true
 	}
 	endA := s.linkEnd(ctx, kv, a)
@@ -208,12 +224,12 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 	res, err := s.llm.Complete(ctx, job)
 	if err != nil {
 		s.log.Debug("text: why unavailable", "a", a, "b", b, "err", err)
-		live.PutLinkText(ctx, kv, fallback)
+		s.putLinkText(ctx, kv, fallback)
 		return fallback, true
 	}
 	var exp llm.Explanation
 	if err := res.Decode(&exp); err != nil {
-		live.PutLinkText(ctx, kv, fallback)
+		s.putLinkText(ctx, kv, fallback)
 		return fallback, true
 	}
 	out := live.LinkText{
@@ -225,8 +241,22 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 		GeneratedAt: s.nowString(),
 		Model:       res.Model,
 	}
-	live.PutLinkText(ctx, kv, out)
+	s.putLinkText(ctx, kv, out)
 	return out, true
+}
+
+func (s *Service) putStoryText(ctx context.Context, kv jetstream.KeyValue, t live.StoryText) {
+	live.PutStoryText(ctx, kv, t)
+	if s.sink != nil {
+		s.sink.EnqueueStoryText(store.StoryTextRecord{ID: t.ID, Brief: t.Brief})
+	}
+}
+
+func (s *Service) putLinkText(ctx context.Context, kv jetstream.KeyValue, t live.LinkText) {
+	live.PutLinkText(ctx, kv, t)
+	if s.sink != nil {
+		s.sink.EnqueueLinkText(store.LinkTextRecord{A: t.A, B: t.B, Why: t.Why})
+	}
 }
 
 // PrefetchStory fills a brief in the background (focus / hover intent).

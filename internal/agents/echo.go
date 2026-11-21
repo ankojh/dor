@@ -80,6 +80,9 @@ type Deps struct {
 	// loaded in-memory 48 h story map.
 	StoryIndex StoryIndex
 
+	// LinkSink is the durable link mirror; nil keeps links in KV only.
+	LinkSink LinkSink
+
 	// RelationShards and RelationShard partition story shards across replicas.
 	// Shard -1 runs every shard in one process.
 	RelationShards   int
@@ -172,6 +175,7 @@ func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *sl
 	relation, err := NewRelationJudge(b, metrics, log, RelationConfig{
 		Decider:    deps.Decider,
 		Thresholds: thresholds,
+		Persist:    deps.LinkSink,
 		Shards:     deps.RelationShards,
 		Shard:      deps.RelationShard,
 		Debounce:   deps.RelationDebounce,

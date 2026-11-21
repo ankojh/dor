@@ -19,10 +19,17 @@ import (
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/store"
 )
 
 // RelationAgentName is the registry name of the relation judge.
 const RelationAgentName = "relation"
+
+// LinkSink is the non-blocking durable mirror for links. *store.Writer
+// satisfies it; nil keeps the relation judge KV-only.
+type LinkSink interface {
+	EnqueueLink(store.LinkRecord) bool
+}
 
 // RelateDecider is the jev surface used here. *decide.Client satisfies it.
 type RelateDecider interface {
@@ -32,6 +39,7 @@ type RelateDecider interface {
 // RelationConfig configures the judge.
 type RelationConfig struct {
 	Decider    RelateDecider
+	Persist    LinkSink
 	Thresholds config.Thresholds
 	Shards     int
 	Shard      int // -1 runs every shard in this process
@@ -63,6 +71,7 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 		index:   make(map[string]*relationEntry),
 		pending: make(map[string]time.Time),
 		links:   make(map[string]*dorv1.Link),
+		sink:    cfg.Persist,
 		work:    make(chan string, 64),
 	}
 	filters, err := relationFilters(cfg.Shards, cfg.Shard)
@@ -223,6 +232,7 @@ type relationCore struct {
 	index   map[string]*relationEntry
 	pending map[string]time.Time
 	links   map[string]*dorv1.Link
+	sink    LinkSink
 	work    chan string
 }
 
@@ -411,6 +421,14 @@ func (c *relationCore) upsertLink(ctx context.Context, link *dorv1.Link) {
 	c.mu.Lock()
 	c.links[link.A+"."+link.B] = link
 	c.mu.Unlock()
+	if c.sink != nil {
+		c.sink.EnqueueLink(store.LinkRecord{
+			A: link.A, B: link.B, Type: int16(link.Type), Direction: int16(link.Dir),
+			Confidence: link.Confidence, Strength: link.Strength, Unverified: link.Unverified,
+			UpdatedAt: time.Unix(link.UpdatedAt, 0).UTC(),
+			DecaysAt:  time.Unix(link.UpdatedAt, 0).UTC().Add(48 * time.Hour),
+		})
+	}
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(link)
 	if err != nil {
 		return
@@ -440,6 +458,9 @@ func (c *relationCore) removeLink(ctx context.Context, a, b string) {
 		Type:      existing.Type,
 		Dir:       existing.Dir,
 		UpdatedAt: c.now().Unix(),
+	}
+	if c.sink != nil {
+		c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
 	}
 	live.PutLink(ctx, c.kv, tombstone)
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(tombstone)

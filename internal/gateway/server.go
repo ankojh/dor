@@ -52,6 +52,7 @@ type Config struct {
 	Bus     *bus.Bus
 	Logger  *slog.Logger
 	Text    TextService
+	Store   StoryStore
 }
 
 // Server is one gateway replica.
@@ -90,6 +91,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/text", s.handleText)
+	mux.HandleFunc("GET /api/stories", s.handleStories)
+	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil

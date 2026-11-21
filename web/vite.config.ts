@@ -7,6 +7,17 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    proxy: {
+      "/ws": {
+        target: process.env.VITE_WS_PROXY_TARGET ?? "ws://127.0.0.1:8080",
+        ws: true,
+        changeOrigin: true,
+      },
+      "/api": {
+        target: process.env.VITE_API_PROXY_TARGET ?? "http://127.0.0.1:8080",
+        changeOrigin: true,
+      },
+    },
   },
   worker: {
     format: "es",

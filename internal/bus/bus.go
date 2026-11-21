@@ -43,15 +43,17 @@ const (
 // rate-limit buckets, never for daily spend counters (M0·3 persists those
 // durably).
 const (
-	KVBucketSeen      = "seen"
-	KVBucketJoins     = "joins"
-	KVBucketBudgets   = "budgets"
-	KVBucketLiveState = "live_state"
+	KVBucketSeen         = "seen"
+	KVBucketJoins        = "joins"
+	KVBucketBudgets      = "budgets"
+	KVBucketLiveState    = "live_state"
+	KVBucketSourceHealth = "source_health"
 
-	KVSeenTTL      = 48 * time.Hour
-	KVJoinsTTL     = 30 * time.Second
-	KVBudgetsTTL   = time.Hour
-	KVLiveStateTTL = 48 * time.Hour
+	KVSeenTTL         = 48 * time.Hour
+	KVJoinsTTL        = 30 * time.Second
+	KVBudgetsTTL      = time.Hour
+	KVLiveStateTTL    = 48 * time.Hour
+	KVSourceHealthTTL = 7 * 24 * time.Hour
 )
 
 // Header names shared by every agent.
@@ -361,6 +363,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketJoins, KVJoinsTTL},
 		{KVBucketBudgets, KVBudgetsTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
+		{KVBucketSourceHealth, KVSourceHealthTTL},
 	}
 }
 

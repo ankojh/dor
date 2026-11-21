@@ -8,7 +8,7 @@ WEB := web
 BIN := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean
+.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart sources-check clean
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -81,6 +81,9 @@ ci: web-install proto-check vet test-race go-build web-lint web-format-check web
 
 test-echo-restart: ## Kill -9 the echo agent mid-stream and verify no duplicate output
 	./scripts/test-echo-restart.sh
+
+sources-check: ## Fetch and verify every source in the seed list (network; JSON on stdout)
+	$(GO) run ./tools/feedcheck -sources deploy/sources/sources.yaml
 
 clean: ## Remove build outputs
 	rm -rf $(BIN) $(WEB)/dist

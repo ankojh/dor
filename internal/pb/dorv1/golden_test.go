@@ -122,6 +122,45 @@ func goldenArticle() *Article {
 	}
 }
 
+func goldenRawArticle() *RawArticle {
+	return &RawArticle{
+		Id:          "raw:0123456789abcdef",
+		SourceId:    "bbc-world",
+		Kind:        SourceKind_SOURCE_KIND_RSS,
+		Url:         "https://example.com/b/world/flooding-in-paris",
+		Title:       "Flooding «Paris»",
+		Summary:     "Short snippet with emoji 🌍 and ünïcødé.",
+		PublishedAt: 1_700_000_000,
+		FetchedAt:   1_700_000_030,
+		Lang:        "en",
+		Hints: &RawHints{
+			Located:       true,
+			Lat:           48.5,
+			Lon:           2.25,
+			Precision:     Precision_PRECISION_CITY,
+			Themes:        []string{"PROTEST", "ECON_ENERGY"},
+			Country:       "FR",
+			Hazard:        "flood",
+			Magnitude:     5.4,
+			Severity:      0.75,
+			EventId:       "us7000abcd",
+			MagnitudeUnit: "Mw",
+			Place:         "Paris, France",
+			Revision:      "1700000030",
+		},
+		Burst: true,
+	}
+}
+
+func goldenRecordFrame() *RecordFrame {
+	return &RecordFrame{
+		Subject:      "article.raw.priority",
+		MsgId:        "raw:0123456789abcdef",
+		ReceivedAtMs: 1_700_000_030_123,
+		Payload:      []byte{0x01, 0x02, 0x03},
+	}
+}
+
 func goldenSnapshot() *Snapshot {
 	return &Snapshot{
 		Seq:     42,
@@ -164,6 +203,8 @@ func allGoldenCases() []goldenCase {
 
 	return []goldenCase{
 		{"article", goldenArticle()},
+		{"raw_article", goldenRawArticle()},
+		{"record_frame", goldenRecordFrame()},
 		{"story", goldenStory()},
 		{"link", goldenLink()},
 		{"link_key", goldenLinkKey()},

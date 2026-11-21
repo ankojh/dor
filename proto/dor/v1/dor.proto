@@ -230,3 +230,62 @@ message ClientMessage {
     Ack ack = 6;
   }
 }
+
+// SourceKind is the fetch family of a raw article's source. It is how the
+// normalizer and the wire tell a feed item from a GDELT bulk row or a hazard
+// alert without consulting the source list.
+enum SourceKind {
+  SOURCE_KIND_UNSPECIFIED = 0;
+  SOURCE_KIND_RSS = 1;
+  SOURCE_KIND_GDELT = 2;
+  SOURCE_KIND_USGS = 3;
+  SOURCE_KIND_GDACS = 4;
+  SOURCE_KIND_EONET = 5;
+  SOURCE_KIND_RELIEFWEB = 6;
+}
+
+// RawHints are the fetcher's untrusted location and severity signals. The
+// plotter still decides the final place; hints only save it work and feed the
+// heat boost for hazards.
+message RawHints {
+  bool located = 1;        // lat/lon are usable
+  double lat = 2;
+  double lon = 3;
+  Precision precision = 4;
+  repeated string themes = 5;
+  string country = 6;      // ISO 3166-1 code when the upstream provides one; empty otherwise
+  string hazard = 7;       // earthquake, flood, cyclone, volcano, ...
+  double magnitude = 8;    // upstream magnitude, e.g. quake Mw
+  double severity = 9;     // normalised 0..1 where the upstream gives a scale
+  string event_id = 10;    // upstream id (USGS/GDACS/EONET/GDELT record)
+  string magnitude_unit = 11; // "Mw", "m/s", "knots", "acres", ...
+  string place = 12;       // upstream place name, e.g. "Delhi, India"
+  string revision = 13;    // upstream revision (update time, episode+alert level, geometry date)
+}
+
+// RawArticle is one fetched item before normalization. The fetchers write it
+// to article.raw; hazards write the same message to article.raw.priority.
+// Only a short snippet is carried, never the full article text.
+message RawArticle {
+  string id = 1;          // raw:<sha256(url)>; the normalizer assigns the canonical id later
+  string source_id = 2;   // id from deploy/sources/sources.yaml
+  SourceKind kind = 3;
+  string url = 4;
+  string title = 5;
+  string summary = 6;     // short snippet, never full text
+  int64 published_at = 7; // unix seconds; 0 when the source does not say
+  int64 fetched_at = 8;   // unix seconds
+  string lang = 9;        // BCP 47 when known
+  RawHints hints = 10;
+  bool burst = 11;        // GDELT bulk: the wire collapses bursts by source/time/place
+}
+
+// RecordFrame is one raw pipeline message inside a record-mode file. See
+// docs/record-format.md. A file is an eight-byte magic header followed by
+// length-delimited RecordFrame frames, gzip-compressed.
+message RecordFrame {
+  string subject = 1;       // article.raw or article.raw.priority
+  string msg_id = 2;        // Nats-Msg-Id, so a replay is idempotent
+  int64 received_at_ms = 3; // unix milliseconds when the writer accepted it
+  bytes payload = 4;        // serialized RawArticle
+}

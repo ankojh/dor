@@ -555,7 +555,7 @@ func readCountries(path string) (map[string]rawCountry, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) < 5 {
+		if len(fields) < 6 {
 			continue
 		}
 		out[fields[0]] = rawCountry{Code: fields[0], Name: fields[4], Capital: fields[5]}

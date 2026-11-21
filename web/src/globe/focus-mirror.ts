@@ -40,6 +40,7 @@ export class FocusMirror {
   private readonly linkB: Uint16Array;
   private readonly linkType: Uint8Array;
   private readonly linkStrength: Float32Array;
+  private readonly linkUnverified: Uint8Array;
   private readonly storyLng: Float64Array;
   private readonly storyLat: Float64Array;
   private readonly storyTitle: string[];
@@ -78,6 +79,8 @@ export class FocusMirror {
     this.linkType.set(init.links.type);
     this.linkStrength = new Float32Array(this.linkCapacity);
     this.linkStrength.set(init.links.strength);
+    this.linkUnverified = new Uint8Array(this.linkCapacity);
+    if (init.links.unverified) this.linkUnverified.set(init.links.unverified);
     this.storyLng = new Float64Array(this.storyCapacity);
     this.storyLng.set(init.stories.lng);
     this.storyLat = new Float64Array(this.storyCapacity);
@@ -238,6 +241,7 @@ export class FocusMirror {
             place: this.storyPlace[other]!,
             type: this.linkType[link]!,
             strength: this.linkStrength[link]!,
+            unverified: this.linkUnverified[link] === 1,
           };
         })
         .sort((left, right) => right.strength - left.strength)
@@ -316,6 +320,7 @@ export class FocusMirror {
       this.linkB[linkIndex] = b;
       this.linkType[linkIndex] = type;
       this.linkStrength[linkIndex] = strength;
+      this.linkUnverified[linkIndex] = 0;
       this.linkActive[linkIndex] = 1;
     } else {
       this.linkA[linkIndex] = 0;

@@ -56,12 +56,16 @@ type config struct {
 	gatewayAddr    string
 	gatewayOrigins string
 
-	modelsFile     string
-	thresholdsFile string
-	budgetFile     string
-	geonamesDir    string
-	photonURL      string
-	teiURL         string
+	modelsConfig     string
+	thresholdsConfig string
+	budgetConfig     string
+	geonamesDir      string
+	photonURL        string
+	teiURL           string
+	relationShards   int
+	relationShard    int
+	relationDebounce time.Duration
+	editorDebounce   time.Duration
 }
 
 func runCommand(args []string) error {
@@ -93,12 +97,16 @@ func runCommand(args []string) error {
 		gatewayAddr:    envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
 		gatewayOrigins: envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
 
-		modelsFile:     envOr("DOR_MODELS_CONFIG", "config/models.yaml"),
-		thresholdsFile: envOr("DOR_THRESHOLDS_CONFIG", "config/thresholds.yaml"),
-		budgetFile:     envOr("DOR_BUDGET_CONFIG", "config/budget.yaml"),
-		geonamesDir:    envOr("DOR_GEONAMES_DIR", geo.DefaultDir),
-		photonURL:      envOr("DOR_PHOTON_URL", ""),
-		teiURL:         envOr("DOR_TEI_URL", "http://127.0.0.1:8090"),
+		modelsConfig:     envOr("DOR_MODELS_CONFIG", "config/models.yaml"),
+		thresholdsConfig: envOr("DOR_THRESHOLDS_CONFIG", "config/thresholds.yaml"),
+		budgetConfig:     envOr("DOR_BUDGET_CONFIG", "config/budget.yaml"),
+		geonamesDir:      envOr("DOR_GEONAMES_DIR", geo.DefaultDir),
+		photonURL:        envOr("DOR_PHOTON_URL", ""),
+		teiURL:           envOr("DOR_TEI_URL", "http://127.0.0.1:8090"),
+		relationShards:   envIntOr("DOR_RELATION_SHARDS", 3),
+		relationShard:    envIntOr("DOR_RELATION_SHARD", -1),
+		relationDebounce: envDurationOr("DOR_RELATION_DEBOUNCE", 3*time.Second),
+		editorDebounce:   envDurationOr("DOR_EDITOR_DEBOUNCE", 5*time.Second),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -128,12 +136,16 @@ func runCommand(args []string) error {
 
 	fs.StringVar(&cfg.gatewayAddr, "gateway-addr", cfg.gatewayAddr, "WebSocket gateway listen address; empty disables it")
 	fs.StringVar(&cfg.gatewayOrigins, "gateway-origins", cfg.gatewayOrigins, "comma-separated WebSocket Origin patterns")
-	fs.StringVar(&cfg.modelsFile, "models-config", cfg.modelsFile, "models.yaml path")
-	fs.StringVar(&cfg.thresholdsFile, "thresholds-config", cfg.thresholdsFile, "thresholds.yaml path")
-	fs.StringVar(&cfg.budgetFile, "budget-config", cfg.budgetFile, "budget.yaml path")
+	fs.StringVar(&cfg.modelsConfig, "models-config", cfg.modelsConfig, "model pins and price config")
+	fs.StringVar(&cfg.thresholdsConfig, "thresholds-config", cfg.thresholdsConfig, "decision thresholds")
+	fs.StringVar(&cfg.budgetConfig, "budget-config", cfg.budgetConfig, "daily/per-API budget limits")
 	fs.StringVar(&cfg.geonamesDir, "geonames-dir", cfg.geonamesDir, "GeoNames cache directory")
 	fs.StringVar(&cfg.photonURL, "photon-url", cfg.photonURL, "Photon base URL; empty disables precise geocoding")
 	fs.StringVar(&cfg.teiURL, "tei-url", cfg.teiURL, "TEI embedding base URL; empty disables remote embeddings")
+	fs.IntVar(&cfg.relationShards, "relation-shards", cfg.relationShards, "number of relation-judge shards")
+	fs.IntVar(&cfg.relationShard, "relation-shard", cfg.relationShard, "run only this relation shard (0-based); -1 runs all")
+	fs.DurationVar(&cfg.relationDebounce, "relation-debounce", cfg.relationDebounce, "per-story relation debounce")
+	fs.DurationVar(&cfg.editorDebounce, "editor-debounce", cfg.editorDebounce, "per-story editor debounce")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -258,9 +270,14 @@ func runCommand(args []string) error {
 	}
 
 	enrichmentDeps := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	enrichmentDeps.RelationShards = cfg.relationShards
+	enrichmentDeps.RelationShard = cfg.relationShard
+	enrichmentDeps.RelationDebounce = cfg.relationDebounce
+	enrichmentDeps.EditorDebounce = cfg.editorDebounce
 	if dbStore != nil {
 		seedSources(ctx, dbStore, cfg.sourcesFile, logger)
 	}
+	textSvc := enrichmentDeps.Text
 
 	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, enrichmentDeps)
 	if err != nil {
@@ -282,6 +299,7 @@ func runCommand(args []string) error {
 			Origins: splitList(cfg.gatewayOrigins),
 			Bus:     b,
 			Logger:  logger,
+			Text:    textSvc,
 		})
 		if err != nil {
 			return err

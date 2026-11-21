@@ -66,6 +66,7 @@ type storyState struct {
 	SourceIDs  []string
 	Embedding  []float32
 	Entities   []string
+	Cell       string
 	ExpiresAt  time.Time
 	FirstSeen  int64
 	UpdatedAt  int64
@@ -392,11 +393,6 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	story.Story.UpdatedAt = story.UpdatedAt
 	story.ExpiresAt = now.Add(clusterStoryTTL)
 	story.Story.SourceCount = uint32(len(story.SourceIDs))
-	if joinKind == dorv1.JoinKind_JOIN_KIND_NEW {
-		story.Story.Heat = c.heat(story)
-	} else {
-		story.Story.Heat = c.heatFor(story, article)
-	}
 	story.Story.Primary = 0
 
 	outCtx := context.WithoutCancel(ctx)
@@ -438,6 +434,7 @@ func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticl
 		SourceIDs:  []string{article.SourceId},
 		Embedding:  append([]float32(nil), vector...),
 		Entities:   uniqueStrings(entities),
+		Cell:       locationCell(primaryLocation(place)),
 		ExpiresAt:  now.Add(clusterStoryTTL),
 		FirstSeen:  now.Unix(),
 		UpdatedAt:  now.Unix(),
@@ -458,9 +455,13 @@ func (c *clusterer) mergeStory(st *storyState, article *dorv1.Article, place *do
 		st.Embedding = append([]float32(nil), vector...)
 	}
 	st.Entities = uniqueStrings(append(st.Entities, entities...))
+	heat := c.nextHeat(st, article, now)
+	if st.Cell == "" {
+		st.Cell = locationCell(primaryLocation(place))
+	}
 	st.UpdatedAt = now.Unix()
 	st.ExpiresAt = now.Add(clusterStoryTTL)
-	st.Story.Heat = c.heatFor(st, article)
+	st.Story.Heat = heat
 	return st
 }
 
@@ -476,7 +477,7 @@ func (c *clusterer) findCandidate(article *dorv1.Article, place *dorv1.PlacedArt
 		}
 		cos := geo.Cosine(vector, st.Embedding)
 		title := titleJaccard(article.GetTitle(), st.Story.GetTitle())
-		entity := entityOverlap(entities, st.Entities)
+		entity := entityJaccard(entities, st.Entities)
 		if len(vector) > 0 && len(st.Embedding) > 0 && cos < 0.55 && title < 0.25 {
 			continue
 		}
@@ -495,6 +496,9 @@ func (c *clusterer) findCandidate(article *dorv1.Article, place *dorv1.PlacedArt
 			if existing != nil && existing.Lat != 0 && existing.Lon != 0 && primary.Lat != 0 && primary.Lon != 0 {
 				km := geo.DistanceKM(float64(existing.Lat), float64(existing.Lon), float64(primary.Lat), float64(primary.Lon))
 				if km > 750 && cos < 0.86 && title < 0.6 {
+					continue
+				}
+				if st.Cell != "" && geo.Cell(float64(primary.Lat), float64(primary.Lon)) != st.Cell && cos < 0.8 && title < 0.5 {
 					continue
 				}
 			}
@@ -700,6 +704,9 @@ func (c *clusterer) load(ctx context.Context) error {
 			UpdatedAt: s.UpdatedAt,
 			ExpiresAt: time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
 		}
+		if st.Story.Primary < uint32(len(st.Story.Locations)) {
+			st.Cell = locationCell(st.Story.Locations[st.Story.Primary])
+		}
 		if metaEntry, err := live.Get(ctx, "storymeta."+id); err == nil {
 			var meta storyMeta
 			if json.Unmarshal(metaEntry.Value(), &meta) == nil {
@@ -721,11 +728,33 @@ func (c *clusterer) load(ctx context.Context) error {
 	return nil
 }
 
-func (c *clusterer) heat(st *storyState) float32 {
+func (c *clusterer) nextHeat(st *storyState, article *dorv1.Article, now time.Time) float32 {
 	if st == nil {
-		return 0.35
+		return initialHeat(article)
 	}
-	return c.heatFor(st, nil)
+	age := now.Sub(time.Unix(st.UpdatedAt, 0)).Hours()
+	if age < 0 {
+		age = 0
+	}
+	base := float64(st.Story.Heat) * math.Exp(-age/24)
+	base += 0.08
+	if st.Story.SourceCount > 1 {
+		base += math.Min(0.2, float64(st.Story.SourceCount)*0.015)
+	}
+	if article != nil && article.GetHints() != nil {
+		h := article.GetHints()
+		if h.GetHazard() != "" {
+			base += 0.2 + 0.2*clamp01(h.GetSeverity())
+		}
+	}
+	return float32(clamp01(base))
+}
+
+func locationCell(l *dorv1.Location) string {
+	if l == nil || (l.Lat == 0 && l.Lon == 0) {
+		return ""
+	}
+	return geo.Cell(float64(l.Lat), float64(l.Lon))
 }
 
 func (c *clusterer) heatFor(st *storyState, article *dorv1.Article) float32 {

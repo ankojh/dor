@@ -176,7 +176,7 @@ func validCategory(key string) bool {
 func ruleCategory(article *dorv1.Article) (string, float32) {
 	text := strings.ToLower(article.GetTitle() + " " + article.GetLede())
 	rules := []struct {
-		cat  string
+		cat   string
 		words []string
 	}{
 		{"sports", []string{"match", "goal", "league", "tournament", "olympic", "football", "cricket", "tennis", "coach", "transfer"}},

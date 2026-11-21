@@ -63,7 +63,7 @@ func titleTokens(s string) map[string]bool {
 	return out
 }
 
-func entityOverlap(a, b []string) float64 {
+func entityJaccard(a, b []string) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}

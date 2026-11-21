@@ -16,6 +16,7 @@ import (
 	"github.com/ankojh/dor/internal/llm"
 	"github.com/ankojh/dor/internal/sources"
 	"github.com/ankojh/dor/internal/store"
+	"github.com/ankojh/dor/internal/textsvc"
 )
 
 // buildEnrichmentDeps wires the real model clients when keys exist and leaves
@@ -28,17 +29,17 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	}
 
 	models := dorconfig.DefaultModels()
-	if cfg.modelsFile != "" {
-		if m, err := dorconfig.LoadModels(cfg.modelsFile); err != nil {
-			log.Warn("models config unavailable; using pinned defaults", "path", cfg.modelsFile, "err", err)
+	if cfg.modelsConfig != "" {
+		if m, err := dorconfig.LoadModels(cfg.modelsConfig); err != nil {
+			log.Warn("models config unavailable; using pinned defaults", "path", cfg.modelsConfig, "err", err)
 		} else {
 			models = m
 		}
 	}
 	thresholds := dorconfig.DefaultThresholds()
-	if cfg.thresholdsFile != "" {
-		if t, err := dorconfig.LoadThresholds(cfg.thresholdsFile); err != nil {
-			log.Warn("thresholds config unavailable; using defaults", "path", cfg.thresholdsFile, "err", err)
+	if cfg.thresholdsConfig != "" {
+		if t, err := dorconfig.LoadThresholds(cfg.thresholdsConfig); err != nil {
+			log.Warn("thresholds config unavailable; using defaults", "path", cfg.thresholdsConfig, "err", err)
 		} else {
 			thresholds = t
 		}
@@ -46,9 +47,9 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	deps.Thresholds = thresholds
 
 	budgetCfg := dorconfig.DefaultBudget()
-	if cfg.budgetFile != "" {
-		if bcfg, err := dorconfig.LoadBudget(cfg.budgetFile); err != nil {
-			log.Warn("budget config unavailable; using defaults", "path", cfg.budgetFile, "err", err)
+	if cfg.budgetConfig != "" {
+		if bcfg, err := dorconfig.LoadBudget(cfg.budgetConfig); err != nil {
+			log.Warn("budget config unavailable; using defaults", "path", cfg.budgetConfig, "err", err)
 		} else {
 			budgetCfg = bcfg
 		}
@@ -73,6 +74,11 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 			log.Info("claude enricher enabled", "haiku", models.Claude.HaikuModel)
 		}
 	}
+	var completer textsvc.Completer
+	if deps.Enricher != nil {
+		completer = deps.Enricher
+	}
+	deps.Text = textsvc.New(b, log, completer)
 
 	if wantsAgent(cfg.agents, agents.PlotDurable) {
 		loadCtx, cancel := context.WithTimeout(ctx, 20*time.Second)

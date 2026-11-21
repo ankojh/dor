@@ -22,6 +22,10 @@ const PublisherAgentName = "publisher"
 const (
 	defaultFlushInterval    = 250 * time.Millisecond
 	defaultSnapshotInterval = 5 * time.Second
+	publisherStoryTTL       = 48 * time.Hour
+	// publisherWireHistory is the bounded cold-start wire history placed in
+	// every snapshot. It is not a replay of old deltas; rows carry no seq.
+	publisherWireHistory = 500
 )
 
 // NewPublisher builds the publisher. It runs two consumers because its inputs
@@ -50,7 +54,7 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 				// body is not a wire event we can use yet.
 				return nil
 			}
-			core.onArticle(&article)
+			core.onArticle(&article, msg.Subject == bus.SubjectArticlePlaced)
 			return nil
 		},
 	})
@@ -143,7 +147,7 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 		return err
 	}
 	p.running.Store(true)
-	p.wg.Add(2)
+	p.wg.Add(3)
 	go func() {
 		defer p.wg.Done()
 		p.core.flushLoop(runCtx, defaultFlushInterval)
@@ -152,7 +156,14 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 		defer p.wg.Done()
 		p.core.snapshotLoop(runCtx, defaultSnapshotInterval)
 	}()
+	go func() {
+		defer p.wg.Done()
+		p.core.expireLoop(runCtx, time.Minute)
+	}()
 	p.core.log.Info("publisher started")
+	// Publish the first snapshot immediately so a gateway started in the same
+	// process never serves an empty cold-start snapshot longer than necessary.
+	p.core.writeSnapshot(ctx)
 	return nil
 }
 
@@ -234,6 +245,7 @@ type publisherCore struct {
 	order    []string
 	stories  map[string]*dorv1.Story
 	links    map[string]*dorv1.Link
+	wire     []*dorv1.WireRow
 	changed  bool
 	lastSnap time.Time
 }
@@ -285,21 +297,83 @@ func (c *publisherCore) loadSeq(ctx context.Context) error {
 	return nil
 }
 
-func (c *publisherCore) onArticle(a *dorv1.Article) {
+func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	if a == nil || a.Id == "" {
 		return
 	}
+	place := ""
+	if a.Hints != nil {
+		place = a.Hints.GetPlace()
+	}
+	if place == "" {
+		place = a.Dateline
+	}
+	join := dorv1.JoinKind_JOIN_KIND_NEW
+	if placed && a.Join != dorv1.JoinKind_JOIN_KIND_NEW {
+		join = a.Join
+	}
+	category := dorv1.Category_CATEGORY_OTHER
+	c.mu.Lock()
+	if a.StoryId != "" {
+		if story, ok := c.stories[a.StoryId]; ok && story != nil {
+			category = story.Category
+		}
+	}
+	c.mu.Unlock()
 	wire := &dorv1.WireRow{
 		ArticleId:    a.Id,
 		StoryId:      a.StoryId,
 		Title:        a.Title,
 		Source:       a.SourceId,
-		Category:     dorv1.Category_CATEGORY_OTHER,
+		Place:        place,
+		Category:     category,
 		At:           a.PublishedAt,
-		Join:         a.Join,
+		Join:         join,
 		PromptScores: nil,
 	}
+	c.mu.Lock()
+	for i, row := range c.wire {
+		if row.ArticleId == wire.ArticleId {
+			c.wire = append(c.wire[:i], c.wire[i+1:]...)
+			break
+		}
+	}
+	c.wire = append(c.wire, wire)
+	if len(c.wire) > publisherWireHistory {
+		c.wire = append([]*dorv1.WireRow(nil), c.wire[len(c.wire)-publisherWireHistory:]...)
+	}
+	c.mu.Unlock()
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})
+}
+
+func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.expireStories(c.now())
+		}
+	}
+}
+
+func (c *publisherCore) expireStories(now time.Time) {
+	c.mu.Lock()
+	ids := make([]string, 0)
+	for id, s := range c.stories {
+		if s == nil || s.UpdatedAt <= 0 {
+			continue
+		}
+		if now.Sub(time.Unix(s.UpdatedAt, 0)) >= publisherStoryTTL {
+			ids = append(ids, id)
+		}
+	}
+	c.mu.Unlock()
+	for _, id := range ids {
+		c.enqueue("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+	}
 }
 
 func (c *publisherCore) onStory(s *dorv1.Story) {
@@ -313,7 +387,19 @@ func (c *publisherCore) onLink(l *dorv1.Link) {
 	if l == nil || l.A == "" || l.B == "" {
 		return
 	}
-	c.enqueue("link:"+l.A+"|"+l.B, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: l}})
+	a, b := l.A, l.B
+	if a > b {
+		a, b = b, a
+	}
+	key := "link:" + a + "|" + b
+	if l.Strength <= 0 && l.Confidence <= 0 {
+		// The relation judge's removal tombstone.
+		c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkRemove{
+			LinkRemove: &dorv1.LinkKey{A: a, B: b},
+		}})
+		return
+	}
+	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: l}})
 }
 
 func (c *publisherCore) enqueue(key string, delta *dorv1.Delta) {
@@ -437,10 +523,11 @@ func (c *publisherCore) writeSnapshot(ctx context.Context) {
 	}
 	sort.Strings(linkKeys)
 	snapshot := &dorv1.Snapshot{
-		Seq:     c.seq,
-		Stories: make([]*dorv1.Story, 0, len(storyIDs)),
-		Links:   make([]*dorv1.Link, 0, len(linkKeys)),
-		BuiltAt: c.now().Unix(),
+		Seq:        c.seq,
+		Stories:    make([]*dorv1.Story, 0, len(storyIDs)),
+		Links:      make([]*dorv1.Link, 0, len(linkKeys)),
+		BuiltAt:    c.now().Unix(),
+		RecentWire: append([]*dorv1.WireRow(nil), c.wire...),
 	}
 	for _, id := range storyIDs {
 		snapshot.Stories = append(snapshot.Stories, c.stories[id])

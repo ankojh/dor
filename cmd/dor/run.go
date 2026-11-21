@@ -29,6 +29,7 @@ import (
 	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/llm"
 	"github.com/ankojh/dor/internal/matcher"
+	"github.com/ankojh/dor/internal/push"
 	"github.com/ankojh/dor/internal/record"
 	"github.com/ankojh/dor/internal/textsvc"
 
@@ -73,11 +74,13 @@ type config struct {
 	relationDebounce time.Duration
 	editorDebounce   time.Duration
 
-	teiURL         string
-	ntfyURL        string
-	vapidPublicKey string
-	pushEncryptKey string
-	alertRate      time.Duration
+	teiURL          string
+	ntfyURL         string
+	vapidPublicKey  string
+	vapidPrivateKey string
+	vapidSubject    string
+	pushEncryptKey  string
+	alertRate       time.Duration
 }
 
 func runCommand(args []string) error {
@@ -117,11 +120,13 @@ func runCommand(args []string) error {
 		relationDebounce: envDurationOr("DOR_RELATION_DEBOUNCE", 3*time.Second),
 		editorDebounce:   envDurationOr("DOR_EDITOR_DEBOUNCE", 5*time.Second),
 
-		teiURL:         envOr("DOR_TEI_URL", ""),
-		ntfyURL:        envOr("DOR_NTFY_URL", ""),
-		vapidPublicKey: envOr("DOR_VAPID_PUBLIC_KEY", ""),
-		pushEncryptKey: envOr("DOR_PUSH_ENCRYPTION_KEY", ""),
-		alertRate:      envDurationOr("DOR_ALERT_RATE", time.Minute),
+		teiURL:          envOr("DOR_TEI_URL", ""),
+		ntfyURL:         envOr("DOR_NTFY_URL", ""),
+		vapidPublicKey:  envOr("DOR_VAPID_PUBLIC_KEY", ""),
+		vapidPrivateKey: envOr("DOR_VAPID_PRIVATE_KEY", ""),
+		vapidSubject:    envOr("DOR_VAPID_SUBJECT", ""),
+		pushEncryptKey:  envOr("DOR_PUSH_ENCRYPTION_KEY", ""),
+		alertRate:       envDurationOr("DOR_ALERT_RATE", time.Minute),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -161,6 +166,8 @@ func runCommand(args []string) error {
 	fs.StringVar(&cfg.teiURL, "tei-url", cfg.teiURL, "Text Embeddings Inference base URL (empty uses lexical prompt fallback)")
 	fs.StringVar(&cfg.ntfyURL, "ntfy-url", cfg.ntfyURL, "ntfy base URL (empty disables external notifications)")
 	fs.StringVar(&cfg.vapidPublicKey, "vapid-public-key", cfg.vapidPublicKey, "Web Push VAPID public key (empty disables push)")
+	fs.StringVar(&cfg.vapidPrivateKey, "vapid-private-key", cfg.vapidPrivateKey, "Web Push VAPID private key (server only; never exposed)")
+	fs.StringVar(&cfg.vapidSubject, "vapid-subject", cfg.vapidSubject, "VAPID subject: ops@example.com or an https URL")
 	fs.StringVar(&cfg.pushEncryptKey, "push-encryption-key", cfg.pushEncryptKey, "base64 32-byte key encrypting push subscriptions at rest")
 	fs.DurationVar(&cfg.alertRate, "alert-rate", cfg.alertRate, "minimum interval between external alerts per alert")
 	if err := fs.Parse(args); err != nil {
@@ -371,6 +378,41 @@ func runCommand(args []string) error {
 		logger.Warn("saved alerts unavailable; prompt filters still match for connected clients")
 	}
 
+	pushEncryptionKey := decodeBase64Key(cfg.pushEncryptKey)
+	var pushSender agents.PushSender
+	if alertStore != nil {
+		var reason string
+		switch {
+		case cfg.vapidPublicKey == "":
+			reason = "DOR_VAPID_PUBLIC_KEY is not set"
+		case cfg.vapidPrivateKey == "":
+			reason = "DOR_VAPID_PRIVATE_KEY is not set"
+		case cfg.vapidSubject == "":
+			reason = "DOR_VAPID_SUBJECT is not set"
+		case len(pushEncryptionKey) != 32:
+			reason = "DOR_PUSH_ENCRYPTION_KEY must decode to 32 bytes"
+		}
+		if reason == "" {
+			sender, err := push.NewSender(push.Config{
+				Alerts:        alertStore,
+				EncryptionKey: pushEncryptionKey,
+				VAPIDPublic:   cfg.vapidPublicKey,
+				VAPIDPrivate:  cfg.vapidPrivateKey,
+				Subject:       cfg.vapidSubject,
+				Logger:        logger,
+			})
+			if err != nil {
+				reason = err.Error()
+			} else {
+				pushSender = sender
+				logger.Info("web push sender ready")
+			}
+		}
+		if pushSender == nil {
+			logger.Info("web push unavailable", "reason", reason)
+		}
+	}
+
 	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, agents.Deps{
 		ArticleSink:      articleSink,
 		Decider:          decider,
@@ -383,6 +425,7 @@ func runCommand(args []string) error {
 		Alerts:           alertStore,
 		Matcher:          matcherSvc,
 		NtfyBaseURL:      cfg.ntfyURL,
+		Push:             pushSender,
 		AlertRate:        cfg.alertRate,
 	})
 	if err != nil {
@@ -408,11 +451,9 @@ func runCommand(args []string) error {
 			Alerts:  alertStore,
 			Matcher: matcherSvc,
 			Push: gateway.PushConfig{
-				PublicKey:     cfg.vapidPublicKey,
-				EncryptionKey: decodeBase64Key(cfg.pushEncryptKey),
-				// No Web Push sender is compiled in this build; the gateway
-				// reports 503 with a reason rather than faking delivery.
-				Delivery: false,
+				PublicKey:     strings.TrimSpace(cfg.vapidPublicKey),
+				EncryptionKey: pushEncryptionKey,
+				Delivery:      pushSender != nil,
 			},
 		})
 		if err != nil {
@@ -598,8 +639,13 @@ func decodeBase64Key(raw string) []byte {
 	if raw == "" {
 		return nil
 	}
-	if b, err := base64.StdEncoding.DecodeString(raw); err == nil {
-		return b
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := encoding.DecodeString(raw); err == nil {
+			return b
+		}
 	}
 	return nil
 }

@@ -401,19 +401,61 @@ func (s *Store) SavePush(ctx context.Context, id string, blob []byte) error {
 	return nil
 }
 
+// DeletePush removes one subscription after a 404/410 response or a corrupt
+// blob. Endpoint keys are never needed to delete; the id is enough.
+func (s *Store) DeletePush(ctx context.Context, id string) {
+	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	_ = s.kv.Delete(opCtx, "pushsub."+id)
+	if s.db != nil {
+		_ = s.deletePushDB(ctx, id)
+	}
+}
+
+// PushDelivered reports whether a subscription already received this exact
+// (alert, story, level). It keeps notifier retries from duplicating a push to
+// subscriptions that succeeded before a partial failure.
+func (s *Store) PushDelivered(ctx context.Context, alertID, storyID, level, subID string) bool {
+	var delivered map[string]bool
+	if !s.getKV(ctx, pushDeliveredKey(alertID, storyID, level), &delivered) {
+		return false
+	}
+	return delivered[subID]
+}
+
+// MarkPushDelivered records one successful per-subscription delivery.
+func (s *Store) MarkPushDelivered(ctx context.Context, alertID, storyID, level, subID string) {
+	key := pushDeliveredKey(alertID, storyID, level)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var delivered map[string]bool
+	s.getKV(ctx, key, &delivered)
+	if delivered == nil {
+		delivered = make(map[string]bool)
+	}
+	delivered[subID] = true
+	_ = s.putKV(ctx, key, delivered)
+}
+
 // PushSubscriptions returns the encrypted subscriptions, KV first and the
 // durable mirror when KV expired.
 func (s *Store) PushSubscriptions(ctx context.Context) []PushRecord {
 	var out []PushRecord
+	seen := make(map[string]bool)
 	for _, k := range s.keys(ctx, "pushsub.") {
 		var p PushRecord
 		if s.getKV(ctx, k, &p) {
 			out = append(out, p)
+			seen[p.ID] = true
 		}
 	}
-	if len(out) == 0 && s.db != nil {
+	if s.db != nil {
 		if records, err := s.pushSubscriptionsDB(ctx); err == nil {
-			return records
+			for _, p := range records {
+				if !seen[p.ID] {
+					out = append(out, p)
+				}
+			}
 		}
 	}
 	return out
@@ -455,6 +497,9 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func alertKey(id string) string  { return "alert." + id }
-func hitKey(a, s string) string  { return "alerthit." + a + "." + s }
+func alertKey(id string) string { return "alert." + id }
+func hitKey(a, s string) string { return "alerthit." + a + "." + s }
+func pushDeliveredKey(a, s, level string) string {
+	return "pushdelivered." + a + "." + s + "." + level
+}
 func muteKey(a, s string) string { return "alertmute." + a + "." + s }

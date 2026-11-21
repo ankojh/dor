@@ -150,6 +150,11 @@ func (s *Store) savePushDB(ctx context.Context, rec PushRecord) error {
 	return err
 }
 
+func (s *Store) deletePushDB(ctx context.Context, id string) error {
+	_, err := s.db.Pool().Exec(ctx, `DELETE FROM push_subscriptions WHERE id=$1`, id)
+	return err
+}
+
 func (s *Store) pushSubscriptionsDB(ctx context.Context) ([]PushRecord, error) {
 	rows, err := s.db.Pool().Query(ctx, `SELECT id, keys, created_at FROM push_subscriptions`)
 	if err != nil {

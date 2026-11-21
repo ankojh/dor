@@ -2,9 +2,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ankojh/dor/internal/alert"
+	"github.com/ankojh/dor/internal/push"
 )
 
 const maxAlertBody = 64 << 10
@@ -233,14 +231,6 @@ func (s *Server) handlePushKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type pushSubscriptionInput struct {
-	Endpoint string `json:"endpoint"`
-	Keys     struct {
-		P256DH string `json:"p256dh"`
-		Auth   string `json:"auth"`
-	} `json:"keys"`
-}
-
 // handlePushSubscription serves POST /api/push/subscriptions. The endpoint and
 // keys are AES-GCM encrypted before the KV write; the plaintext never reaches
 // the alert store.
@@ -262,7 +252,7 @@ func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	var in pushSubscriptionInput
+	var in push.Subscription
 	if !decodeJSON(w, r, &in) {
 		return
 	}
@@ -271,7 +261,7 @@ func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "endpoint and keys are required"})
 		return
 	}
-	blob, err := encryptPush(s.cfg.Push.EncryptionKey, in)
+	blob, err := push.EncryptSubscription(s.cfg.Push.EncryptionKey, in)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "encrypt subscription"})
 		return
@@ -284,25 +274,4 @@ func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subscribed": true})
-}
-
-// encryptPush seals the subscription JSON with AES-GCM: nonce || ciphertext.
-func encryptPush(key []byte, v any) ([]byte, error) {
-	plain, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, plain, nil), nil
 }

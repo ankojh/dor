@@ -124,7 +124,7 @@ func (n *notifier) handle(ctx context.Context, msg *Message, out *Emitter) error
 		case "push":
 			if n.cfg.Push == nil {
 				if n.pushWarned.CompareAndSwap(false, true) {
-					n.log.Warn("notifier: web push is not configured (VAPID keys absent); no push delivery")
+					n.log.Warn("notifier: web push sender is not configured; no push delivery")
 				}
 				continue
 			}

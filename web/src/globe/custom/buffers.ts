@@ -137,14 +137,14 @@ export class GlobeGpuData {
   private readonly pixel = new Float32Array(4);
   private readonly arcPixel = new Float32Array(4);
   private readonly tetherScratch = {
-    startHi: new Float32Array(192),
-    startLo: new Float32Array(192),
-    endHi: new Float32Array(192),
-    endLo: new Float32Array(192),
-    t0: new Float32Array(96),
-    t1: new Float32Array(96),
-    ringHi: new Float32Array(6),
-    ringLo: new Float32Array(6),
+    startHi: new Float32Array(384),
+    startLo: new Float32Array(384),
+    endHi: new Float32Array(384),
+    endLo: new Float32Array(384),
+    t0: new Float32Array(192),
+    t1: new Float32Array(192),
+    ringHi: new Float32Array(12),
+    ringLo: new Float32Array(12),
   };
 
   constructor(gl: WebGL2RenderingContext, init: FakeInit) {
@@ -258,16 +258,16 @@ export class GlobeGpuData {
     };
 
     this.tetherBuffers = {
-      startHi: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
-      startLo: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
-      endHi: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
-      endLo: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
-      t0: this.createBuffer(new Float32Array(96), gl.DYNAMIC_DRAW),
-      t1: this.createBuffer(new Float32Array(96), gl.DYNAMIC_DRAW),
+      startHi: this.createBuffer(new Float32Array(384), gl.DYNAMIC_DRAW),
+      startLo: this.createBuffer(new Float32Array(384), gl.DYNAMIC_DRAW),
+      endHi: this.createBuffer(new Float32Array(384), gl.DYNAMIC_DRAW),
+      endLo: this.createBuffer(new Float32Array(384), gl.DYNAMIC_DRAW),
+      t0: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
+      t1: this.createBuffer(new Float32Array(192), gl.DYNAMIC_DRAW),
     };
     this.ringBuffers = {
-      hi: this.createBuffer(new Float32Array(6), gl.DYNAMIC_DRAW),
-      lo: this.createBuffer(new Float32Array(6), gl.DYNAMIC_DRAW),
+      hi: this.createBuffer(new Float32Array(12), gl.DYNAMIC_DRAW),
+      lo: this.createBuffer(new Float32Array(12), gl.DYNAMIC_DRAW),
     };
     this.tetherMesh = this.createTetherMesh(this.tetherBuffers);
     this.ringMesh = this.createRingMesh(this.ringBuffers);
@@ -603,7 +603,7 @@ export class GlobeGpuData {
   }
 
   updateTethers(segments: TetherSegment[], rings: TetherRing[]): void {
-    const count = Math.min(96, segments.length);
+    const count = Math.min(192, segments.length);
     const startHi = this.tetherScratch.startHi;
     const startLo = this.tetherScratch.startLo;
     const endHi = this.tetherScratch.endHi;
@@ -637,7 +637,7 @@ export class GlobeGpuData {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.tetherBuffers.t1);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, t1, 0, count);
 
-    const ringCount = Math.min(3, rings.length);
+    const ringCount = Math.min(6, rings.length);
     const ringHi = this.tetherScratch.ringHi;
     const ringLo = this.tetherScratch.ringLo;
     rings.slice(0, ringCount).forEach((ring, index) => {

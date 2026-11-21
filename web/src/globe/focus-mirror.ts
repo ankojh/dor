@@ -106,11 +106,11 @@ export class FocusMirror {
     this.storyHeat.set(init.stories.heat);
     this.partyCount = new Uint8Array(this.storyCapacity);
     this.partyCount.set(init.stories.partyCount);
-    this.partyLng = new Float32Array(this.storyCapacity * 3);
+    this.partyLng = new Float32Array(this.storyCapacity * 6);
     this.partyLng.set(init.stories.partyLng);
-    this.partyLat = new Float32Array(this.storyCapacity * 3);
+    this.partyLat = new Float32Array(this.storyCapacity * 6);
     this.partyLat.set(init.stories.partyLat);
-    this.partyLabel = new Array<string>(this.storyCapacity * 3).fill("");
+    this.partyLabel = new Array<string>(this.storyCapacity * 6).fill("");
     init.stories.partyLabel.forEach((value, index) => (this.partyLabel[index] = value));
     this.storyState = new Uint8Array(this.storyCapacity);
     this.linkState = new Uint8Array(this.linkCapacity);
@@ -263,9 +263,9 @@ export class FocusMirror {
       const count = this.partyCount[index]!;
       for (let party = 0; party < count; party++) {
         parties.push({
-          lng: this.partyLng[index * 3 + party]!,
-          lat: this.partyLat[index * 3 + party]!,
-          label: this.partyLabel[index * 3 + party]!,
+          lng: this.partyLng[index * 6 + party]!,
+          lat: this.partyLat[index * 6 + party]!,
+          label: this.partyLabel[index * 6 + party]!,
         });
       }
 

@@ -58,7 +58,7 @@ export function storyLocation(story: Story): { lng: number; lat: number; place: 
 function storyParties(story: Story): LiveStory["parties"] {
   return story.locations
     .filter((location) => location.role === Role.PARTY)
-    .slice(0, 3)
+    .slice(0, 6)
     .map((location) => ({
       lng: location.lon,
       lat: location.lat,
@@ -114,9 +114,9 @@ export function buildLiveGlobe(
   const title: string[] = new Array(storyCount).fill("");
   const place: string[] = new Array(storyCount).fill("");
   const partyCount = new Uint8Array(storyCount);
-  const partyLng = new Float32Array(storyCount * 3);
-  const partyLat = new Float32Array(storyCount * 3);
-  const partyLabel: string[] = new Array(storyCount * 3).fill("");
+  const partyLng = new Float32Array(storyCount * 6);
+  const partyLat = new Float32Array(storyCount * 6);
+  const partyLabel: string[] = new Array(storyCount * 6).fill("");
 
   for (const entry of located) {
     const i = entry.index;
@@ -138,9 +138,9 @@ export function buildLiveGlobe(
     color.set(entry.color, i * 4);
     partyCount[i] = entry.parties.length;
     entry.parties.forEach((party, p) => {
-      partyLng[i * 3 + p] = party.lng;
-      partyLat[i * 3 + p] = party.lat;
-      partyLabel[i * 3 + p] = party.label;
+      partyLng[i * 6 + p] = party.lng;
+      partyLat[i * 6 + p] = party.lat;
+      partyLabel[i * 6 + p] = party.label;
     });
   }
 

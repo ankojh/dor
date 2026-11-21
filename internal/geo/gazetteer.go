@@ -65,6 +65,9 @@ type Gazetteer struct {
 	skip        map[string]struct{}
 	countries   map[string]Country
 	byCountry   map[string][]Place
+	names       []string
+	majors      []Place
+	countryList []Place
 	loaded      bool
 	loadedNames int
 }
@@ -161,6 +164,7 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 			g.addAlias(name, alias)
 		}
 	}
+	g.buildSearchIndex()
 	g.loadedNames = len(g.byName)
 	log.Info("gazetteer loaded", "places", len(places), "names", g.loadedNames, "countries", len(g.countries), "dir", dir)
 	return g, nil
@@ -223,6 +227,169 @@ func (g *Gazetteer) capitalPlace(code, capital string) (Place, bool) {
 		}
 	}
 	return best, found
+}
+
+func (g *Gazetteer) buildSearchIndex() {
+	if g == nil {
+		return
+	}
+	g.names = make([]string, 0, len(g.byName))
+	for name := range g.byName {
+		g.names = append(g.names, name)
+	}
+	sort.Strings(g.names)
+
+	seenCity := make(map[string]bool)
+	for _, list := range g.byName {
+		for _, p := range list {
+			if p.CountryID || p.Lat == 0 && p.Lon == 0 || seenCity[p.ID] {
+				continue
+			}
+			seenCity[p.ID] = true
+			g.majors = append(g.majors, p)
+		}
+	}
+	sort.SliceStable(g.majors, func(i, j int) bool {
+		if g.majors[i].Population != g.majors[j].Population {
+			return g.majors[i].Population > g.majors[j].Population
+		}
+		return g.majors[i].Name < g.majors[j].Name
+	})
+	if len(g.majors) > 500 {
+		g.majors = g.majors[:500]
+	}
+	seenCountry := make(map[string]bool)
+	for _, c := range g.countries {
+		if c.Place.ID == "" || seenCountry[c.Code] {
+			continue
+		}
+		seenCountry[c.Code] = true
+		g.countryList = append(g.countryList, c.Place)
+	}
+	sort.SliceStable(g.countryList, func(i, j int) bool { return g.countryList[i].Name < g.countryList[j].Name })
+}
+
+// Search is the case-insensitive prefix/substring search used by the command
+// palette. It searches the already-loaded GeoNames index; it never downloads
+// and never touches story state. Empty queries return a bounded major-city +
+// country fallback for tile/label bootstrapping.
+func (g *Gazetteer) Search(query string, limit int) []Place {
+	if g == nil || !g.loaded {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	q := normalize(query)
+	if q == "" {
+		return g.Fallback(limit)
+	}
+	type scored struct {
+		place Place
+		score float64
+	}
+	found := make(map[string]scored)
+	add := func(p Place) {
+		if p.ID == "" || p.Lat == 0 && p.Lon == 0 || p.CountryID && p.Lat == 0 && p.Lon == 0 {
+			return
+		}
+		score := 0.0
+		switch {
+		case p.Normalized == q:
+			score += 100
+		case strings.HasPrefix(p.Normalized, q):
+			score += 50
+		case strings.Contains(p.Normalized, q):
+			score += 20
+		default:
+			return
+		}
+		score += math.Log10(float64(p.Population) + 10)
+		if p.CountryID {
+			score += 2
+		}
+		if prev, ok := found[p.ID]; !ok || score > prev.score {
+			p.Score = score
+			found[p.ID] = scored{place: p, score: score}
+		}
+	}
+
+	// Prefix range from the sorted name index, then a bounded substring scan.
+	start := sort.SearchStrings(g.names, q)
+	for i := start; i < len(g.names) && strings.HasPrefix(g.names[i], q); i++ {
+		for _, p := range g.byName[g.names[i]] {
+			add(p)
+		}
+		if i-start > 256 {
+			break
+		}
+	}
+	if len(found) < limit {
+		for _, name := range g.names {
+			if !strings.Contains(name, q) || strings.HasPrefix(name, q) {
+				continue
+			}
+			for _, p := range g.byName[name] {
+				add(p)
+			}
+			if len(found) >= limit*4 {
+				break
+			}
+		}
+	}
+	list := make([]scored, 0, len(found))
+	for _, e := range found {
+		list = append(list, e)
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+		if list[i].place.Population != list[j].place.Population {
+			return list[i].place.Population > list[j].place.Population
+		}
+		return list[i].place.Name < list[j].place.Name
+	})
+	out := make([]Place, 0, limit)
+	for _, e := range list {
+		out = append(out, e.place)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// Fallback returns major cities plus country centroids for an empty Cmd-K
+// query. It is deliberately bounded; it is not a full gazetteer dump.
+func (g *Gazetteer) Fallback(limit int) []Place {
+	if g == nil || !g.loaded {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	out := make([]Place, 0, limit)
+	cities := limit / 2
+	if cities < 1 {
+		cities = 1
+	}
+	for i := 0; i < len(g.majors) && i < cities; i++ {
+		out = append(out, g.majors[i])
+	}
+	for i := 0; i < len(g.countryList) && len(out) < limit; i++ {
+		out = append(out, g.countryList[i])
+	}
+	for i := 0; i < len(g.majors) && len(out) < limit; i++ {
+		out = append(out, g.majors[i])
+	}
+	return out
 }
 
 // Candidates returns up to max places mentioned in title/lede/dateline,

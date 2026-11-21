@@ -24,6 +24,7 @@ import (
 
 	"github.com/ankojh/dor/internal/alert"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/pb/dorv1"
@@ -84,6 +85,7 @@ type Config struct {
 	Matcher *matcher.Service
 	Push    PushConfig
 	Store   StoryStore
+	Places  *geo.Gazetteer
 }
 
 // Server is one gateway replica.
@@ -124,6 +126,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /api/stories", s.handleStories)
 	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
+	mux.HandleFunc("GET /api/places", s.handlePlaces)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/alerts", s.handleAlertsList)
 	mux.HandleFunc("POST /api/alerts", s.handleAlertsCreate)

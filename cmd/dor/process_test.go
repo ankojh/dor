@@ -125,3 +125,38 @@ func TestBadAgentSelectionExitsNonZero(t *testing.T) {
 		t.Errorf("stderr = %q", stderr.String())
 	}
 }
+
+func TestGatewayOnlyProcessStartsWithoutPublisher(t *testing.T) {
+	cmd, lines, stderr := spawnDor(t,
+		"--nats-listen", "127.0.0.1:0", "--nats-store", t.TempDir(),
+		"--admin-addr", "", "--agents", "gateway",
+		"--gateway-addr", "127.0.0.1:0", "--db-url", "off", "--tei-url", "",
+		"--supervisor=false",
+	)
+	running := waitLog(t, lines, "dor running")
+	if running["mode"] != "embedded" {
+		t.Fatalf("mode=%v, want embedded", running["mode"])
+	}
+	names, ok := running["agents"].([]any)
+	if !ok || len(names) != 0 {
+		t.Fatalf("gateway-only selected agents=%v, want empty", running["agents"])
+	}
+	if opsURL, _ := running["ops_url"].(string); !strings.HasPrefix(opsURL, "http://127.0.0.1:") {
+		t.Fatalf("gateway ops URL=%q, want the ephemeral gateway listener", opsURL)
+	}
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, lines, "shutting down")
+	waitLog(t, lines, "stopped")
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("gateway-only process failed: %v; stderr: %s", err, stderr.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("gateway-only process did not stop after signal")
+	}
+}

@@ -56,6 +56,18 @@ func goldenStory() *Story {
 	}
 }
 
+func goldenPlacedArticle() *PlacedArticle {
+	return &PlacedArticle{Article: goldenArticle(), Locations: []*Location{locationCountry(), locationCity()}, Primary: 1, MultiRegion: true, Fallback: true, Degraded: true, Backend: "hints"}
+}
+
+func goldenClassifiedArticle() *ClassifiedArticle {
+	return &ClassifiedArticle{Article: goldenArticle(), Category: Category_CATEGORY_CLIMATE, Confidence: 0.875, Accepted: true, Fallback: true, Degraded: true, Backend: "mock", Lang: "en", Entities: []string{"Paris", "wildfire"}}
+}
+
+func goldenEmbeddedArticle() *EmbeddedArticle {
+	return &EmbeddedArticle{Article: goldenArticle(), Vector: []float32{0.125, -0.25, 0.5}, Model: "bge-small-en-v1.5", Degraded: true, StoryId: "story-1", Join: JoinKind_JOIN_KIND_JOINED}
+}
+
 func goldenLink() *Link {
 	return &Link{
 		A:          "story-1",
@@ -75,12 +87,15 @@ func goldenLinkKey() *LinkKey {
 
 func goldenAlertHit() *AlertHit {
 	return &AlertHit{
-		AlertId: "alert-1",
-		StoryId: "story-1",
-		Level:   "escalated",
-		FiredAt: 1_700_000_300,
-		Title:   "Flooding in Paris",
-		Prompt:  "Tell me about floods",
+		AlertId:     "alert-1",
+		StoryId:     "story-1",
+		Level:       "escalated",
+		FiredAt:     1_700_000_300,
+		Title:       "Flooding in Paris",
+		Prompt:      "Tell me about floods",
+		Generation:  2,
+		Approx:      true,
+		SourceCount: 8,
 	}
 }
 
@@ -128,6 +143,8 @@ func goldenArticle() *Article {
 		Dateline:    "PARIS, Nov 20",
 		StoryId:     "story-1",
 		Join:        JoinKind_JOIN_KIND_JOINED,
+		Hints:       &RawHints{Located: true, Lat: 48.5, Lon: 2.25, Precision: Precision_PRECISION_CITY, Themes: []string{"PROTEST", "ECON_ENERGY"}, Country: "FR", Hazard: "flood", Magnitude: 5.4, Severity: 0.75, EventId: "us7000abcd", MagnitudeUnit: "Mw", Place: "Paris, France", Revision: "1700000030"},
+		Burst:       true,
 	}
 }
 
@@ -217,6 +234,9 @@ func allGoldenCases() []goldenCase {
 
 	return []goldenCase{
 		{"article", goldenArticle()},
+		{"placed_article", goldenPlacedArticle()},
+		{"classified_article", goldenClassifiedArticle()},
+		{"embedded_article", goldenEmbeddedArticle()},
 		{"raw_article", goldenRawArticle()},
 		{"match_score", &MatchScore{ArticleId: "art-1", Scores: map[string]float32{"floods": 0.82}, Approx: []string{"energy"}, UpdatedAt: 1_700_000_500}},
 		{"record_frame", goldenRecordFrame()},

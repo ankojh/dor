@@ -4,7 +4,7 @@
  * Reuses the M0 custom layer, GPU data and focus mirror, but drives them from
  * real dor.v1 snapshot/delta messages. The fake stream is never imported here.
  */
-import { Map as MapLibreMap, type GeoJSONSource } from "maplibre-gl";
+import { Map as MapLibreMap, ScaleControl, type GeoJSONSource } from "maplibre-gl";
 import type { Delta, Link, Story, WireRow } from "../gen/dor/v1/dor_pb";
 import { CameraController, type CameraTarget } from "./camera";
 import { loadGlobeConfig } from "./config";
@@ -15,6 +15,7 @@ import {
   buildLiveGlobe,
   buildLiveTethers,
   linkKey,
+  storyLocation,
   type LiveGlobeData,
   type LiveStory,
 } from "./live-data";
@@ -29,8 +30,13 @@ const LINK_LABEL_LAYER = "dor-link-labels";
 const AGG_SOURCE = "dor-aggregates";
 const AGG_CIRCLE_LAYER = "dor-aggregate-circles";
 const AGG_COUNT_LAYER = "dor-aggregate-count";
+const HEX_SOURCE = "dor-aggregate-hex";
+const HEX_LAYER = "dor-aggregate-hex-fill";
 const AREA_SOURCE = "dor-story-areas";
 const AREA_LAYER = "dor-story-areas";
+const RING_SOURCE = "dor-distance-rings";
+const RING_LAYER = "dor-distance-rings";
+const RING_LABEL_SOURCE = "dor-distance-labels";
 
 export type LinkInfo = {
   index: number;
@@ -67,6 +73,17 @@ export type FocusDetails = {
 
 export type GlobeView = { center: [number, number]; zoom: number };
 
+export type StoryFilter = {
+  categories: Set<number>;
+  regions: string[];
+  sources: string[];
+  minSources: number;
+  lat: number;
+  lon: number;
+  radiusKm: number;
+  promptStoryIds: Set<string>;
+};
+
 export type GlobeState = {
   ready: boolean;
   storyCount: number;
@@ -77,6 +94,7 @@ export type GlobeState = {
   edgeMarkers: EdgeMarker[];
   secondDegree: boolean;
   quality: number;
+  tileFailed: boolean;
 };
 
 type RuntimeOptions = {
@@ -141,6 +159,8 @@ export class LiveGlobe {
   private heatVisible = true;
   private quality = 0;
   private floor = 0.6;
+  private tileFailed = false;
+  private storyFilter: StoryFilter | null = null;
 
   private frameSamples: number[] = [];
   private lastFrameAt = 0;
@@ -167,12 +187,20 @@ export class LiveGlobe {
       renderWorldCopies: true,
     });
     this.camera = new CameraController(this.map);
+    this.map.addControl(new ScaleControl({ unit: "metric", maxWidth: 110 }), "bottom-right");
     this.labels = new StoryLabels(this.map);
     this.map.on("load", () => this.onLoad());
     this.map.on("error", (event) => {
-      const message = (event as { error?: Error }).error?.message;
-      if (message && !message.includes("Failed to fetch")) {
-        console.warn(`map: ${message}`);
+      const message = (event as { error?: Error }).error?.message ?? "";
+      if (message && !message.includes("Failed to fetch")) console.warn(`map: ${message}`);
+      if (
+        !this.tileFailed &&
+        /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)
+      ) {
+        this.tileFailed = true;
+        this.map.getContainer().classList.add("tile-failed");
+        void this.addFallbackCities();
+        this.emit();
       }
     });
     this.installInteractions();
@@ -218,6 +246,7 @@ export class LiveGlobe {
           id: AREA_LAYER,
           type: "circle",
           source: AREA_SOURCE,
+          maxzoom: 12,
           paint: {
             "circle-radius": [
               "interpolate",
@@ -304,6 +333,58 @@ export class LiveGlobe {
         },
       });
     }
+    if (!this.map.getSource(HEX_SOURCE)) {
+      this.map.addSource(HEX_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      this.map.addLayer({
+        id: HEX_LAYER,
+        type: "fill",
+        source: HEX_SOURCE,
+        paint: {
+          "fill-color": ["get", "color"],
+          "fill-opacity": 0.1,
+          "fill-outline-color": ["get", "color"],
+        },
+      });
+    }
+    if (!this.map.getSource(RING_SOURCE)) {
+      this.map.addSource(RING_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      this.map.addLayer({
+        id: RING_LAYER,
+        type: "line",
+        source: RING_SOURCE,
+        paint: {
+          "line-color": "rgba(159,179,207,0.38)",
+          "line-width": 0.8,
+          "line-dasharray": [2, 3],
+        },
+      });
+      this.map.addSource(RING_LABEL_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      this.map.addLayer({
+        id: RING_LABEL_SOURCE,
+        type: "symbol",
+        source: RING_LABEL_SOURCE,
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 9,
+          "text-allow-overlap": true,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,0.75)",
+          "text-halo-color": "rgba(3,5,11,0.9)",
+          "text-halo-width": 1,
+        },
+      });
+    }
   }
 
   private installInteractions(): void {
@@ -339,6 +420,14 @@ export class LiveGlobe {
           this.lastPickPoint.x - event.point.x,
           this.lastPickPoint.y - event.point.y,
         ) < 8;
+      const arc = this.findArcAt(event.point.x, event.point.y);
+      if (arc !== null) {
+        const info = this.linkInfo(arc);
+        if (info) {
+          this.options.onLinkClick?.(info);
+          return;
+        }
+      }
       const picked = cached ? this.lastPick : this.layer.pickNow(event.point.x, event.point.y);
       if (picked !== null && picked >= 0) {
         const entry = this.data?.stories[picked];
@@ -356,6 +445,7 @@ export class LiveGlobe {
     if (!this.focused) this.setAmbientLabels();
     this.updateAggregates();
     this.updateEdgeMarkers();
+    this.updateDistanceRings();
     this.options.onView?.(this.view);
     this.emit();
   }
@@ -409,7 +499,12 @@ export class LiveGlobe {
   }
 
   private rebuild(stories: Story[], links: Link[], flyToFocus: boolean): void {
-    const data = buildLiveGlobe(stories, links);
+    const visible = this.storyFilter ? stories.filter((story) => this.matchesStory(story)) : stories;
+    const visibleIds = new Set(visible.map((story) => story.id));
+    const visibleLinks = links.filter(
+      (link) => visibleIds.has(link.a) && visibleIds.has(link.b),
+    );
+    const data = buildLiveGlobe(visible, visibleLinks);
     this.data = data;
     this.layer.setInit(data.init);
     this.layer.setStrengthFloor(this.floor);
@@ -422,6 +517,7 @@ export class LiveGlobe {
     this.updateAreas();
     this.updateAggregates();
     this.updateEdgeMarkers();
+    this.updateDistanceRings();
     const focusId = this.focusId;
     if (focusId) {
       const index = data.storyById.get(focusId);
@@ -462,6 +558,8 @@ export class LiveGlobe {
     this.camera.cancel();
     this.focusId = null;
     this.focused = null;
+    this.updateDistanceRings();
+    this.updateEdgeMarkers();
     this.setAmbientLabels();
     this.options.onFocus?.(null);
     this.emit();
@@ -497,10 +595,51 @@ export class LiveGlobe {
       threadStoryIds,
       secondDegree: this.secondDegree,
     };
+    this.updateDistanceRings();
     this.updateLinkLabels();
+    this.updateEdgeMarkers();
     this.options.onFocus?.(this.focused);
     this.emit();
     this.map.triggerRepaint();
+  }
+
+  private async addFallbackCities(): Promise<void> {
+    if (this.map.getSource("dor-fallback-cities")) return;
+    try {
+      const apiBase = ((import.meta.env as Record<string, string | undefined>).VITE_API_URL || "").replace(/\/$/, "");
+      const response = await fetch(`${apiBase}/api/places?limit=20`);
+      if (!response.ok) return;
+      const payload = (await response.json()) as {
+        places?: Array<{ name: string; lat: number; lon: number }>;
+      };
+      const features = (payload.places ?? []).map((place) => ({
+        type: "Feature" as const,
+        geometry: { type: "Point" as const, coordinates: [place.lon, place.lat] },
+        properties: { label: place.name.toUpperCase() },
+      }));
+      this.map.addSource("dor-fallback-cities", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features },
+      });
+      this.map.addLayer({
+        id: "dor-fallback-cities",
+        type: "symbol",
+        source: "dor-fallback-cities",
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 10,
+          "text-letter-spacing": 0.08,
+        },
+        paint: {
+          "text-color": "rgba(159,179,207,.7)",
+          "text-halo-color": "rgba(3,5,11,.9)",
+          "text-halo-width": 1,
+        },
+      });
+    } catch {
+      /* dark background and story dots remain; no fabricated land */
+    }
   }
 
   private setAmbientLabels(): void {
@@ -531,6 +670,7 @@ export class LiveGlobe {
       if (!row.storyId) continue;
       const story = this.stories.get(row.storyId);
       if (!story || story.locations.length === 0) continue;
+      if (this.storyFilter && !this.matchesStory(story)) continue;
       const location = story.locations[story.primary] ?? story.locations[0]!;
       const slots = this.ripples.spawn({
         lng: location.lon,
@@ -568,7 +708,7 @@ export class LiveGlobe {
           type: "Feature" as const,
           geometry: { type: "Point" as const, coordinates: mid },
           properties: {
-            label: link.strength.toFixed(2),
+            label: `${link.strength.toFixed(2)} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
             color: linkColor(link.type),
             linkIndex: link.index,
           },
@@ -614,16 +754,75 @@ export class LiveGlobe {
     source.setData({ type: "FeatureCollection", features });
   }
 
+  private findArcAt(x: number, y: number): number | null {
+    const data = this.data;
+    if (!data || !this.linesVisible) return null;
+    let best: number | null = null;
+    let bestDistance = 7;
+    for (let index = 0; index < data.init.linkCount; index++) {
+      if ((data.init.links.strength[index] ?? 0) < this.floor) continue;
+      const a = data.stories[data.init.links.a[index]!];
+      const b = data.stories[data.init.links.b[index]!];
+      if (!a || !b) continue;
+      const start = this.map.project([a.lng, a.lat]);
+      const end = this.map.project([b.lng, b.lat]);
+      const distance = distanceToSegment(x, y, start.x, start.y, end.x, end.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    }
+    return best;
+  }
+
+  private updateDistanceRings(): void {
+    if (!this.ready) return;
+    const source = this.map.getSource(RING_SOURCE) as GeoJSONSource | undefined;
+    const labels = this.map.getSource(RING_LABEL_SOURCE) as GeoJSONSource | undefined;
+    if (!source || !labels) return;
+    const center = this.focused
+      ? [this.focused.live.lng, this.focused.live.lat]
+      : [this.map.getCenter().lng, this.map.getCenter().lat];
+    const zoom = this.map.getZoom();
+    const radii =
+      zoom < 4 ? [1000, 5000] : zoom < 8 ? [200, 1000] : zoom < 12 ? [50, 200] : [1, 5, 25];
+    const ringFeatures = radii.map((km) => {
+      const coordinates: [number, number][] = [];
+      for (let i = 0; i <= 64; i++) {
+        const bearing = (i / 64) * 360;
+        coordinates.push(destinationPoint(center[1]!, center[0]!, km, bearing));
+      }
+      return {
+        type: "Feature" as const,
+        geometry: { type: "Polygon" as const, coordinates: [coordinates] },
+        properties: { km },
+      };
+    });
+    const labelFeatures = radii.map((km) => ({
+      type: "Feature" as const,
+      geometry: {
+        type: "Point" as const,
+        coordinates: destinationPoint(center[1]!, center[0]!, km, 90),
+      },
+      properties: { label: `${km} km` },
+    }));
+    source.setData({ type: "FeatureCollection", features: ringFeatures });
+    labels.setData({ type: "FeatureCollection", features: labelFeatures });
+  }
+
   private updateAggregates(): void {
     if (!this.ready) return;
     const zoom = this.map.getZoom();
     const source = this.map.getSource(AGG_SOURCE) as GeoJSONSource | undefined;
     if (!source) return;
     const show = zoom < 4.2 && (this.data?.stories.length ?? 0) > 0;
-    this.map.setLayoutProperty(AGG_CIRCLE_LAYER, "visibility", show ? "visible" : "none");
+    this.map.setLayoutProperty(AGG_CIRCLE_LAYER, "visibility", "none");
     this.map.setLayoutProperty(AGG_COUNT_LAYER, "visibility", show ? "visible" : "none");
+    this.map.setLayoutProperty(HEX_LAYER, "visibility", show ? "visible" : "none");
+    const hexSource = this.map.getSource(HEX_SOURCE) as GeoJSONSource | undefined;
     if (!show || !this.data) {
       source.setData({ type: "FeatureCollection", features: [] });
+      hexSource?.setData({ type: "FeatureCollection", features: [] });
       return;
     }
     const cell = zoom < 2 ? 18 : 8;
@@ -645,11 +844,54 @@ export class LiveGlobe {
       properties: { count: bucket.count, color: linkColor(bucket.category) },
     }));
     source.setData({ type: "FeatureCollection", features });
+    const hexFeatures = [...buckets.values()].map((bucket) => {
+      const centerLng = bucket.lng / bucket.count;
+      const centerLat = bucket.lat / bucket.count;
+      const radius = cell * 0.55;
+      const ring: [number, number][] = [];
+      for (let i = 0; i <= 6; i++) {
+        const angle = (i / 6) * Math.PI * 2;
+        ring.push([
+          centerLng + (radius * Math.cos(angle)) / Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)),
+          centerLat + radius * Math.sin(angle),
+        ]);
+      }
+      return {
+        type: "Feature" as const,
+        geometry: { type: "Polygon" as const, coordinates: [ring] },
+        properties: { count: bucket.count, color: linkColor(bucket.category) },
+      };
+    });
+    hexSource?.setData({ type: "FeatureCollection", features: hexFeatures });
   }
 
   private updateEdgeMarkers(): void {
     if (!this.ready || !this.data || this.data.stories.length === 0) {
       this.edgeMarkers = [];
+      return;
+    }
+    if (this.focused) {
+      const canvas = this.map.getCanvas();
+      const linked: EdgeMarker[] = [];
+      for (const link of this.focused.hud.links) {
+        const entry = this.data.stories[link.storyIndex];
+        if (!entry) continue;
+        const point = this.map.project([entry.lng, entry.lat]);
+        const visible =
+          point.x >= 40 &&
+          point.x <= canvas.clientWidth - 40 &&
+          point.y >= 80 &&
+          point.y <= canvas.clientHeight - 80;
+        if (visible) continue;
+        linked.push({
+          key: `link-${link.index}`,
+          label: `${link.place.toUpperCase()} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
+          count: 1,
+          center: [entry.lng, entry.lat],
+          zoom: Math.max(5, this.map.getZoom()),
+        });
+      }
+      this.edgeMarkers = linked.slice(0, 4);
       return;
     }
     const regions = [
@@ -770,6 +1012,35 @@ export class LiveGlobe {
     this.layer.setStrengthFloor(this.floor);
   }
 
+  setStoryFilter(filter: StoryFilter | null): void {
+    this.storyFilter = filter;
+    if (!this.ready) return;
+    this.rebuild([...this.stories.values()], [...this.links.values()], false);
+  }
+
+  private matchesStory(story: Story): boolean {
+    const filter = this.storyFilter;
+    if (!filter) return true;
+    if (filter.categories.size > 0 && !filter.categories.has(story.category)) return false;
+    if (story.sourceCount < filter.minSources) return false;
+    if (filter.promptStoryIds.size > 0 && !filter.promptStoryIds.has(story.id)) return false;
+    if (filter.regions.length > 0) {
+      const haystack = story.locations.map((location) => location.name.toLowerCase());
+      const matches = filter.regions.some((region) =>
+        haystack.some((name) => name.includes(region)),
+      );
+      if (!matches) return false;
+    }
+    if (filter.radiusKm > 0) {
+      const location = storyLocation(story);
+      if (!location) return false;
+      if (haversineKm(filter.lat, filter.lon, location.lat, location.lng) > filter.radiusKm) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   get focus(): FocusDetails | null { return this.focused; }
 
   get view(): GlobeView {
@@ -821,6 +1092,14 @@ export class LiveGlobe {
     };
   }
 
+  nearbyStories(lat: number, lon: number, limit = 12): Array<{ entry: LiveStory; km: number }> {
+    if (!this.data) return [];
+    return this.data.stories
+      .map((entry) => ({ entry, km: haversineKm(lat, lon, entry.lat, entry.lng) }))
+      .sort((a, b) => a.km - b.km)
+      .slice(0, limit);
+  }
+
   get state(): GlobeState {
     return {
       ready: this.ready,
@@ -840,6 +1119,7 @@ export class LiveGlobe {
       edgeMarkers: this.edgeMarkers,
       secondDegree: this.secondDegree,
       quality: this.quality,
+      tileFailed: this.tileFailed,
     };
   }
 
@@ -854,6 +1134,56 @@ export class LiveGlobe {
     window.removeEventListener("keydown", this.onKeyDown);
     this.map.remove();
   }
+}
+
+function distanceToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const length = dx * dx + dy * dy;
+  if (length === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function destinationPoint(
+  lat: number,
+  lon: number,
+  km: number,
+  bearingDegrees: number,
+): [number, number] {
+  const radius = 6371;
+  const angular = km / radius;
+  const bearing = (bearingDegrees * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lon1 = (lon * Math.PI) / 180;
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angular) +
+      Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing),
+  );
+  const lon2 =
+    lon1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angular) * Math.cos(lat1),
+      Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2),
+    );
+  return [(lon2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
+}
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
 function toRippleUpdate(slot: RippleSlotState, category: number): StreamPatch["ripples"][number] {

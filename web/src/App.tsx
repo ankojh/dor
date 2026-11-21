@@ -9,10 +9,12 @@ import {
   type FocusDetails,
   type GlobeState,
   type LinkInfo,
+  type StoryFilter,
 } from "./globe/runtime";
 import type {
   ConnectionState,
   SourceHealth,
+  WireFilters,
   WorkerMessage,
   WorkerStatus,
 } from "./worker/messages";
@@ -36,6 +38,7 @@ const EMPTY_GLOBE: GlobeState = {
   edgeMarkers: [],
   secondDegree: false,
   quality: 0,
+  tileFailed: false,
 };
 
 type WireItem = {
@@ -189,6 +192,58 @@ type StoryDetails = {
   articles_truncated?: boolean;
 };
 
+type AlertRecord = {
+  id: string;
+  prompt: string;
+  min_sources: number;
+  region: string;
+  strictness: number;
+  channels: string[];
+  enabled: boolean;
+  ntfy_topic?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type AlertToast = {
+  alertId: string;
+  storyId: string;
+  level: string;
+  title: string;
+  prompt: string;
+  firedAt: number;
+};
+
+type AlertHitRecord = {
+  alert_id: string;
+  story_id: string;
+  level: string;
+  fired_at: number;
+  title: string;
+  prompt: string;
+  source_count?: number;
+};
+
+type BacktestResult = {
+  would_fire: number;
+  stories: Array<{ story_id: string; title: string; source_count: number; score: number }>;
+  approx?: boolean;
+  took_ms?: number;
+  available?: boolean;
+  error?: string;
+};
+
+const EMPTY_FILTERS: WireFilters = {
+  categories: [],
+  regions: [],
+  minSources: 0,
+  lang: [],
+  sources: [],
+  lat: 0,
+  lon: 0,
+  radiusKm: 0,
+};
+
 const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
 export function App() {
@@ -238,6 +293,46 @@ export function App() {
   const [layerHeat, setLayerHeat] = createSignal(true);
   const [layerFloor, setLayerFloor] = createSignal(0.6);
   const [perfOverlay, setPerfOverlay] = createSignal(false);
+  const [filters, setFilters] = createSignal<WireFilters>({ ...EMPTY_FILTERS });
+  const [filterPanelOpen, setFilterPanelOpen] = createSignal(false);
+  const [promptInput, setPromptInput] = createSignal("");
+  const [prompts, setPrompts] = createSignal<string[]>([]);
+  const [hideNonMatches, setHideNonMatches] = createSignal(false);
+  const [filterPlaceQuery, setFilterPlaceQuery] = createSignal("");
+  const [filterPlace, setFilterPlace] = createSignal<{
+    name: string;
+    lat: number;
+    lon: number;
+  } | null>(null);
+  const [filterPlaceResults, setFilterPlaceResults] = createSignal<
+    Array<{ id: string; name: string; lat: number; lon: number; country: string }>
+  >([]);
+  const [alertList, setAlertList] = createSignal<AlertRecord[]>([]);
+  const [alertsOpen, setAlertsOpen] = createSignal(false);
+  const [alertDraftPrompt, setAlertDraftPrompt] = createSignal("");
+  const [alertDraftMinSources, setAlertDraftMinSources] = createSignal(0);
+  const [alertDraftRegion, setAlertDraftRegion] = createSignal("");
+  const [alertDraftStrictness, setAlertDraftStrictness] = createSignal(0.8);
+  const [alertDraftChannels, setAlertDraftChannels] = createSignal<string[]>(["inapp"]);
+  const [alertToasts, setAlertToasts] = createSignal<AlertToast[]>([]);
+  const [backtest, setBacktest] = createSignal<BacktestResult | null>(null);
+  const [alertHits, setAlertHits] = createSignal<Record<string, AlertHitRecord[]>>({});
+  const [linkReported, setLinkReported] = createSignal(false);
+  const [pushState, setPushState] = createSignal<{
+    loading: boolean;
+    available: boolean | null;
+    reason?: string;
+  }>({ loading: false, available: null });
+  const [mobileTab, setMobileTab] = createSignal<"wire" | "threads" | "near" | "alerts">("wire");
+  const [view, setView] = createSignal<{ center: [number, number]; zoom: number }>({
+    center: [6, 22],
+    zoom: 1.55,
+  });
+  const [cmdPlaces, setCmdPlaces] = createSignal<
+    Array<{ id: string; name: string; lat: number; lon: number; country: string }>
+  >([]);
+  const [nearMe, setNearMe] = createSignal<Array<{ storyId: string; title: string; km: number }>>([]);
+  const [nearMeState, setNearMeState] = createSignal<"idle" | "loading" | "ready" | "denied">("idle");
   const pendingWire: WireItem[] = [];
   const seen = new Set<string>();
   const briefCache = new Map<string, StoryText>();
@@ -245,9 +340,12 @@ export function App() {
   const whyCache = new Map<string, LinkWhy>();
   const prefetched = new Set<string>();
   const initialHash = new URLSearchParams(location.hash.slice(1));
+  const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingInitialStory = initialHash.get("story");
+  let touchStartY = 0;
+  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
   const paused = createMemo(() => pausedByHover() || scrollTop() > 6);
   const ingestLag = createMemo(() => {
@@ -260,8 +358,64 @@ export function App() {
   const linkCount = createMemo(() => globe().linkCount);
   const topStories = createMemo(() => globe().topStories.slice(0, 6));
   const threadIds = createMemo(() => new Set(focus()?.threadStoryIds ?? []));
+  const activeScore = (row: WireRow): number => {
+    let score = 0;
+    for (const prompt of prompts()) score = Math.max(score, row.promptScores[prompt] ?? 0);
+    return score;
+  };
+
+  const isApproxMatch = (row: WireRow): boolean =>
+    prompts().some((prompt) => row.approxPrompts.includes(prompt));
+
+  const promptStoryIds = createMemo(() => {
+    const ids = new Set<string>();
+    if (prompts().length === 0) return ids;
+    for (const item of wireRows()) {
+      if (item.row.storyId && activeScore(item.row) >= 0.5) ids.add(item.row.storyId);
+    }
+    return ids;
+  });
+
   const visibleWireRows = createMemo(() => {
     let rows = wireRows();
+    const active = filters();
+    if (active.categories.length > 0) {
+      const wanted = new Set(active.categories);
+      rows = rows.filter((item) => wanted.has(item.row.category));
+    }
+    if (active.sources.length > 0) {
+      const wanted = new Set(active.sources.map((source) => source.toLowerCase()));
+      rows = rows.filter((item) => wanted.has(item.row.source.toLowerCase()));
+    }
+    if (active.lang.length > 0) {
+      const wanted = new Set(active.lang.map((lang) => lang.toLowerCase()));
+      rows = rows.filter((item) => wanted.has(item.row.lang.toLowerCase()));
+    }
+    if (active.regions.length > 0) {
+      rows = rows.filter((item) =>
+        active.regions.some(
+          (region) =>
+            item.row.country.toLowerCase().includes(region.toLowerCase()) ||
+            item.row.place.toLowerCase().includes(region.toLowerCase()),
+        ),
+      );
+    }
+    if (active.radiusKm > 0 && active.lat !== 0 && active.lon !== 0) {
+      rows = rows.filter((item) => {
+        if (!item.row.located) return false;
+        const toRad = Math.PI / 180;
+        const dLat = (item.row.lat - active.lat) * toRad;
+        const dLon = (item.row.lon - active.lon) * toRad;
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(active.lat * toRad) * Math.cos(item.row.lat * toRad) * Math.sin(dLon / 2) ** 2;
+        const km = 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
+        return km <= active.radiusKm;
+      });
+    }
+    if (prompts().length > 0 && hideNonMatches()) {
+      rows = rows.filter((item) => activeScore(item.row) >= 0.5);
+    }
     if (storiesOnly()) {
       const latestByStory = new Map<string, WireItem>();
       for (const item of rows) {
@@ -275,6 +429,29 @@ export function App() {
     }
     return rows;
   });
+
+  const buildStoryFilter = (): StoryFilter | null => {
+    const active = filters();
+    const hasFilters =
+      active.categories.length > 0 ||
+      active.regions.length > 0 ||
+      active.minSources > 0 ||
+      active.radiusKm > 0 ||
+      active.lat !== 0 ||
+      active.lon !== 0 ||
+      prompts().length > 0;
+    if (!hasFilters) return null;
+    return {
+      categories: new Set(active.categories),
+      regions: active.regions,
+      sources: active.sources,
+      minSources: active.minSources,
+      lat: active.lat,
+      lon: active.lon,
+      radiusKm: active.radiusKm,
+      promptStoryIds: promptStoryIds(),
+    };
+  };
 
   const searchResults = createMemo(() => {
     globe();
@@ -379,6 +556,18 @@ export function App() {
     return events;
   });
 
+  createEffect(() => {
+    filters();
+    prompts();
+    promptStoryIds();
+    if (!liveGlobe) return;
+    if (filterTimer !== null) clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => {
+      filterTimer = null;
+      liveGlobe?.setStoryFilter(buildStoryFilter());
+    }, 180);
+  });
+
   const enqueueWire = (rows: WireRow[]): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
@@ -461,6 +650,91 @@ export function App() {
     }
   });
 
+  const updateFilters = (patch: Partial<WireFilters>): void => {
+    const next = { ...filters(), ...patch };
+    setFilters(next);
+    worker?.postMessage({ type: "filters", filters: next });
+    liveGlobe?.setStoryFilter(buildStoryFilter());
+  };
+
+  const updatePrompts = (next: string[]): void => {
+    const unique = [...new Set(next.map((prompt) => prompt.trim()).filter(Boolean))];
+    setPrompts(unique);
+    worker?.postMessage({ type: "prompts", prompts: unique });
+    liveGlobe?.setStoryFilter(buildStoryFilter());
+  };
+
+  const addPrompt = (): void => {
+    const prompt = promptInput().trim();
+    if (!prompt) return;
+    updatePrompts([...prompts(), prompt]);
+    setPromptInput("");
+  };
+
+  const searchPlaces = async (query: string, forFilter = false): Promise<void> => {
+    if (query.trim().length < 2) {
+      if (forFilter) setFilterPlaceResults([]);
+      else setCmdPlaces([]);
+      return;
+    }
+    try {
+      const payload = await apiJson<{
+        places: Array<{ id: string; name: string; lat: number; lon: number; country: string }>;
+      }>(`/api/places?query=${encodeURIComponent(query)}&limit=8`);
+      if (forFilter) setFilterPlaceResults(payload.places ?? []);
+      else setCmdPlaces(payload.places ?? []);
+    } catch {
+      if (forFilter) setFilterPlaceResults([]);
+      else setCmdPlaces([]);
+    }
+  };
+
+  const selectFilterPlace = (place: { name: string; lat: number; lon: number }): void => {
+    setFilterPlace(place);
+    setFilterPlaceQuery(place.name);
+    setFilterPlaceResults([]);
+    updateFilters({
+      lat: place.lat,
+      lon: place.lon,
+      radiusKm: filters().radiusKm > 0 ? filters().radiusKm : 100,
+    });
+  };
+
+  const requestNearMe = (): void => {
+    if (!navigator.geolocation) {
+      setNearMeState("denied");
+      return;
+    }
+    setNearMeState("loading");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const nearby = liveGlobe?.nearbyStories(
+          position.coords.latitude,
+          position.coords.longitude,
+          12,
+        ) ?? [];
+        setNearMe(
+          nearby.map(({ entry, km }) => ({
+            storyId: entry.story.id,
+            title: entry.story.title,
+            km,
+          })),
+        );
+        setNearMeState("ready");
+      },
+      () => setNearMeState("denied"),
+      { timeout: 10000, maximumAge: 300000 },
+    );
+  };
+
+  const zoomBand = createMemo(() => {
+    const zoom = view().zoom;
+    if (zoom < 3.5) return { key: "globe", label: "GLOBE", zoom: 1.55 };
+    if (zoom < 8.5) return { key: "region", label: "REGION", zoom: 6 };
+    if (zoom < 13.5) return { key: "city", label: "CITY", zoom: 11 };
+    return { key: "street", label: "STREET", zoom: 15 };
+  });
+
   const syncHash = (storyId: string | null = focus()?.storyId ?? null): void => {
     const params = new URLSearchParams();
     if (storyId) params.set("story", storyId);
@@ -535,6 +809,200 @@ export function App() {
     }
   };
 
+  const apiJson = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+    const response = await fetch(`${API_BASE}${path}`, {
+      headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+      ...init,
+    });
+    const payload = (await response.json()) as T & { error?: string; reason?: string };
+    if (!response.ok) {
+      throw new Error(payload.error || payload.reason || `HTTP ${response.status}`);
+    }
+    return payload;
+  };
+
+  const loadAlerts = async (): Promise<void> => {
+    try {
+      const payload = await apiJson<{ alerts: AlertRecord[] }>("/api/alerts");
+      setAlertList(payload.alerts ?? []);
+    } catch {
+      setAlertList([]);
+    }
+  };
+
+  const refreshAlertsAndHits = async (): Promise<void> => {
+    await loadAlerts();
+  };
+
+  const loadAlertHits = async (alertId: string): Promise<void> => {
+    try {
+      const payload = await apiJson<{ hits: AlertHitRecord[] }>(
+        `/api/alerts/hits?alert_id=${encodeURIComponent(alertId)}`,
+      );
+      setAlertHits((previous) => ({ ...previous, [alertId]: payload.hits ?? [] }));
+    } catch {
+      setAlertHits((previous) => ({ ...previous, [alertId]: [] }));
+    }
+  };
+
+  const reportWrongLink = async (link: LinkInfo): Promise<void> => {
+    try {
+      await apiJson("/api/report-wrong-link", {
+        method: "POST",
+        body: JSON.stringify({ a: link.aId, b: link.bId, reason: "wrong relation" }),
+      });
+      setLinkReported(true);
+    } catch {
+      setLinkReported(true);
+    }
+  };
+
+  const saveAlert = async (): Promise<void> => {
+    const prompt = alertDraftPrompt().trim();
+    if (!prompt) return;
+    try {
+      const payload = await apiJson<{ alert: AlertRecord }>("/api/alerts", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt,
+          min_sources: alertDraftMinSources(),
+          region: alertDraftRegion(),
+          strictness: alertDraftStrictness(),
+          channels: alertDraftChannels(),
+          enabled: true,
+        }),
+      });
+      setAlertList((previous) => [payload.alert, ...previous]);
+      setAlertDraftPrompt("");
+      setBacktest(null);
+    } catch (error) {
+      setBacktest({ would_fire: 0, stories: [], error: String(error) });
+    }
+  };
+
+  const toggleAlert = async (alert: AlertRecord): Promise<void> => {
+    try {
+      const payload = await apiJson<{ alert: AlertRecord }>(`/api/alerts/${alert.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !alert.enabled }),
+      });
+      setAlertList((previous) =>
+        previous.map((item) => (item.id === alert.id ? payload.alert : item)),
+      );
+    } catch {
+      /* keep current state */
+    }
+  };
+
+  const deleteAlert = async (alert: AlertRecord): Promise<void> => {
+    try {
+      await apiJson(`/api/alerts/${alert.id}`, { method: "DELETE" });
+      setAlertList((previous) => previous.filter((item) => item.id !== alert.id));
+    } catch {
+      /* keep current state */
+    }
+  };
+
+  const runBacktest = async (): Promise<void> => {
+    const prompt = alertDraftPrompt().trim();
+    if (!prompt) return;
+    try {
+      const payload = await apiJson<BacktestResult>("/api/alerts/backtest", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt,
+          min_sources: alertDraftMinSources(),
+          region: alertDraftRegion(),
+          strictness: alertDraftStrictness(),
+        }),
+      });
+      setBacktest(payload);
+    } catch (error) {
+      setBacktest({ would_fire: 0, stories: [], error: String(error) });
+    }
+  };
+
+  const dismissToast = (toast: AlertToast): void => {
+    setAlertToasts((previous) =>
+      previous.filter((item) => !(item.alertId === toast.alertId && item.storyId === toast.storyId)),
+    );
+  };
+
+  const handleAlertHit = (hit: {
+    alertId: string;
+    storyId: string;
+    level: string;
+    title: string;
+    prompt: string;
+    firedAt: bigint;
+  }): void => {
+    const alert = alertList().find((item) => item.id === hit.alertId);
+    if (alert && !alert.channels.includes("inapp")) return;
+    const toast: AlertToast = {
+      alertId: hit.alertId,
+      storyId: hit.storyId,
+      level: hit.level,
+      title: hit.title,
+      prompt: hit.prompt,
+      firedAt: Number(hit.firedAt),
+    };
+    setAlertToasts((previous) =>
+      previous.some((item) => item.alertId === toast.alertId && item.storyId === toast.storyId)
+        ? previous
+        : [toast, ...previous].slice(0, 4),
+    );
+  };
+
+  const muteAlertStory = async (toast: AlertToast): Promise<void> => {
+    dismissToast(toast);
+    try {
+      await apiJson(`/api/alerts/${toast.alertId}/mute`, {
+        method: "POST",
+        body: JSON.stringify({ story_id: toast.storyId }),
+      });
+    } catch {
+      /* toast already dismissed; mute is best-effort */
+    }
+  };
+
+  const enablePush = async (): Promise<void> => {
+    setPushState({ loading: true, available: null });
+    try {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setPushState({ loading: false, available: false, reason: "Push is not supported here" });
+        return;
+      }
+      const key = await apiJson<{ available: boolean; public_key?: string; reason?: string }>(
+        "/api/push/key",
+      );
+      if (!key.available || !key.public_key) {
+        setPushState({ loading: false, available: false, reason: key.reason || "Push is not configured" });
+        return;
+      }
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setPushState({ loading: false, available: false, reason: "Notification permission denied" });
+        return;
+      }
+      const normalized = key.public_key.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+      const decoded = atob(padded);
+      const applicationServerKey = Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey,
+      });
+      await apiJson("/api/push/subscriptions", {
+        method: "POST",
+        body: JSON.stringify(subscription.toJSON()),
+      });
+      setPushState({ loading: false, available: true });
+    } catch (error) {
+      setPushState({ loading: false, available: false, reason: String(error) });
+    }
+  };
+
   const loadLinkWhy = async (link: LinkInfo): Promise<void> => {
     const key = `${link.aId} ${link.bId}`;
     const cached = whyCache.get(key);
@@ -565,6 +1033,7 @@ export function App() {
 
   const openLink = (link: LinkInfo): void => {
     setSelectedLink(link);
+    setLinkReported(false);
     void loadLinkWhy(link);
   };
 
@@ -614,6 +1083,19 @@ export function App() {
       case "deltas":
         setLastSeq(message.seq);
         liveGlobe?.applyDeltas(message.deltas);
+        for (const delta of message.deltas) {
+          if (delta.body.case === "alert") {
+            const hit = delta.body.value;
+            handleAlertHit({
+              alertId: hit.alertId,
+              storyId: hit.storyId,
+              level: hit.level,
+              title: hit.title,
+              prompt: hit.prompt,
+              firedAt: hit.firedAt,
+            });
+          }
+        }
         enqueueWire(
           message.deltas
             .filter((delta) => delta.body.case === "wire")
@@ -656,13 +1138,17 @@ export function App() {
         }
       },
       onLinkClick: openLink,
-      onView: scheduleHash,
+      onView: (nextView) => {
+        setView(nextView);
+        scheduleHash();
+      },
     });
     liveGlobe.setStrengthFloor(layerFloor());
     const viewParam = initialHash.get("view")?.split(",").map(Number);
     if (viewParam && viewParam.length === 3 && viewParam.every((value) => Number.isFinite(value))) {
       liveGlobe.setView([viewParam[0]!, viewParam[1]!], viewParam[2]!);
     }
+    if (initialQuery.get("alert")) setAlertsOpen(true);
     if (initialHash.get("f") === "thread") setThreadOnly(true);
     if (initialHash.get("f") === "second") liveGlobe.setSecondDegree(true);
     if (pendingInitialStory) liveGlobe.focusStoryId(pendingInitialStory);
@@ -684,6 +1170,7 @@ export function App() {
     }
 
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
+    void loadAlerts();
 
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
@@ -723,6 +1210,7 @@ export function App() {
       if (clockTimer !== null) clearInterval(clockTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
+      if (filterTimer !== null) clearTimeout(filterTimer);
     });
   });
 
@@ -788,8 +1276,10 @@ export function App() {
               setTimeout(() => setSearchOpen(false), 150);
             }}
             onInput={(event) => {
-              setSearchQuery(event.currentTarget.value);
+              const query = event.currentTarget.value;
+              setSearchQuery(query);
               setSearchOpen(true);
+              void searchPlaces(query);
             }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -843,15 +1333,55 @@ export function App() {
                 )}
               </For>
             </Show>
+            <Show when={cmdPlaces().length > 0}>
+              <span class="cap search-section">Places</span>
+              <For each={cmdPlaces()}>
+                {(place) => (
+                  <button
+                    class="search-result"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      liveGlobe?.flyTo([place.lon, place.lat], 10);
+                      setSearchQuery("");
+                      setCmdPlaces([]);
+                      setSearchOpen(false);
+                      searchInput.blur();
+                    }}
+                  >
+                    <span class="dot" style="--c:#5ef2ff" />
+                    <span class="h">
+                      <b>{place.name}</b>
+                      <small>{place.country || "Place"}</small>
+                    </span>
+                  </button>
+                )}
+              </For>
+            </Show>
           </div>
         </Show>
         <div class="chips" role="group" aria-label="Categories">
-          <button class="chip" aria-pressed="true">
+          <button
+            class="chip"
+            aria-pressed={filters().categories.length === 0}
+            onClick={() => updateFilters({ categories: [] })}
+          >
             All
           </button>
           <For each={CATEGORIES}>
             {(category) => (
-              <button class="chip" style={`--c:${category.color}`} title="Filters arrive in M4">
+              <button
+                class="chip"
+                style={`--c:${category.color}`}
+                aria-pressed={filters().categories.includes(category.category)}
+                onClick={() => {
+                  const active = filters().categories;
+                  updateFilters({
+                    categories: active.includes(category.category)
+                      ? active.filter((item) => item !== category.category)
+                      : [...active, category.category],
+                  });
+                }}
+              >
                 <span class="sw" />
                 {category.label}
               </button>
@@ -872,13 +1402,43 @@ export function App() {
           <span>
             UTC <b>{utc()}</b>
           </span>
-          <button class="ibtn bell" title="Alerts (placeholder)" aria-label="Alerts placeholder">
+          <button
+            class="ibtn bell"
+            title="Alerts"
+            aria-label="Alerts"
+            onClick={() => {
+              setAlertsOpen(true);
+              void refreshAlertsAndHits();
+            }}
+          >
             ◔
+            <Show when={alertToasts().length > 0}>
+              <span class="badge">{alertToasts().length}</span>
+            </Show>
           </button>
+          <a class="ops-link mono" href="/ops" target="_blank" rel="noopener noreferrer">
+            OPS
+          </a>
         </div>
       </header>
 
-      <aside class="wire">
+      <aside class={`wire mobile-tab-${mobileTab()}`}>
+        <div class="mobile-tabs" role="tablist" aria-label="Mobile sections">
+          <For each={["wire", "threads", "near", "alerts"] as const}>
+            {(tab) => (
+              <button
+                role="tab"
+                aria-selected={mobileTab() === tab}
+                onClick={() => {
+                  setMobileTab(tab);
+                  if (tab === "alerts") void loadAlerts();
+                }}
+              >
+                {tab === "wire" ? "Wire" : tab === "threads" ? "Threads" : tab === "near" ? "Near me" : "Alerts"}
+              </button>
+            )}
+          </For>
+        </div>
         <div class="wire-head">
           <div class="r1">
             <h2>Live wire</h2>
@@ -904,7 +1464,146 @@ export function App() {
                 Stories only
               </button>
             </div>
+            <button
+              class="ibtn filter-btn"
+              aria-pressed={filterPanelOpen()}
+              title="Filters"
+              onClick={() => setFilterPanelOpen((open) => !open)}
+            >
+              ⚙
+            </button>
           </div>
+          <Show when={filterPanelOpen()}>
+            <div class="filter-drawer glass">
+              <div class="filter-row">
+                <span class="cap">Category</span>
+                <span>{filters().categories.length === 0 ? "All" : `${filters().categories.length} active`}</span>
+              </div>
+              <label class="filter-field">
+                <span>Sources</span>
+                <input
+                  value={filters().sources.join(", ")}
+                  placeholder="bbc-world, reuters"
+                  onInput={(event) =>
+                    updateFilters({
+                      sources: event.currentTarget.value
+                        .split(",")
+                        .map((source) => source.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </label>
+              <label class="filter-field">
+                <span>Region / place text</span>
+                <input
+                  value={filters().regions.join(", ")}
+                  placeholder="Europe, Indonesia"
+                  onInput={(event) =>
+                    updateFilters({
+                      regions: event.currentTarget.value
+                        .split(",")
+                        .map((region) => region.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </label>
+              <div class="filter-grid">
+                <label class="filter-field">
+                  <span>Min sources</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={filters().minSources}
+                    onInput={(event) =>
+                      updateFilters({ minSources: Number(event.currentTarget.value) || 0 })
+                    }
+                  />
+                </label>
+                <label class="filter-field">
+                  <span>Language</span>
+                  <input
+                    value={filters().lang.join(", ")}
+                    placeholder="en"
+                    onInput={(event) =>
+                      updateFilters({
+                        lang: event.currentTarget.value
+                          .split(",")
+                          .map((lang) => lang.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <label class="filter-field">
+                <span>Within radius of</span>
+                <input
+                  value={filterPlaceQuery()}
+                  placeholder="Search a city or country"
+                  onInput={(event) => {
+                    setFilterPlaceQuery(event.currentTarget.value);
+                    void searchPlaces(event.currentTarget.value, true);
+                  }}
+                />
+              </label>
+              <Show when={filterPlaceResults().length > 0}>
+                <div class="filter-place-results">
+                  <For each={filterPlaceResults().slice(0, 5)}>
+                    {(place) => (
+                      <button onClick={() => selectFilterPlace(place)}>
+                        {place.name} <span>{place.country}</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <div class="filter-grid">
+                <label class="filter-field">
+                  <span>Radius km</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={filters().radiusKm}
+                    onInput={(event) => {
+                      const radiusKm = Number(event.currentTarget.value) || 0;
+                      const place = filterPlace();
+                      updateFilters({
+                        radiusKm,
+                        ...(place ? { lat: place.lat, lon: place.lon } : {}),
+                      });
+                    }}
+                  />
+                </label>
+                <label class="filter-toggle">
+                  <input
+                    type="checkbox"
+                    checked={hideNonMatches()}
+                    onChange={(event) => setHideNonMatches(event.currentTarget.checked)}
+                  />
+                  Hide prompt non-matches
+                </label>
+              </div>
+              <div class="filter-actions">
+                <span class="cap">
+                  {filterPlace() ? `${filterPlace()!.name} · ${filters().radiusKm} km` : "No radius centre"}
+                </span>
+                <button
+                  class="text-btn"
+                  onClick={() => {
+                    setFilters({ ...EMPTY_FILTERS });
+                    setFilterPlace(null);
+                    setFilterPlaceQuery("");
+                    setFilterPlaceResults([]);
+                    updateFilters({ ...EMPTY_FILTERS });
+                  }}
+                >
+                  Clear filters
+                </button>
+              </div>
+            </div>
+          </Show>
           <Show when={focus()}>
             <div class="pfs">
               <span class="pf on">
@@ -944,12 +1643,45 @@ export function App() {
             <span class="spark" aria-hidden="true">✦</span>
             <input
               type="text"
-              placeholder="Filter with a prompt — prompt filters arrive in M4"
-              aria-label="Prompt filter placeholder"
-              disabled
+              value={promptInput()}
+              placeholder="Filter with a prompt, e.g. “protests that could disrupt shipping”"
+              aria-label="Prompt filter"
+              onInput={(event) => setPromptInput(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addPrompt();
+                }
+              }}
             />
             <span class="kbd">↵</span>
           </label>
+          <Show when={prompts().length > 0}>
+            <div class="pfs">
+              <For each={prompts()}>
+                {(prompt) => (
+                  <span class="pf on">
+                    <span class="k">PROMPT</span>
+                    {prompt}
+                    <button
+                      class="x"
+                      title="Remove prompt"
+                      onClick={() => updatePrompts(prompts().filter((item) => item !== prompt))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                )}
+              </For>
+              <button
+                class={`pf ${hideNonMatches() ? "on" : ""}`}
+                onClick={() => setHideNonMatches((value) => !value)}
+              >
+                <span class="k">SHOW</span>
+                {hideNonMatches() ? "Matches only" : "All rows dimmed"}
+              </button>
+            </div>
+          </Show>
         </div>
 
         <div
@@ -1004,6 +1736,12 @@ export function App() {
                             ? "thread"
                             : "dim"
                           : ""
+                      } ${
+                        display()?.kind === "article" &&
+                        prompts().length > 0 &&
+                        activeScore((display() as { kind: "article"; item: WireItem }).item.row) < 0.5
+                          ? "dim"
+                          : ""
                       }`}
                       style={{
                         position: "absolute",
@@ -1053,7 +1791,14 @@ export function App() {
                                   <span class="join">{joinText(row)}</span>
                                 </Show>
                               </span>
-                              <span class="pl">{row.place || "—"}</span>
+                              <span class="pl">
+                                {row.place || "—"}
+                                <Show when={prompts().length > 0 && activeScore(row) > 0}>
+                                  <span class="match-score" title={isApproxMatch(row) ? "Approximate match" : "Prompt match"}>
+                                    {isApproxMatch(row) ? "≈" : "·"} {activeScore(row).toFixed(2)}
+                                  </span>
+                                </Show>
+                              </span>
                             </button>
                           );
                         })()}
@@ -1075,11 +1820,88 @@ export function App() {
           <span class="cap">Hover pauses · ↑ ↓ to select</span>
           <span class="cap">{lastSeq() > 0 ? `seq ${lastSeq()}` : "newest first"}</span>
         </div>
+        <Show when={mobileTab() !== "wire"}>
+          <div class="mobile-panel">
+            <Show when={mobileTab() === "threads"}>
+              <For each={topStories()}>
+                {(story) => (
+                  <button class="thread" onClick={() => focusTopStory(story.story)}>
+                    <span class="cap">
+                      {categoryLabel(story.category)} · {story.story.sourceCount} sources
+                    </span>
+                    <p class="ttl">{story.story.title}</p>
+                    <div class="foot">
+                      <span>{story.place}</span>
+                      <span>strongest {story.strongestLink.toFixed(2)}</span>
+                    </div>
+                  </button>
+                )}
+              </For>
+            </Show>
+            <Show when={mobileTab() === "near"}>
+              <button class="chip" onClick={requestNearMe} disabled={nearMeState() === "loading"}>
+                {nearMeState() === "loading" ? "Locating…" : "Use my location"}
+              </button>
+              <Show when={nearMeState() === "denied"}>
+                <p class="cap">Location permission was not granted. Near me stays off.</p>
+              </Show>
+              <For each={nearMe()}>
+                {(item) => (
+                  <button class="thread" onClick={() => liveGlobe?.focusStoryId(item.storyId)}>
+                    <b>{item.title}</b>
+                    <span class="foot">
+                      <span>{item.km.toFixed(0)} km away</span>
+                      <span>open story →</span>
+                    </span>
+                  </button>
+                )}
+              </For>
+            </Show>
+            <Show when={mobileTab() === "alerts"}>
+              <button class="chip" onClick={() => setAlertsOpen(true)}>
+                Manage alerts
+              </button>
+              <Show when={alertList().length > 0} fallback={<p class="cap">No alerts yet.</p>}>
+                <For each={alertList()}>
+                  {(alert) => (
+                    <div class="mobile-alert-row">
+                      <b>{alert.prompt}</b>
+                      <span class="cap">{alert.enabled ? "on" : "off"}</span>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </Show>
+          </div>
+        </Show>
       </aside>
 
       <main class="stage">
         <div ref={mapContainer} class="map-host" aria-label="Live globe" />
         <div class="hud-corners" />
+        <div class="zoom-rail glass">
+          <For
+            each={[
+              ["GLOBE", 1.55],
+              ["REGION", 6],
+              ["CITY", 11],
+              ["STREET", 15],
+            ] as const}
+          >
+            {([label, zoom]) => (
+              <button
+                aria-current={zoomBand().label === label}
+                onClick={() => liveGlobe?.flyTo(view().center, zoom)}
+              >
+                {label}
+              </button>
+            )}
+          </For>
+          <span class="cap">{view().zoom.toFixed(1)}</span>
+        </div>
+        <div class="stage-crumbs cap">
+          {zoomBand().label} · {focus()?.hud.story.place ?? "Global"}
+        </div>
         <div class="tl">
           <span class="cap">
             {focus() ? `Focused · ${focus()!.hud.story.place.toUpperCase()}` : "Ambient · no selection"}
@@ -1271,21 +2093,20 @@ export function App() {
             ◎
           </button>
         </div>
-        <Show when={!focus()}>
-          <div class="edge-markers">
-            <For each={globe().edgeMarkers}>
+        <div class="edge-markers">
+          <For each={globe().edgeMarkers}>
             {(marker) => (
               <button
                 class="rim"
                 title={`Rotate to ${marker.label}`}
                 onClick={() => liveGlobe?.flyTo(marker.center, marker.zoom)}
               >
-                +{marker.count} <b>{marker.label}</b> ▸
+                {marker.count > 1 ? `+${marker.count} ` : "◂ "}
+                <b>{marker.label}</b> ▸
               </button>
-              )}
-            </For>
-          </div>
-        </Show>
+            )}
+          </For>
+        </div>
         <Show when={selectedLink()}>
           {(link) => (
             <div class="arc-popover glass">
@@ -1314,7 +2135,12 @@ export function App() {
                     ? linkWhy()!.why
                     : "Why unavailable for this link yet."}
               </p>
-              <span class="agentk">WHY · agent · cached</span>
+              <div class="arc-popover-foot">
+                <span class="agentk">WHY · agent · cached</span>
+                <button class="text-btn" onClick={() => void reportWrongLink(link())}>
+                  {linkReported() ? "reported" : "report wrong link"}
+                </button>
+              </div>
             </div>
           )}
         </Show>
@@ -1322,6 +2148,9 @@ export function App() {
           <div class="perf-chip mono">
             QUALITY {globe().quality} · DPR ≤ 2 · {globe().storyCount} stories
           </div>
+        </Show>
+        <Show when={globe().tileFailed}>
+          <span class="tile-failed-chip mono">BASEMAP OFFLINE · live layers only</span>
         </Show>
         <span class="attrib mono">
           © OpenFreeMap · © OpenMapTiles · © OpenStreetMap contributors · GDELT
@@ -1429,6 +2258,9 @@ export function App() {
                 </For>
                 <Show when={details().story.locations.length > 6}>
                   <span class="cap">+{details().story.locations.length - 6} more places</span>
+                </Show>
+                <Show when={details().hud.parties.length > 3}>
+                  <span class="cap">Multi-region · {details().hud.parties.length} parties</span>
                 </Show>
               </div>
               <Show when={storyDetails()}>
@@ -1545,7 +2377,17 @@ export function App() {
       </aside>
 
       <Show when={focus()}>
-        <div class="mobile-story glass">
+        <div
+          class="mobile-story glass"
+          onTouchStart={(event) => {
+            touchStartY = event.touches[0]?.clientY ?? 0;
+          }}
+          onTouchEnd={(event) => {
+            const endY = event.changedTouches[0]?.clientY ?? touchStartY;
+            if (Math.abs(endY - touchStartY) < 48) return;
+            moveSelection(endY < touchStartY ? 1 : -1);
+          }}
+        >
           <div class="mobile-story-head">
             <span class="cap">Focused story</span>
             <button class="text-btn" onClick={clearFocus}>
@@ -1586,6 +2428,202 @@ export function App() {
               </For>
             </div>
           </Show>
+        </div>
+      </Show>
+
+      <Show when={alertsOpen()}>
+        <div class="alerts-drawer glass" role="dialog" aria-label="Alerts">
+          <div class="alerts-head">
+            <span class="cap">Alerts</span>
+            <button class="text-btn" onClick={() => setAlertsOpen(false)}>
+              ×
+            </button>
+          </div>
+          <div class="alert-form">
+            <label class="filter-field">
+              <span>Prompt</span>
+              <input
+                value={alertDraftPrompt()}
+                placeholder="e.g. ports and shipping disruption"
+                onInput={(event) => setAlertDraftPrompt(event.currentTarget.value)}
+              />
+            </label>
+            <div class="filter-grid">
+              <label class="filter-field">
+                <span>Min sources</span>
+                <input
+                  type="number"
+                  min="0"
+                  value={alertDraftMinSources()}
+                  onInput={(event) => setAlertDraftMinSources(Number(event.currentTarget.value) || 0)}
+                />
+              </label>
+              <label class="filter-field">
+                <span>Region</span>
+                <input
+                  value={alertDraftRegion()}
+                  placeholder="Any"
+                  onInput={(event) => setAlertDraftRegion(event.currentTarget.value)}
+                />
+              </label>
+            </div>
+            <label class="alert-strict">
+              <span>Strictness <b>{alertDraftStrictness().toFixed(2)}</b></span>
+              <input
+                type="range"
+                min="0.5"
+                max="1"
+                step="0.01"
+                value={alertDraftStrictness()}
+                onInput={(event) => setAlertDraftStrictness(Number(event.currentTarget.value))}
+              />
+            </label>
+            <div class="alert-channels">
+              <span class="cap">Channels</span>
+              <For each={["inapp", "ntfy", "push"]}>
+                {(channel) => (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={alertDraftChannels().includes(channel)}
+                      onChange={(event) => {
+                        const channels = event.currentTarget.checked
+                          ? [...alertDraftChannels(), channel]
+                          : alertDraftChannels().filter((item) => item !== channel);
+                        setAlertDraftChannels([...new Set(channels)]);
+                      }}
+                    />
+                    {channel}
+                  </label>
+                )}
+              </For>
+            </div>
+            <div class="alert-actions">
+              <button class="chip" onClick={() => void runBacktest()}>
+                Backtest 24h
+              </button>
+              <button class="chip primary" onClick={() => void saveAlert()}>
+                Save alert
+              </button>
+            </div>
+            <Show when={backtest()}>
+              {(result) => (
+                <div class="backtest">
+                  <span class="cap">
+                    {result().available === false
+                      ? result().error || "Backtest unavailable"
+                      : `${result().would_fire} ${result().would_fire === 1 ? "story" : "stories"} would have fired`}
+                    {result().approx ? " · approx" : ""}
+                  </span>
+                  <For each={result().stories.slice(0, 4)}>
+                    {(story) => (
+                      <button
+                        class="backtest-row"
+                        onClick={() => liveGlobe?.focusStoryId(story.story_id)}
+                      >
+                        {story.title}
+                        <b>{story.score.toFixed(2)}</b>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              )}
+            </Show>
+          </div>
+          <div class="alert-list">
+            <Show
+              when={alertList().length > 0}
+              fallback={<span class="cap">No alerts yet</span>}
+            >
+              <For each={alertList()}>
+                {(alert) => (
+                  <div class="alert-item">
+                    <div class="alert-title">
+                      <b>{alert.prompt}</b>
+                      <span class="cap">
+                        {alert.channels.join(" · ")} · strict {alert.strictness.toFixed(2)}
+                      </span>
+                    </div>
+                    <div class="alert-item-actions">
+                      <button
+                        class={`sw2 ${alert.enabled ? "" : "off"}`}
+                        aria-label={`${alert.enabled ? "Disable" : "Enable"} alert`}
+                        onClick={() => void toggleAlert(alert)}
+                      />
+                      <button class="text-btn" onClick={() => void loadAlertHits(alert.id)}>
+                        hits
+                      </button>
+                      <button class="text-btn" onClick={() => void deleteAlert(alert)}>
+                        delete
+                      </button>
+                    </div>
+                    <Show when={alertHits()[alert.id]}>
+                      <div class="alert-hits">
+                        <For each={alertHits()[alert.id]}>
+                          {(hit) => (
+                            <button onClick={() => liveGlobe?.focusStoryId(hit.story_id)}>
+                              {hit.level === "escalated" ? "↑ " : ""}
+                              {hit.title}
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
+          <div class="push-row">
+            <div>
+              <span class="cap">Browser push</span>
+              <p class="cap">
+                {pushState().loading
+                  ? "Checking…"
+                  : pushState().available === true
+                    ? "Enabled for this browser"
+                    : pushState().reason || "Enable only on user action"}
+              </p>
+            </div>
+            <button
+              class="chip"
+              disabled={pushState().loading || pushState().available === true}
+              onClick={() => void enablePush()}
+            >
+              {pushState().available === true ? "Enabled" : "Enable push"}
+            </button>
+          </div>
+        </div>
+      </Show>
+      <Show when={alertToasts().length > 0}>
+        <div class="toast-stack">
+          <For each={alertToasts()}>
+            {(toast) => (
+              <div class="alert-toast glass">
+                <span class="cap">
+                  {toast.level === "escalated" ? "Escalated" : "Alert"} · {toast.prompt}
+                </span>
+                <b>{toast.title}</b>
+                <div class="toast-actions">
+                  <button
+                    class="chip primary"
+                    onClick={() => {
+                      liveGlobe?.focusStoryId(toast.storyId);
+                      dismissToast(toast);
+                    }}
+                  >
+                    Open story
+                  </button>
+                  <button class="chip" onClick={() => void muteAlertStory(toast)}>
+                    Mute this story
+                  </button>
+                  <button class="text-btn" onClick={() => dismissToast(toast)}>
+                    dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
 

@@ -53,5 +53,19 @@ export type WorkerResync = {
 
 export type WorkerMessage = WorkerStatus | WorkerSnapshot | WorkerDeltas | WorkerResync;
 
+export type WireFilters = {
+  categories: number[];
+  regions: string[];
+  minSources: number;
+  lang: string[];
+  sources: string[];
+  lat: number;
+  lon: number;
+  radiusKm: number;
+};
+
 /** Main -> worker controls. */
-export type WorkerCommand = { type: "focus"; storyId: string };
+export type WorkerCommand =
+  | { type: "focus"; storyId: string }
+  | { type: "filters"; filters: WireFilters }
+  | { type: "prompts"; prompts: string[] };

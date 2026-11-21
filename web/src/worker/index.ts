@@ -11,6 +11,8 @@ import {
   ClientMessageSchema,
   FocusSchema,
   HelloSchema,
+  SetFiltersSchema,
+  SetPromptsSchema,
   ServerMessageSchema,
   type ClientMessage,
   type Delta,
@@ -18,7 +20,13 @@ import {
   type Story,
   type WireRow,
 } from "../gen/dor/v1/dor_pb";
-import type { SourceHealth, WorkerCommand, WorkerMessage, WorkerStatus } from "./messages";
+import type {
+  SourceHealth,
+  WireFilters,
+  WorkerCommand,
+  WorkerMessage,
+  WorkerStatus,
+} from "./messages";
 import { mergeWireRow } from "../live/wire";
 
 const WIRE_LIMIT = 1000;
@@ -55,6 +63,8 @@ const wire: WireRow[] = [];
 const seenArticles = new Set<string>();
 let lastSeq = 0;
 let lastWireAt: number | null = null;
+let activeFilters: WireFilters | null = null;
+let activePrompts: string[] = [];
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
@@ -120,6 +130,33 @@ function sendHello(): void {
   sendClient({
     case: "hello",
     value: create(HelloSchema, { lastSeq: BigInt(lastSeq), clientVersion: "dor-web/0.1" }),
+  });
+  sendFilters();
+  sendPrompts();
+}
+
+function sendFilters(): void {
+  if (!activeFilters) return;
+  sendClient({
+    case: "setFilters",
+    value: create(SetFiltersSchema, {
+      categories: activeFilters.categories as never[],
+      regions: activeFilters.regions,
+      minSources: activeFilters.minSources,
+      lang: activeFilters.lang,
+      sources: activeFilters.sources,
+      lat: activeFilters.lat,
+      lon: activeFilters.lon,
+      radiusKm: activeFilters.radiusKm,
+    }),
+  });
+}
+
+function sendPrompts(): void {
+  if (activePrompts.length === 0) return;
+  sendClient({
+    case: "setPrompts",
+    value: create(SetPromptsSchema, { prompts: activePrompts }),
   });
 }
 
@@ -331,6 +368,12 @@ commandScope.onmessage = (event) => {
   const command = event.data;
   if (command?.type === "focus" && command.storyId) {
     sendClient({ case: "focus", value: create(FocusSchema, { storyId: command.storyId }) });
+  } else if (command?.type === "filters") {
+    activeFilters = command.filters;
+    sendFilters();
+  } else if (command?.type === "prompts") {
+    activePrompts = command.prompts;
+    sendPrompts();
   }
 };
 

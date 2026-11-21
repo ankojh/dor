@@ -296,3 +296,34 @@ func formatVector(v []float32) string {
 	b.WriteByte(']')
 	return b.String()
 }
+
+// FindStoryCandidates is the pgvector ANN shortlist used by the clusterer.
+// It returns live story ids ordered by cosine distance; the caller still
+// applies time/place/entity guards. An empty vector returns no rows.
+func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit int) ([]string, error) {
+	if len(vector) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 64 {
+		limit = 32
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id
+FROM stories
+WHERE expires_at > now() AND centroid IS NOT NULL
+ORDER BY centroid <=> $1::vector
+LIMIT $2`, formatVector(vector), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: story candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: story candidate scan: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

@@ -270,6 +270,9 @@ func runCommand(args []string) error {
 	}
 
 	enrichmentDeps := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	if dbStore != nil {
+		enrichmentDeps.StoryIndex = dbStore
+	}
 	enrichmentDeps.RelationShards = cfg.relationShards
 	enrichmentDeps.RelationShard = cfg.relationShard
 	enrichmentDeps.RelationDebounce = cfg.relationDebounce

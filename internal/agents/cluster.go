@@ -38,6 +38,12 @@ type StorySink interface {
 	EnqueueStory(record store.StoryRecord) bool
 }
 
+// StoryIndex is the optional pgvector ANN candidate source. *store.Store
+// satisfies it; nil falls back to the loaded in-memory story map.
+type StoryIndex interface {
+	FindStoryCandidates(ctx context.Context, vector []float32, limit int) ([]string, error)
+}
+
 // joinState is the per-article place/class/vector join. It lives in the joins
 // KV bucket for 30 s; the clusterer proceeds after 2 s with whatever arrived.
 type joinState struct {
@@ -61,15 +67,16 @@ type storyMeta struct {
 }
 
 type storyState struct {
-	Story      *dorv1.Story
-	ArticleIDs []string
-	SourceIDs  []string
-	Embedding  []float32
-	Entities   []string
-	Cell       string
-	ExpiresAt  time.Time
-	FirstSeen  int64
-	UpdatedAt  int64
+	Story         *dorv1.Story
+	ArticleIDs    []string
+	SourceIDs     []string
+	Embedding     []float32
+	Entities      []string
+	Cell          string
+	ExpiresAt     time.Time
+	FirstSeen     int64
+	UpdatedAt     int64
+	StoreQueuedAt int64
 }
 
 type candidateMatch struct {
@@ -91,6 +98,7 @@ func NewClusterer(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (Ag
 		stories:      make(map[string]*storyState),
 		articleStory: make(map[string]string),
 		readyCh:      make(chan string, 1024),
+		expireCh:     make(chan struct{}, 1),
 		queued:       make(map[string]bool),
 	}
 	base, err := NewBase(b, metrics, log, Spec{
@@ -119,6 +127,7 @@ type clusterer struct {
 	articleStory map[string]string
 
 	readyCh  chan string
+	expireCh chan struct{}
 	queuedMu sync.Mutex
 	queued   map[string]bool
 
@@ -269,6 +278,31 @@ func (c *clusterer) clearQueued(id string) {
 	c.queuedMu.Unlock()
 }
 
+func (c *clusterer) expireStories(ctx context.Context) {
+	now := time.Now().UTC()
+	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		return
+	}
+	var expired []string
+	for id, st := range c.stories {
+		if st != nil && now.After(st.ExpiresAt) {
+			expired = append(expired, id)
+		}
+	}
+	for _, id := range expired {
+		st := c.stories[id]
+		if st != nil {
+			for _, articleID := range st.ArticleIDs {
+				delete(c.articleStory, articleID)
+			}
+		}
+		delete(c.stories, id)
+		_ = live.Delete(ctx, "story."+id)
+		_ = live.Delete(ctx, "storymeta."+id)
+	}
+}
+
 func (c *clusterer) processor(ctx context.Context) {
 	defer c.wg.Done()
 	for {
@@ -280,6 +314,8 @@ func (c *clusterer) processor(ctx context.Context) {
 				c.log.Warn("cluster: process failed; will retry", "article_id", id, "err", err)
 			}
 			c.clearQueued(id)
+		case <-c.expireCh:
+			c.expireStories(ctx)
 		}
 	}
 }
@@ -295,6 +331,10 @@ func (c *clusterer) sweeper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.scanJoins(ctx)
+			select {
+			case c.expireCh <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -372,7 +412,7 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	now := time.Now().UTC()
 	var story *storyState
 	joinKind := dorv1.JoinKind_JOIN_KIND_NEW
-	if cand := c.findCandidate(article, join.Place, category, vector, entities, now); cand != nil {
+	if cand := c.findCandidate(ctx, article, join.Place, category, vector, entities, now); cand != nil {
 		merge, err := c.shouldMerge(ctx, cand, article, join.Place, category, vector, entities)
 		if err != nil {
 			return err
@@ -465,10 +505,33 @@ func (c *clusterer) mergeStory(st *storyState, article *dorv1.Article, place *do
 	return st
 }
 
-func (c *clusterer) findCandidate(article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *candidateMatch {
+func (c *clusterer) findCandidate(ctx context.Context, article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *candidateMatch {
 	var best *candidateMatch
 	primary := primaryLocation(place)
+	candidates := map[string]bool(nil)
+	if c.deps.StoryIndex != nil && len(vector) > 0 {
+		ids, err := c.deps.StoryIndex.FindStoryCandidates(ctx, vector, 32)
+		if err == nil && len(ids) > 0 {
+			candidates = make(map[string]bool, len(ids))
+			for _, id := range ids {
+				candidates[id] = true
+			}
+		} else if err != nil {
+			c.log.Debug("cluster: story ANN unavailable; scanning loaded stories", "err", err)
+		}
+	}
 	for _, st := range c.stories {
+		if candidates != nil && !candidates[st.Story.Id] {
+			// The async store writer may not have flushed a story created
+			// moments ago. Always scan recent in-memory stories; the ANN is a
+			// shortlist, not a correctness boundary.
+			queued := time.Unix(0, st.StoreQueuedAt)
+			if st.StoreQueuedAt == 0 || now.Sub(queued) < 5*time.Second {
+				// keep it
+			} else {
+				continue
+			}
+		}
 		if st == nil || st.Story == nil || now.After(st.ExpiresAt) {
 			continue
 		}
@@ -648,6 +711,7 @@ func (c *clusterer) enqueueStore(st *storyState, article *dorv1.Article) {
 	if c.deps.StorySink == nil {
 		return
 	}
+	st.StoreQueuedAt = time.Now().UTC().UnixNano()
 	primaryLoc := ""
 	if st.Story.Primary < uint32(len(st.Story.Locations)) && st.Story.Locations[st.Story.Primary] != nil {
 		primaryLoc = st.Story.Locations[st.Story.Primary].PlaceId

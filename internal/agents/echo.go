@@ -76,6 +76,10 @@ type Deps struct {
 	// deterministic vector.
 	Embedding EmbeddingClient
 
+	// StoryIndex is the optional pgvector ANN candidate source. Nil uses the
+	// loaded in-memory 48 h story map.
+	StoryIndex StoryIndex
+
 	// RelationShards and RelationShard partition story shards across replicas.
 	// Shard -1 runs every shard in one process.
 	RelationShards   int

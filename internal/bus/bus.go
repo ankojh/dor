@@ -48,6 +48,9 @@ const (
 	KVBucketBudgets   = "budgets"
 	KVBucketSpend     = "spend"
 	KVBucketLiveState = "live_state"
+	// Publisher checkpoints/outbox must outlive the live cache TTL.
+	KVBucketPublisher = "publisher"
+	KVPublisherTTL    = 0
 
 	KVSeenTTL            = 48 * time.Hour
 	KVJoinsTTL           = 30 * time.Second
@@ -379,6 +382,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketBudgets, KVBudgetsTTL},
 		{KVBucketSpend, KVSpendTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
+		{KVBucketPublisher, KVPublisherTTL},
 		{KVBucketSourceHealth, KVSourceHealthTTL},
 		{KVBucketEvalPending, KVEvalPendingTTL},
 	}

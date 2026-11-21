@@ -155,7 +155,7 @@ func runCommand(args []string) error {
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&cfg.agents, "agents", cfg.agents, "agents to run: all, none, or a comma-separated list")
+	fs.StringVar(&cfg.agents, "agents", cfg.agents, "agents to run: all, none, gateway, or a comma-separated list")
 	fs.StringVar(&cfg.natsURL, "nats-url", cfg.natsURL, "existing NATS URL; empty starts the embedded server")
 	fs.StringVar(&cfg.natsListen, "nats-listen", cfg.natsListen, "embedded NATS listen address")
 	fs.StringVar(&cfg.natsStore, "nats-store", cfg.natsStore, "embedded JetStream store directory")
@@ -408,7 +408,7 @@ func runCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	selected, err := registry.Select(cfg.agents)
+	selected, err := registry.Select(pipelineSelection(cfg.agents))
 	if err != nil {
 		return err
 	}
@@ -442,7 +442,7 @@ func runCommand(args []string) error {
 	opsHTTP := ops.NewHTTP(b, supervisor, logger)
 
 	var gw *gateway.Server
-	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
+	if cfg.gatewayAddr != "" && runsGateway(cfg.agents) {
 		gwCfg := gateway.Config{
 			Addr:    cfg.gatewayAddr,
 			Origins: splitList(cfg.gatewayOrigins),
@@ -632,15 +632,32 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 	return d
 }
 
-// runsPublisher reports whether this process should serve the gateway. The
-// gateway is a component, not an agent; it runs when the publisher is selected.
+// gateway is a process component, so strip it before registry resolution.
+func pipelineSelection(selection string) string {
+	var names []string
+	for _, name := range strings.Split(selection, ",") {
+		if name = strings.TrimSpace(name); name != "gateway" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ",")
+}
+
 func runsPublisher(selection string) bool {
-	selection = strings.TrimSpace(selection)
-	if selection == "all" {
+	for _, name := range strings.Split(selection, ",") {
+		if name = strings.TrimSpace(name); name == "all" || name == "publisher" {
+			return true
+		}
+	}
+	return false
+}
+
+func runsGateway(selection string) bool {
+	if runsPublisher(selection) {
 		return true
 	}
 	for _, name := range strings.Split(selection, ",") {
-		if strings.TrimSpace(name) == "publisher" {
+		if strings.TrimSpace(name) == "gateway" {
 			return true
 		}
 	}

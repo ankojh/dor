@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,10 +27,9 @@ const (
 	publisherWireHistory = 500
 )
 
-// NewPublisher builds the publisher. It runs two consumers because its inputs
-// live in two streams: article.clean/article.placed in ENRICH and
-// story.changed.* / link.changed in STORY. A single JetStream consumer cannot
-// span streams.
+// NewPublisher builds the publisher. Its three consumers bind ENRICH, STORY and ALERT separately; a JetStream
+// consumer cannot span streams. Bounded pools keep the 250ms commit barrier
+// from limiting input throughput to one event per flush.
 func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error) {
 	core := newPublisherCore(b, log)
 
@@ -43,16 +41,17 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 			bus.SubjectArticlePlaced,
 			bus.SubjectMatchScore,
 		},
-		MaxAckPending: 512,
-		AckWait:       30 * time.Second,
+		MaxAckPending:  512,
+		Concurrency:    64,
+		MaxConcurrency: 64,
+		AckWait:        30 * time.Second,
 		Handle: func(ctx context.Context, msg *Message, out *Emitter) error {
 			if msg.Subject == bus.SubjectMatchScore {
 				var score dorv1.MatchScore
 				if err := proto.Unmarshal(msg.Data, &score); err != nil {
 					return Terminal(fmt.Errorf("publisher: match score: %w", err))
 				}
-				core.onMatchScore(&score)
-				return nil
+				return core.acceptInput(ctx, msg, "score:"+score.ArticleId, func() { core.onMatchScore(&score) })
 			}
 			var article dorv1.Article
 			if err := proto.Unmarshal(msg.Data, &article); err != nil {
@@ -63,8 +62,11 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 				// body is not a wire event we can use yet.
 				return nil
 			}
-			core.onArticle(&article, msg.Subject == bus.SubjectArticlePlaced)
-			return nil
+			stage := "clean:"
+			if msg.Subject == bus.SubjectArticlePlaced {
+				stage = "placed:"
+			}
+			return core.acceptInput(ctx, msg, stage+article.Id, func() { core.onArticle(&article, msg.Subject == bus.SubjectArticlePlaced) })
 		},
 	})
 	if err != nil {
@@ -78,23 +80,23 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 			bus.SubjectStoryChangedPrefix + "*",
 			bus.SubjectLinkChanged,
 		},
-		MaxAckPending: 512,
-		AckWait:       30 * time.Second,
+		MaxAckPending:  512,
+		Concurrency:    64,
+		MaxConcurrency: 64,
+		AckWait:        30 * time.Second,
 		Handle: func(ctx context.Context, msg *Message, out *Emitter) error {
 			if msg.Subject == bus.SubjectLinkChanged {
 				var link dorv1.Link
 				if err := proto.Unmarshal(msg.Data, &link); err != nil {
 					return Terminal(fmt.Errorf("publisher: link: %w", err))
 				}
-				core.onLink(&link)
-				return nil
+				return core.acceptInput(ctx, msg, "link:"+publisherLinkKey(link.A, link.B), func() { core.onLink(&link) })
 			}
 			var s dorv1.Story
 			if err := proto.Unmarshal(msg.Data, &s); err != nil {
 				return Terminal(fmt.Errorf("publisher: story: %w", err))
 			}
-			core.onStory(&s)
-			return nil
+			return core.acceptInput(ctx, msg, "story:"+s.Id, func() { core.onStory(&s) })
 		},
 	})
 	if err != nil {
@@ -102,18 +104,19 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 	}
 
 	alertBase, err := NewBase(b, metrics, log, Spec{
-		Name:          "publisher-alert",
-		Durable:       "publisher-alert",
-		FilterSubject: bus.SubjectMatchAlert,
-		MaxAckPending: 128,
-		AckWait:       30 * time.Second,
+		Name:           "publisher-alert",
+		Durable:        "publisher-alert",
+		FilterSubject:  bus.SubjectMatchAlert,
+		MaxAckPending:  128,
+		Concurrency:    64,
+		MaxConcurrency: 64,
+		AckWait:        30 * time.Second,
 		Handle: func(ctx context.Context, msg *Message, out *Emitter) error {
 			var hit dorv1.AlertHit
 			if err := proto.Unmarshal(msg.Data, &hit); err != nil {
 				return Terminal(fmt.Errorf("publisher: alert hit: %w", err))
 			}
-			core.onAlert(&hit)
-			return nil
+			return core.acceptInput(ctx, msg, publisherAlertKey(&hit), func() { core.onAlert(&hit) })
 		},
 	})
 	if err != nil {
@@ -129,7 +132,7 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 	}, nil
 }
 
-// publisherAgent composes the two consumers and the flush/snapshot loops into
+// publisherAgent composes the three consumers and the flush/snapshot loops into
 // one registry agent named "publisher".
 type publisherAgent struct {
 	name   string
@@ -157,30 +160,23 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 	if p.stopped.Load() {
 		return fmt.Errorf("agents: %s is stopped", p.name)
 	}
-	if err := p.core.loadSeq(ctx); err != nil {
-		p.core.log.Warn("publisher: could not restore seq; starting from the stream tail", "err", err)
-	}
-	if err := p.enrich.Start(ctx); err != nil {
-		return err
-	}
-	if err := p.story.Start(ctx); err != nil {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = p.enrich.Stop(stopCtx)
-		stopCancel()
-		return err
-	}
-	if err := p.alert.Start(ctx); err != nil {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = p.story.Stop(stopCtx)
-		_ = p.enrich.Stop(stopCtx)
-		stopCancel()
+	if err := p.core.restore(ctx); err != nil {
 		return err
 	}
 	p.startLoops(ctx)
+	if err := p.enrich.Start(ctx); err != nil {
+		_ = p.Stop(ctx)
+		return err
+	}
+	for _, consumer := range []*Base{p.story, p.alert} {
+		if err := consumer.Start(ctx); err != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = p.Stop(stopCtx)
+			stopCancel()
+			return err
+		}
+	}
 	p.core.log.Info("publisher started")
-	// Publish the first snapshot immediately so a gateway started in the same
-	// process never serves an empty cold-start snapshot longer than necessary.
-	p.core.writeSnapshot(ctx)
 	return nil
 }
 
@@ -206,29 +202,23 @@ func (p *publisherAgent) startLoops(ctx context.Context) {
 }
 
 func (p *publisherAgent) Restart(ctx context.Context) error {
-	p.mu.Lock()
-	cancel := p.cancel
-	p.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if err := p.Stop(ctx); err != nil {
+		return err
 	}
-	p.wg.Wait()
-	p.running.Store(false)
+	if err := p.core.restore(ctx); err != nil {
+		return err
+	}
 	p.stopped.Store(false)
 	p.mu.Lock()
 	p.lastErr = nil
 	p.mu.Unlock()
-	if err := p.enrich.Restart(ctx); err != nil {
-		return err
-	}
-	if err := p.story.Restart(ctx); err != nil {
-		return err
-	}
-	if err := p.alert.Restart(ctx); err != nil {
-		return err
-	}
 	p.startLoops(context.WithoutCancel(ctx))
-	p.core.writeSnapshot(ctx)
+	for _, consumer := range []*Base{p.enrich, p.story, p.alert} {
+		if err := consumer.Restart(ctx); err != nil {
+			_ = p.Stop(ctx)
+			return err
+		}
+	}
 	p.core.log.Info("publisher restarted")
 	return nil
 }
@@ -248,6 +238,13 @@ func (p *publisherAgent) Stop(ctx context.Context) error {
 		return nil
 	}
 	p.running.Store(false)
+	// Keep flushing while Base drains its handlers, which await durable commits.
+	var errs []error
+	for _, consumer := range []*Base{p.alert, p.story, p.enrich} {
+		if err := consumer.Stop(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	p.mu.Lock()
 	cancel := p.cancel
 	p.mu.Unlock()
@@ -255,18 +252,7 @@ func (p *publisherAgent) Stop(ctx context.Context) error {
 		cancel()
 	}
 	p.wg.Wait()
-	// A final flush and snapshot preserve the last seq and live state.
-	p.core.flush(context.Background())
-	p.core.writeSnapshot(context.Background())
-
-	var errs []error
-	if err := p.alert.Stop(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	if err := p.story.Stop(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	if err := p.enrich.Stop(ctx); err != nil {
+	if err := p.core.release(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -280,10 +266,13 @@ func (p *publisherAgent) Publish(ctx context.Context, subject string, data []byt
 }
 
 func (p *publisherAgent) Running() bool {
-	return p.running.Load() && !p.stopped.Load()
+	return p.running.Load() && !p.stopped.Load() && !p.core.fenced.Load()
 }
 
 func (p *publisherAgent) LastError() error {
+	if p.core.fenced.Load() {
+		return fmt.Errorf("publisher: publication owner fenced")
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.lastErr != nil {
@@ -311,67 +300,50 @@ type publisherCore struct {
 	log *slog.Logger
 	now func() time.Time
 
-	flushMu sync.Mutex // serialises flush (and seq assignment)
-	mu      sync.Mutex // guards pending and live state
+	flushMu     sync.Mutex // serialises flush, ownership and checkpoint writes
+	ingestMu    sync.Mutex // seals inputs and their acknowledgement barriers together
+	checkpoint  publisherCheckpoint
+	revision    uint64
+	owner       string
+	restored    bool
+	inflight    *publisherBatch
+	lastChunkGC time.Time
+	fenced      atomic.Bool
+	waiters     []chan struct{}
+	publish     func(context.Context, []byte, string) error
+	mu          sync.Mutex // guards pending and live state
 
-	seq       uint64
-	pending   map[string]*dorv1.Delta
-	order     []string
-	stories   map[string]*dorv1.Story
-	links     map[string]*dorv1.Link
-	wire      []*dorv1.WireRow
-	wireRows  map[string]*dorv1.WireRow
-	wireOrder []string
-	changed   bool
-	lastSnap  time.Time
+	seq                uint64
+	pending            map[string]*dorv1.Delta
+	order              []string
+	stories            map[string]*dorv1.Story
+	links              map[string]*dorv1.Link
+	wire               []*dorv1.WireRow
+	wireRows           map[string]*dorv1.WireRow
+	wireOrder          []string
+	revisions          map[string]uint64
+	committedRevisions map[string]uint64
+	scores             map[string]*dorv1.MatchScore
+	placed             map[string]bool
 }
 
 func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &publisherCore{
-		bus:      b,
-		log:      log,
-		now:      time.Now,
-		pending:  make(map[string]*dorv1.Delta),
-		stories:  make(map[string]*dorv1.Story),
-		links:    make(map[string]*dorv1.Link),
-		wireRows: make(map[string]*dorv1.WireRow),
+		bus:                b,
+		log:                log,
+		now:                time.Now,
+		pending:            make(map[string]*dorv1.Delta),
+		stories:            make(map[string]*dorv1.Story),
+		links:              make(map[string]*dorv1.Link),
+		wireRows:           make(map[string]*dorv1.WireRow),
+		revisions:          make(map[string]uint64),
+		committedRevisions: make(map[string]uint64),
+		scores:             make(map[string]*dorv1.MatchScore),
+		placed:             make(map[string]bool),
 	}
-}
-
-// loadSeq restores the last assigned delta sequence from KV and, if newer,
-// from the retained delta stream. This keeps the sequence monotonic across a
-// restart even if the KV write lagged.
-func (c *publisherCore) loadSeq(ctx context.Context) error {
-	var seq uint64
-	kv, err := c.bus.KV(ctx, bus.KVBucketLiveState)
-	if err == nil {
-		entry, getErr := kv.Get(ctx, bus.KVPublisherSeqKey)
-		if getErr == nil {
-			_, _ = fmt.Sscanf(string(entry.Value()), "%d", &seq)
-		}
-	}
-	stream, streamErr := c.bus.StreamNamed(ctx, bus.StreamDelta)
-	if streamErr == nil {
-		if msg, msgErr := stream.GetLastMsgForSubject(ctx, bus.SubjectDeltaOut); msgErr == nil {
-			var batch dorv1.DeltaBatch
-			if proto.Unmarshal(msg.Data, &batch) == nil {
-				for _, d := range batch.Deltas {
-					if d.Seq > seq {
-						seq = d.Seq
-					}
-				}
-			}
-		}
-	}
-	c.mu.Lock()
-	if seq > c.seq {
-		c.seq = seq
-	}
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
@@ -414,9 +386,14 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	if prev, ok := c.wireRows[a.Id]; ok && prev != nil {
 		wire.PromptScores = prev.PromptScores
 		wire.ApproxPrompts = prev.ApproxPrompts
+		if !placed && c.placed[a.Id] {
+			wire.StoryId, wire.Join, wire.Category = prev.StoryId, prev.Join, prev.Category
+			wire.Country, wire.Place = prev.Country, prev.Place
+			wire.Lat, wire.Lon, wire.Located = prev.Lat, prev.Lon, prev.Located
+		}
 	}
-	if a.StoryId != "" {
-		if story, ok := c.stories[a.StoryId]; ok && story != nil {
+	if wire.StoryId != "" {
+		if story, ok := c.stories[wire.StoryId]; ok && story != nil {
 			wire.Category = story.Category
 			if !wire.Located && len(story.Locations) > 0 {
 				idx := int(story.Primary)
@@ -432,17 +409,11 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 			}
 		}
 	}
-	c.mu.Unlock()
-	c.mu.Lock()
-	for i, row := range c.wire {
-		if row.ArticleId == wire.ArticleId {
-			c.wire = append(c.wire[:i], c.wire[i+1:]...)
-			break
-		}
+	if placed {
+		c.placed[a.Id] = true
 	}
-	c.wire = append(c.wire, wire)
-	if len(c.wire) > publisherWireHistory {
-		c.wire = append([]*dorv1.WireRow(nil), c.wire[len(c.wire)-publisherWireHistory:]...)
+	if score := c.scores[a.Id]; score != nil {
+		wire.PromptScores, wire.ApproxPrompts = score.Scores, score.Approx
 	}
 	if _, ok := c.wireRows[wire.ArticleId]; !ok {
 		c.wireOrder = append(c.wireOrder, wire.ArticleId)
@@ -452,6 +423,8 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 		old := c.wireOrder[0]
 		c.wireOrder = c.wireOrder[1:]
 		delete(c.wireRows, old)
+		delete(c.scores, old)
+		delete(c.placed, old)
 	}
 	c.mu.Unlock()
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})
@@ -501,6 +474,15 @@ func (c *publisherCore) onMatchScore(score *dorv1.MatchScore) {
 		return
 	}
 	c.mu.Lock()
+	c.scores[score.ArticleId] = proto.Clone(score).(*dorv1.MatchScore)
+	if len(c.scores) > 1500 {
+		for id := range c.scores {
+			if id != score.ArticleId {
+				delete(c.scores, id)
+				break
+			}
+		}
+	}
 	row, ok := c.wireRows[score.ArticleId]
 	if ok {
 		row = proto.Clone(row).(*dorv1.WireRow)
@@ -519,7 +501,7 @@ func (c *publisherCore) onAlert(hit *dorv1.AlertHit) {
 	if hit == nil || hit.AlertId == "" {
 		return
 	}
-	key := "alert:" + hit.AlertId + ":" + hit.StoryId + ":" + hit.Level
+	key := publisherAlertKey(hit)
 	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_Alert{Alert: hit}})
 }
 
@@ -548,147 +530,16 @@ func (c *publisherCore) enqueue(key string, delta *dorv1.Delta) {
 		c.order = append(c.order, key)
 	}
 	c.pending[key] = delta
-	c.changed = true
 	c.mu.Unlock()
 }
 
-// flush assigns the next sequence numbers in enqueue order and publishes one
-// DeltaBatch to delta.out. Coalescing means one delta per entity per flush.
-func (c *publisherCore) flush(ctx context.Context) {
-	c.flushMu.Lock()
-	defer c.flushMu.Unlock()
-
-	c.mu.Lock()
-	if len(c.pending) == 0 {
-		c.mu.Unlock()
-		return
+func publisherLinkKey(a, b string) string {
+	if a > b {
+		a, b = b, a
 	}
-	deltas := make([]*dorv1.Delta, 0, len(c.pending))
-	for _, key := range c.order {
-		d, ok := c.pending[key]
-		if !ok {
-			continue
-		}
-		c.seq++
-		d.Seq = c.seq
-		deltas = append(deltas, d)
-		switch body := d.Body.(type) {
-		case *dorv1.Delta_StoryUpsert:
-			if body.StoryUpsert != nil {
-				c.stories[body.StoryUpsert.Id] = body.StoryUpsert
-			}
-		case *dorv1.Delta_StoryExpire:
-			delete(c.stories, body.StoryExpire)
-		case *dorv1.Delta_LinkUpsert:
-			if body.LinkUpsert != nil {
-				c.links[body.LinkUpsert.A+"|"+body.LinkUpsert.B] = body.LinkUpsert
-			}
-		case *dorv1.Delta_LinkRemove:
-			if body.LinkRemove != nil {
-				delete(c.links, body.LinkRemove.A+"|"+body.LinkRemove.B)
-			}
-		}
-	}
-	c.pending = make(map[string]*dorv1.Delta)
-	c.order = nil
-	lastSeq := c.seq
-	c.changed = false
-	c.mu.Unlock()
-
-	batch := &dorv1.DeltaBatch{Deltas: deltas}
-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(batch)
-	if err != nil {
-		c.log.Warn("publisher: marshal batch", "err", err)
-		return
-	}
-	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := c.bus.Publish(pubCtx, bus.SubjectDeltaOut, data,
-		bus.WithMsgID(fmt.Sprintf("delta:%d", lastSeq))); err != nil {
-		c.log.Warn("publisher: publish delta batch", "seq", lastSeq, "err", err)
-		return
-	}
-	c.persistSeq(pubCtx, lastSeq)
+	return a + "|" + b
 }
 
-func (c *publisherCore) persistSeq(ctx context.Context, seq uint64) {
-	kv, err := c.bus.KV(ctx, bus.KVBucketLiveState)
-	if err != nil {
-		return
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	_, _ = kv.Put(opCtx, bus.KVPublisherSeqKey, []byte(fmt.Sprintf("%d", seq)))
-}
-
-func (c *publisherCore) flushLoop(ctx context.Context, every time.Duration) {
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.flush(ctx)
-		}
-	}
-}
-
-func (c *publisherCore) snapshotLoop(ctx context.Context, every time.Duration) {
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			c.writeSnapshot(context.Background())
-			return
-		case <-ticker.C:
-			c.writeSnapshot(ctx)
-		}
-	}
-}
-
-// writeSnapshot stores the cached Snapshot binary in live_state so every
-// gateway replica can serve the same state without its own story store.
-func (c *publisherCore) writeSnapshot(ctx context.Context) {
-	c.mu.Lock()
-	storyIDs := make([]string, 0, len(c.stories))
-	for id := range c.stories {
-		storyIDs = append(storyIDs, id)
-	}
-	sort.Strings(storyIDs)
-	linkKeys := make([]string, 0, len(c.links))
-	for k := range c.links {
-		linkKeys = append(linkKeys, k)
-	}
-	sort.Strings(linkKeys)
-	snapshot := &dorv1.Snapshot{
-		Seq:        c.seq,
-		Stories:    make([]*dorv1.Story, 0, len(storyIDs)),
-		Links:      make([]*dorv1.Link, 0, len(linkKeys)),
-		BuiltAt:    c.now().Unix(),
-		RecentWire: append([]*dorv1.WireRow(nil), c.wire...),
-	}
-	for _, id := range storyIDs {
-		snapshot.Stories = append(snapshot.Stories, c.stories[id])
-	}
-	for _, k := range linkKeys {
-		snapshot.Links = append(snapshot.Links, c.links[k])
-	}
-	c.lastSnap = c.now()
-	c.mu.Unlock()
-
-	kv, err := c.bus.KV(ctx, bus.KVBucketLiveState)
-	if err != nil {
-		return
-	}
-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(snapshot)
-	if err != nil {
-		return
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	if _, err := kv.Put(opCtx, bus.KVLiveStateSnapshotKey, data); err != nil {
-		c.log.Debug("publisher: snapshot write failed", "err", err)
-	}
+func publisherAlertKey(hit *dorv1.AlertHit) string {
+	return fmt.Sprintf("alert:%s:%s:%s:%d", hit.AlertId, hit.StoryId, hit.Level, hit.Generation)
 }

@@ -20,7 +20,7 @@ import (
 const (
 	// clientQueue bounds one client's unsent messages. The publisher batches
 	// at 250 ms, so 64 messages is ~16 s of backlog; a client further behind
-	// is disconnected and resyncs on reconnect.
+	// drops its backlog and receives Resync followed by a fresh snapshot.
 	clientQueue = 64
 	// clientRate and clientBurst limit outgoing messages per client. Normal
 	// traffic is ~4 batches/s, so this only trips on abuse or a pathological
@@ -40,11 +40,13 @@ type client struct {
 	conn    *websocket.Conn
 	log     *slog.Logger
 
-	send    chan []byte
-	closed  atomic.Bool
-	cancel  context.CancelFunc
-	ready   bool // guarded by hub.mu
-	lastSeq atomic.Uint64
+	send         chan []byte
+	closed       atomic.Bool
+	cancel       context.CancelFunc
+	ctx          context.Context
+	resumeCancel context.CancelFunc // guarded by hub.mu
+	ready        bool               // guarded by hub.mu
+	lastSeq      atomic.Uint64
 
 	mu         sync.Mutex
 	tokens     float64
@@ -83,6 +85,7 @@ func newClientID() string {
 func (c *client) run(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	c.cancel = cancel
+	c.ctx = ctx
 	defer func() {
 		cancel()
 		c.hub.removeClient(c)
@@ -143,7 +146,7 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 			last = body.Hello.LastSeq
 		}
 		c.lastSeq.Store(last)
-		c.hub.resume(c, last)
+		c.hub.startResume(ctx, c, last, "")
 	case *dorv1.ClientMessage_Ack:
 		if body.Ack != nil {
 			c.lastSeq.Store(body.Ack.Seq)
@@ -231,9 +234,39 @@ func (c *client) kick(reason string) {
 	if !c.closed.CompareAndSwap(false, true) {
 		return
 	}
-	if c.cancel != nil {
-		c.cancel()
+	if c.conn != nil {
+		c.conn.CloseNow()
 	}
-	c.conn.CloseNow()
 	c.log.Debug("gateway: client disconnected", "reason", reason)
+}
+
+// resetQueueLocked discards stale unsent messages. A write already in flight
+// finishes first; the following Resync resets the client's baseline.
+func (c *client) resetQueueLocked() {
+	for {
+		select {
+		case <-c.send:
+		default:
+			return
+		}
+	}
+}
+
+func (c *client) enqueueRecovery(data []byte) bool {
+	if c.closed.Load() {
+		return false
+	}
+	select {
+	case c.send <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *client) context() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
 }

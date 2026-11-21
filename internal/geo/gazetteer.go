@@ -52,6 +52,7 @@ type Place struct {
 // Country is the country index entry used for country-centroid fallbacks.
 type Country struct {
 	Code    string
+	ISO3    string
 	Name    string
 	Capital string
 	Place   Place
@@ -130,7 +131,7 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 		if capPlace, ok := g.capitalPlace(code, c.Capital); ok {
 			countryPlace.Lat, countryPlace.Lon = capPlace.Lat, capPlace.Lon
 		}
-		g.countries[code] = Country{Code: code, Name: c.Name, Capital: c.Capital, Place: countryPlace}
+		g.countries[code] = Country{Code: code, ISO3: c.ISO3, Name: c.Name, Capital: c.Capital, Place: countryPlace}
 		g.add(countryPlace)
 	}
 	// Add country and admin names as aliases after cities exist, so a country
@@ -391,10 +392,17 @@ func (g *Gazetteer) CountryCode(codeOrName string) string {
 	if g == nil {
 		return ""
 	}
-	if len(strings.TrimSpace(codeOrName)) == 2 {
-		code := strings.ToUpper(strings.TrimSpace(codeOrName))
+	code := strings.ToUpper(strings.TrimSpace(codeOrName))
+	if len(code) == 2 {
 		if _, ok := g.countries[code]; ok {
 			return code
+		}
+	}
+	if len(code) == 3 {
+		for _, c := range g.countries {
+			if c.ISO3 == code {
+				return c.Code
+			}
 		}
 	}
 	if c, ok := g.Country(codeOrName); ok {
@@ -451,6 +459,7 @@ func Cosine(a, b []float32) float64 {
 
 type rawCountry struct {
 	Code    string
+	ISO3    string
 	Name    string
 	Capital string
 }
@@ -558,7 +567,7 @@ func readCountries(path string) (map[string]rawCountry, error) {
 		if len(fields) < 6 {
 			continue
 		}
-		out[fields[0]] = rawCountry{Code: fields[0], Name: fields[4], Capital: fields[5]}
+		out[fields[0]] = rawCountry{Code: fields[0], ISO3: fields[1], Name: fields[4], Capital: fields[5]}
 	}
 	return out, sc.Err()
 }

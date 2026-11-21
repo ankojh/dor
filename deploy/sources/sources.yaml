@@ -1,0 +1,3432 @@
+# Dor source seed list.
+#
+# Reviewed 2026-11-20; terms review 2026-11-21.
+# Every source was fetched live with tools/feedcheck; the JSON report beside
+# this file records status, item count and newest item. M1-2 seeds this file
+# into Postgres `sources`.
+#
+# Terms eligibility (operational rule pending human legal review): a feed is
+# enabled only when the publisher's terms page, as read on 2026-11-21, does not
+# limit applicable use to personal or non-commercial use. A URL citation alone
+# is not permission; inaccessible/JS-only pages are disabled pending review.
+#
+# All RSS seeds use the 60 s politeness floor. Non-RSS floors: GDELT 60,
+# USGS 120, GDACS 300, EONET 600 (ReliefWeb 3600, disabled).
+
+version: 1
+reviewed_at: "2026-11-21"
+notes: "v1 English-language sources: curated RSS/Atom plus GDELT, USGS, GDACS, NASA EONET and ReliefWeb."
+
+sources:
+  - id: bbc-world
+    kind: rss
+    url: "https://feeds.bbci.co.uk/news/world/rss.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.bbc.co.uk/usingthebbc/terms/); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T05:15:41Z"
+
+  - id: guardian-world
+    kind: rss
+    url: "https://www.theguardian.com/world/rss"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal and non-commercial\u201d (https://www.theguardian.com/help/terms-of-service)."
+    notes: "feed check 2026-11-20: ok, 45 items, newest 2026-11-21T06:00:53Z"
+
+  - id: aljazeera-all
+    kind: rss
+    url: "https://www.aljazeera.com/xml/rss/all.xml"
+    country: QA
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.aljazeera.com/terms-and-conditions)."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T05:46:29Z"
+
+  - id: dw-all
+    kind: rss
+    url: "https://rss.dw.com/rdf/rss-en-all"
+    country: DE
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 136 items, newest 2026-11-21T03:16:00Z"
+
+  - id: dw-world
+    kind: rss
+    url: "https://rss.dw.com/rdf/rss-en-world"
+    country: DE
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 13 items, newest 2026-11-21T03:16:00Z"
+
+  - id: dw-business
+    kind: rss
+    url: "https://rss.dw.com/rdf/rss-en-bus"
+    country: DE
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T15:36:00Z"
+
+  - id: dw-europe
+    kind: rss
+    url: "https://rss.dw.com/rdf/rss-en-eu"
+    country: DE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T20:45:00Z"
+
+  - id: dw-germany
+    kind: rss
+    url: "https://rss.dw.com/rdf/rss-en-ger"
+    country: DE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 9 items, newest 2026-11-20T17:43:00Z"
+
+  - id: france24-all
+    kind: rss
+    url: "https://www.france24.com/en/rss"
+    country: FR
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.france24.com/en/legal-notice); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 24 items, newest 2026-11-20T22:13:21Z"
+
+  - id: npr-news
+    kind: rss
+    url: "https://feeds.npr.org/1001/rss.xml"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, noncommercial\u201d (https://www.npr.org/about-npr/179876898/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T22:11:29Z"
+
+  - id: abc-au-top
+    kind: rss
+    url: "https://www.abc.net.au/news/feed/51120/rss.xml"
+    country: AU
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.abc.net.au/conditions.htm); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T06:18:04Z"
+
+  - id: espn
+    kind: rss
+    url: "https://www.espn.com/espn/rss/news"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, noncommercial\u201d (https://disneytermsofuse.com/english/)."
+    notes: "feed check 2026-11-20: ok, 43 items, newest 2026-11-21T01:23:07Z"
+
+  - id: sky-world
+    kind: rss
+    url: "https://feeds.skynews.com/feeds/rss/world.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 7 items, newest 2026-11-21T05:15:00Z"
+
+  - id: sky-home
+    kind: rss
+    url: "https://feeds.skynews.com/feeds/rss/home.xml"
+    country: GB
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 9 items, newest 2026-11-21T05:15:00Z"
+
+  - id: sky-uk
+    kind: rss
+    url: "https://feeds.skynews.com/feeds/rss/uk.xml"
+    country: GB
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T03:03:00Z"
+
+  - id: sky-business
+    kind: rss
+    url: "https://feeds.skynews.com/feeds/rss/business.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T15:32:00Z"
+
+  - id: sky-tech
+    kind: rss
+    url: "https://feeds.skynews.com/feeds/rss/technology.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 6 items, newest 2026-11-20T13:39:00Z"
+
+  - id: euronews-news
+    kind: rss
+    url: "https://www.euronews.com/rss?level=theme&name=news"
+    country: FR
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.euronews.com/terms-and-conditions)."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T06:00:32Z"
+
+  - id: cnbc-top
+    kind: rss
+    url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal and non-commercial\u201d (https://www.cnbc.com/terms/)."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-20T22:59:33Z"
+
+  - id: marketwatch-top
+    kind: rss
+    url: "https://feeds.marketwatch.com/marketwatch/topstories/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: Dow Jones terms restrict reuse and content is paywalled. Terms reviewed: https://www.dowjones.com/terms-of-use/."
+    notes: "Disabled by the terms review: Dow Jones terms restrict reuse and content is paywalled"
+
+  - id: wsj-world
+    kind: rss
+    url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: Dow Jones terms restrict reuse and content is paywalled. Terms reviewed: https://www.dowjones.com/terms-of-use/."
+    notes: "Disabled by the terms review: Dow Jones terms restrict reuse and content is paywalled"
+
+  - id: nyt-world
+    kind: rss
+    url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: RSS is personal, non-commercial use only and most content is paywalled. Terms reviewed: https://help.nytimes.com/hc/en-us/articles/115014893428-Terms-of-service."
+    notes: "Disabled by the terms review: RSS is personal, non-commercial use only and most content is paywalled"
+
+  - id: wapo-world
+    kind: rss
+    url: "https://feeds.washingtonpost.com/rss/world"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms restrict reuse and content is paywalled. Terms reviewed: https://www.washingtonpost.com/terms-of-service/."
+    notes: "Disabled by the terms review: subscription terms restrict reuse and content is paywalled"
+
+  - id: abcnews-top
+    kind: rss
+    url: "https://feeds.abcnews.com/abcnews/topstories"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, noncommercial\u201d (https://disneytermsofuse.com/english/)."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T03:55:47Z"
+
+  - id: cbsnews-main
+    kind: rss
+    url: "https://www.cbsnews.com/latest/rss/main"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://legal.paramount.com/us/en/cbsi/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T02:42:51Z"
+
+  - id: nbcnews-news
+    kind: rss
+    url: "https://feeds.nbcnews.com/nbcnews/public/news"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cfor personal use only\u201d (https://www.nbcuniversal.com/terms)."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T04:19:51Z"
+
+  - id: latimes
+    kind: rss
+    url: "https://www.latimes.com/rss2.0.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.latimes.com/terms-of-service)."
+    notes: "feed check 2026-11-20: ok, 55 items, newest 2026-11-21T05:40:45Z"
+
+  - id: politico-politics
+    kind: rss
+    url: "https://rss.politico.com/politics-news.xml"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-20T13:59:19Z"
+
+  - id: politico-eu
+    kind: rss
+    url: "https://www.politico.eu/feed/"
+    country: BE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.politico.eu/legal/); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T17:24:57Z"
+
+  - id: thehill
+    kind: rss
+    url: "https://thehill.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-21T04:20:20Z"
+
+  - id: axios
+    kind: rss
+    url: "https://api.axios.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: propublica
+    kind: rss
+    url: "https://www.propublica.org/feeds/propublica/main"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, noncommercial\u201d (https://www.propublica.org/terms-of-service)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T11:00:00Z"
+
+  - id: atlantic
+    kind: rss
+    url: "https://www.theatlantic.com/feed/all/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.theatlantic.com/terms-and-conditions/."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: time
+    kind: rss
+    url: "https://time.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://time.com/terms-of-use/."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: foreignpolicy
+    kind: rss
+    url: "https://foreignpolicy.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: metered paywall and reuse restrictions. Terms reviewed: https://foreignpolicy.com/terms-of-use/."
+    notes: "Disabled by the terms review: metered paywall and reuse restrictions"
+
+  - id: foreignaffairs
+    kind: rss
+    url: "https://www.foreignaffairs.com/rss.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.foreignaffairs.com/terms-use."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: newsweek
+    kind: rss
+    url: "https://www.newsweek.com/rss"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.newsweek.com/terms-service)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T05:31:28Z"
+
+  - id: nypost
+    kind: rss
+    url: "https://nypost.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cnon-commercial and limited personal\u201d (https://nypost.com/terms/)."
+    notes: "feed check 2026-11-20: ok, 22 items, newest 2026-11-21T06:26:21Z"
+
+  - id: seattletimes
+    kind: rss
+    url: "https://www.seattletimes.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.seattletimes.com/notices/terms.html)."
+    notes: "feed check 2026-11-20: ok, 34 items, newest 2026-11-21T05:42:35Z"
+
+  - id: denverpost
+    kind: rss
+    url: "https://www.denverpost.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review. Terms: https://www.denverpost.com/2013/08/15/terms-and-conditions-may-apply-clicking-away-your-privacy/."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: globeandmail
+    kind: rss
+    url: "https://www.theglobeandmail.com/arc/outboundfeeds/rss/?outputType=xml"
+    country: CA
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.theglobeandmail.com/terms-and-conditions/."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: nationalpost
+    kind: rss
+    url: "https://nationalpost.com/feed/"
+    country: CA
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed/; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed/)"
+
+  - id: globalnews
+    kind: rss
+    url: "https://globalnews.ca/feed/"
+    country: CA
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cnon-commercial use only\u201d (https://www.corusent.com/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T02:29:43Z"
+
+  - id: ctvnews
+    kind: rss
+    url: "https://www.ctvnews.ca/rss/ctvnews-ca-top-stories-public-rss-1.822009"
+    country: CA
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /*-1.*; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /*-1.*)"
+
+  - id: economist-world
+    kind: rss
+    url: "https://www.economist.com/the-world-this-week/rss.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.economist.com/legal/terms-of-use."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: ft-home
+    kind: rss
+    url: "https://www.ft.com/rss/home"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.ft.com/terms."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: telegraph
+    kind: rss
+    url: "https://www.telegraph.co.uk/rss.xml"
+    country: GB
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.telegraph.co.uk/about-us/terms-and-conditions/."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: independent-world
+    kind: rss
+    url: "https://www.independent.co.uk/news/world/rss"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.independent.co.uk/service/user-policies-a6184151.html)."
+    notes: "feed check 2026-11-20: ok, 70 items, newest 2026-11-21T05:35:53Z"
+
+  - id: lemonde-en
+    kind: rss
+    url: "https://www.lemonde.fr/en/rss/une.xml"
+    country: FR
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 14 items, newest 2026-11-21T04:30:07Z"
+
+  - id: elpais-en
+    kind: rss
+    url: "https://feeds.elpais.com/mrss-s/pages/ep/site/english.elpais.com/portada"
+    country: ES
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://elpais.com/estaticos/aviso-legal/); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 57 items, newest 2026-11-21T04:00:00Z"
+
+  - id: thelocal-europe
+    kind: rss
+    url: "https://www.thelocal.com/feed"
+    country: DE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 500; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 500)"
+
+  - id: dutchnews
+    kind: rss
+    url: "https://www.dutchnews.nl/feed/"
+    country: NL
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed/; kept disabled for a human access review. Terms: https://www.dutchnews.nl/terms."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed/)"
+
+  - id: cphpost
+    kind: rss
+    url: "https://cphpost.dk/feed/"
+    country: DK
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://cphpost.dk/terms); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 12 items, newest 2026-11-21T06:00:00Z"
+
+  - id: icelandmonitor
+    kind: rss
+    url: "https://icelandmonitor.mbl.is/rss/"
+    country: IS
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://icelandmonitor.mbl.is/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T16:59:00Z"
+
+  - id: rte-news
+    kind: rss
+    url: "https://www.rte.ie/feeds/rss/?index=/news/"
+    country: IE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.rte.ie/terms/); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T06:00:00Z"
+
+  - id: portugalresident
+    kind: rss
+    url: "https://www.portugalresident.com/feed/"
+    country: PT
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T18:27:34Z"
+
+  - id: ekathimerini
+    kind: rss
+    url: "https://www.ekathimerini.com/rss/"
+    country: GR
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: cyprusmail
+    kind: rss
+    url: "https://cyprus-mail.com/feed/"
+    country: CY
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://cyprus-mail.com/category/legal-view. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T05:30:00Z"
+
+  - id: timesofmalta
+    kind: rss
+    url: "https://timesofmalta.com/rss"
+    country: MT
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, private and non-commercial\u201d (https://timesofmalta.com/terms-and-conditions)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:25:00Z"
+
+  - id: swissinfo
+    kind: rss
+    url: "https://www.swissinfo.ch/eng/rss"
+    country: CH
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 410; kept disabled for a human access review. Terms: https://www.swissinfo.ch/eng/demographics/terms-of-use/133348."
+    notes: "feed check 2026-11-20: not cleared (HTTP 410)"
+
+  - id: euractiv
+    kind: rss
+    url: "https://www.euractiv.com/feed/"
+    country: BE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed/; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed/)"
+
+  - id: euobserver
+    kind: rss
+    url: "https://euobserver.com/rss"
+    country: BE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://euobserver.com/terms-of-service/)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T20:33:20Z"
+
+  - id: spiegel-intl
+    kind: rss
+    url: "https://www.spiegel.de/international/index.rss"
+    country: DE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.spiegel.de/ausland/usa-nach-midterms-donald-trump-verliert-seine-bros-a-a60fcb. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-19T15:19:00Z"
+
+  - id: notesfrompoland
+    kind: rss
+    url: "https://notesfrompoland.com/feed/"
+    country: PL
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal and non-commercial\u201d (https://notesfrompoland.com/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 12 items, newest 2026-11-20T19:44:15Z"
+
+  - id: hungarytoday
+    kind: rss
+    url: "https://hungarytoday.hu/feed/"
+    country: HU
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://hungarytoday.hu/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 5 items, newest 2026-11-20T14:30:23Z"
+
+  - id: balkaninsight
+    kind: rss
+    url: "https://balkaninsight.com/feed/"
+    country: RS
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review. Terms: https://balkaninsight.com/terms."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: totalcroatia
+    kind: rss
+    url: "https://www.total-croatia-news.com/feed"
+    country: HR
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://total-croatia-news.com/terms-of-service/)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T22:36:45Z"
+
+  - id: sta-en
+    kind: rss
+    url: "https://english.sta.si/rss"
+    country: SI
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: err-news
+    kind: rss
+    url: "https://news.err.ee/rss"
+    country: EE
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://news.err.ee/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T04:59:00Z"
+
+  - id: lsm-en
+    kind: rss
+    url: "https://eng.lsm.lv/rss/"
+    country: LV
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-20T16:10:50Z"
+
+  - id: kyivpost
+    kind: rss
+    url: "https://www.kyivpost.com/feed"
+    country: UA
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.kyivpost.com/pages/terms-and-conditions. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-21T06:04:00Z"
+
+  - id: ukrinform
+    kind: rss
+    url: "https://www.ukrinform.net/rss/block-lastnews"
+    country: UA
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.ukrinform.net/info/subscribe_conditions.html. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T05:51:00Z"
+
+  - id: moscowtimes
+    kind: rss
+    url: "https://www.themoscowtimes.com/rss/news"
+    country: RU
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-20T16:22:10Z"
+
+  - id: meduza-en
+    kind: rss
+    url: "https://meduza.io/rss/en/all"
+    country: RU
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-20T22:35:07Z"
+
+  - id: euroradio
+    kind: rss
+    url: "https://euroradio.fm/rss"
+    country: BY
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: arabnews
+    kind: rss
+    url: "https://www.arabnews.com/rss.xml"
+    country: SA
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review. Terms: https://www.arabnews.com/terms-of-use."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: alarabiya-en
+    kind: rss
+    url: "https://english.alarabiya.net/tools/rss"
+    country: SA
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: al-monitor
+    kind: rss
+    url: "https://www.al-monitor.com/rss"
+    country: US
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T23:46:29Z"
+
+  - id: middleeasteye
+    kind: rss
+    url: "https://www.middleeasteye.net/rss"
+    country: GB
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.middleeasteye.net/terms-and-conditions. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:19:02Z"
+
+  - id: middleeastmonitor
+    kind: rss
+    url: "https://www.middleeastmonitor.com/feed/"
+    country: GB
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.middleeastmonitor.com/20180412-legal-battle-to-make-uk-saudi-arabia-arms-sales-unlawful/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-20T20:00:59Z"
+
+  - id: timesofisrael
+    kind: rss
+    url: "https://www.timesofisrael.com/feed/"
+    country: IL
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed/; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed/)"
+
+  - id: jpost
+    kind: rss
+    url: "https://www.jpost.com/rss/rssfeedsfrontpage.aspx"
+    country: IL
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.jpost.com/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-21T06:20:39Z"
+
+  - id: haaretz
+    kind: rss
+    url: "https://www.haaretz.com/srv/htz---rss"
+    country: IL
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: ynetnews
+    kind: rss
+    url: "https://www.ynetnews.com/Integration/StoryRss2.xml"
+    country: IL
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-16T11:09:18Z"
+
+  - id: maannews
+    kind: rss
+    url: "https://www.maannews.net/rss.aspx"
+    country: PS
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: tehrantimes
+    kind: rss
+    url: "https://www.tehrantimes.com/rss"
+    country: IR
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-20T20:31:00Z"
+
+  - id: hurriyetdailynews
+    kind: rss
+    url: "https://www.hurriyetdailynews.com/rss"
+    country: TR
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.hurriyetdailynews.com/board-orders-illegal-structures-removed-from-cleopatra-b. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 0 items, newest n/a"
+
+  - id: anadolu-en
+    kind: rss
+    url: "https://www.aa.com.tr/en/rss/default?cat=guncel"
+    country: TR
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.aa.com.tr/en/terms); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T05:49:01Z"
+
+  - id: newarab
+    kind: rss
+    url: "https://www.newarab.com/rss"
+    country: GB
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 110 items, newest 2026-11-20T22:23:53Z"
+
+  - id: themedialine
+    kind: rss
+    url: "https://themedialine.org/feed/"
+    country: US
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: egyptindependent
+    kind: rss
+    url: "https://www.egyptindependent.com/feed/"
+    country: EG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.egyptindependent.com/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T13:54:01Z"
+
+  - id: ahram-online
+    kind: rss
+    url: "https://english.ahram.org.eg/Rss.aspx"
+    country: EG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: dailymaverick
+    kind: rss
+    url: "https://www.dailymaverick.co.za/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: iol
+    kind: rss
+    url: "https://www.iol.co.za/rss"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T06:30:00Z"
+
+  - id: theeastafrican
+    kind: rss
+    url: "https://www.theeastafrican.co.ke/tea/rss"
+    country: KE
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: nation-africa
+    kind: rss
+    url: "https://nation.africa/kenya/rss"
+    country: KE
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: theafricareport
+    kind: rss
+    url: "https://www.theafricareport.com/feed/"
+    country: FR
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T14:00:00Z"
+
+  - id: premiumtimes
+    kind: rss
+    url: "https://www.premiumtimesng.com/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-21T05:53:02Z"
+
+  - id: punchng
+    kind: rss
+    url: "https://punchng.com/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://punchng.com/legal-500-launches-nigeria-gc-power-list-recognises-leading-in-house-counsel/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T07:09:00Z"
+
+  - id: vanguardngr
+    kind: rss
+    url: "https://www.vanguardngr.com/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:32:43Z"
+
+  - id: guardian-ng
+    kind: rss
+    url: "https://guardian.ng/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: businessday-ng
+    kind: rss
+    url: "https://businessday.ng/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://businessday.ng/category/news/legal-business/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 5 items, newest 2026-11-21T05:20:42Z"
+
+  - id: graphic-gh
+    kind: rss
+    url: "https://www.graphic.com.gh/news.feed?type=rss"
+    country: GH
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal non-commercial\u201d (https://www.graphic.com.gh/terms-of-use.html)."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-20T23:42:54Z"
+
+  - id: sudantribune
+    kind: rss
+    url: "https://sudantribune.com/feed/"
+    country: SD
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: addisstandard
+    kind: rss
+    url: "https://addisstandard.com/feed/"
+    country: ET
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: ethiopia-insight
+    kind: rss
+    url: "https://www.ethiopia-insight.com/feed/"
+    country: ET
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.ethiopia-insight.com/2020/05/23/legal-experts-alone-cannot-manufacture-constitutionalism/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 9 items, newest 2026-11-04T11:33:56Z"
+
+  - id: moroccoworldnews
+    kind: rss
+    url: "https://www.moroccoworldnews.com/feed/"
+    country: MA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review. Terms: https://www.moroccoworldnews.com/terms-of-use/."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: newsday-zw
+    kind: rss
+    url: "https://www.newsday.co.zw/feed/"
+    country: ZW
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T16:06:14Z"
+
+  - id: lusakatimes
+    kind: rss
+    url: "https://www.lusakatimes.com/feed/"
+    country: ZM
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T19:05:27Z"
+
+  - id: monitor-ug
+    kind: rss
+    url: "https://www.monitor.co.ug/uganda/rss"
+    country: UG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: thenewhumanitarian
+    kind: rss
+    url: "https://www.thenewhumanitarian.org/rss.xml"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-10-15T06:00:00Z"
+
+  - id: allafrica
+    kind: rss
+    url: "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://allafrica.com/list/aans/post/pc/cat/legalaffairs/most/read.html. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 33 items, newest 2026-11-20T23:01:49Z"
+
+  - id: humangle
+    kind: rss
+    url: "https://humanglemedia.com/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 429; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 429)"
+
+  - id: africanarguments
+    kind: rss
+    url: "https://africanarguments.org/feed/"
+    country: GB
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://africanarguments.org/2017/05/legal-invisibility-was-the-best-thing-to-happen-to-me/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-18T14:29:18Z"
+
+  - id: myjoyonline
+    kind: rss
+    url: "https://www.myjoyonline.com/feed/"
+    country: GH
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.myjoyonline.com/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T05:54:43Z"
+
+  - id: capitalfm-ke
+    kind: rss
+    url: "https://www.capitalfm.co.ke/news/feed/"
+    country: KE
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.capitalfm.co.ke/news/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:30:00Z"
+
+  - id: zambianobserver
+    kind: rss
+    url: "https://zambianobserver.com/feed/"
+    country: ZM
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://zambianobserver.com/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-20T18:39:17Z"
+
+  - id: thezimbabwemail
+    kind: rss
+    url: "https://www.thezimbabwemail.com/feed/"
+    country: ZW
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://thezimbabwemail.com/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T22:32:40Z"
+
+  - id: somaliguardian
+    kind: rss
+    url: "https://somaliguardian.com/feed/"
+    country: SO
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-19T18:08:49Z"
+
+  - id: nilepost
+    kind: rss
+    url: "https://nilepost.co.ug/feed/"
+    country: UG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://nilepost.co.ug/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 300 items, newest 2026-11-20T19:35:40Z"
+
+  - id: ghanaiantimes
+    kind: rss
+    url: "https://www.ghanaiantimes.com.gh/feed/"
+    country: GH
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://ghanaiantimes.com.gh/terms-agreed-for-joshua-v-wilder-fight/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T15:53:18Z"
+
+  - id: namibian
+    kind: rss
+    url: "https://www.namibian.com.na/feed/"
+    country: NA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review. Terms: https://www.namibian.com.na/terms-of-use."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: egyptianstreets
+    kind: rss
+    url: "https://egyptianstreets.com/feed/"
+    country: EG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://egyptianstreets.com/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 9 items, newest 2026-11-20T14:49:01Z"
+
+  - id: thehindu-national
+    kind: rss
+    url: "https://www.thehindu.com/news/national/feeder/default.rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thehindu.com/about/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T06:30:11Z"
+
+  - id: thehindu-world
+    kind: rss
+    url: "https://www.thehindu.com/news/international/feeder/default.rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thehindu.com/about/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T03:30:01Z"
+
+  - id: thehindu-business
+    kind: rss
+    url: "https://www.thehindu.com/business/feeder/default.rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thehindu.com/about/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T05:00:03Z"
+
+  - id: thehindu-scitech
+    kind: rss
+    url: "https://www.thehindu.com/sci-tech/feeder/default.rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thehindu.com/about/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T06:33:51Z"
+
+  - id: toi-top
+    kind: rss
+    url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://timesofindia.indiatimes.com/legal. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 44 items, newest 2026-11-21T06:31:20Z"
+
+  - id: toi-world
+    kind: rss
+    url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://timesofindia.indiatimes.com/legal. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T05:35:07Z"
+
+  - id: hindustantimes-world
+    kind: rss
+    url: "https://www.hindustantimes.com/feeds/rss/world-news/rssfeed.xml"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.hindustantimes.com/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-21T06:10:15Z"
+
+  - id: indianexpress
+    kind: rss
+    url: "https://indianexpress.com/feed/"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal and non-commercial\u201d (https://indianexpress.com/terms-and-conditions/)."
+    notes: "feed check 2026-11-20: ok, 200 items, newest 2026-11-21T06:29:32Z"
+
+  - id: ndtv-top
+    kind: rss
+    url: "https://feeds.feedburner.com/ndtvnews-top-stories"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.ndtv.com/terms-of-use. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 19 items, newest 2026-11-21T06:14:10Z"
+
+  - id: business-standard
+    kind: rss
+    url: "https://www.business-standard.com/rss/home_page_top_stories.rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: livemint
+    kind: rss
+    url: "https://www.livemint.com/rss/news"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.livemint.com/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 35 items, newest 2026-11-21T06:32:51Z"
+
+  - id: economictimes
+    kind: rss
+    url: "https://economictimes.indiatimes.com/rssfeedstopstories.cms"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 52 items, newest 2026-11-21T05:57:00Z"
+
+  - id: telegraphindia
+    kind: rss
+    url: "https://www.telegraphindia.com/rss"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: thestatesman
+    kind: rss
+    url: "https://www.thestatesman.com/feed/"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 500; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 500)"
+
+  - id: firstpost
+    kind: rss
+    url: "https://www.firstpost.com/rss/rss.xml"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: thequint
+    kind: rss
+    url: "https://www.thequint.com/feed"
+    country: IN
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cnon-commercial use and limited to personal\u201d (https://www.thequint.com/terms-and-conditions)."
+    notes: "feed check 2026-11-20: ok, 1 items, newest 2026-11-21T03:30:00Z"
+
+  - id: dawn
+    kind: rss
+    url: "https://www.dawn.com/feeds/home"
+    country: PK
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.dawn.com/terms)."
+    notes: "feed check 2026-11-20: ok, 27 items, newest 2026-11-21T06:35:56Z"
+
+  - id: tribune-pk
+    kind: rss
+    url: "https://tribune.com.pk/feed/home"
+    country: PK
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://tribune.com.pk/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 73 items, newest n/a"
+
+  - id: thenews-pk
+    kind: rss
+    url: "https://www.thenews.com.pk/rss/1/1"
+    country: PK
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2025-11-21T01:33:00Z"
+
+  - id: kathmandupost
+    kind: rss
+    url: "https://kathmandupost.com/rss"
+    country: NP
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://kathmandupost.com/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 40 items, newest n/a"
+
+  - id: tolonews
+    kind: rss
+    url: "https://tolonews.com/rss"
+    country: AF
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: pajhwok
+    kind: rss
+    url: "https://www.pajhwok.com/en/rss"
+    country: AF
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 410; kept disabled for a human access review. Terms: https://pajhwok.com/terms-of-service/."
+    notes: "feed check 2026-11-20: not cleared (HTTP 410)"
+
+  - id: scmp-china
+    kind: rss
+    url: "https://www.scmp.com/rss/4/feed"
+    country: HK
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.scmp.com/terms-conditions); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T04:00:12Z"
+
+  - id: straitstimes-asia
+    kind: rss
+    url: "https://www.straitstimes.com/news/asia/rss.xml"
+    country: SG
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.straitstimes.com/global. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T06:37:00Z"
+
+  - id: straitstimes-world
+    kind: rss
+    url: "https://www.straitstimes.com/news/world/rss.xml"
+    country: SG
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.straitstimes.com/global. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T06:25:25Z"
+
+  - id: cna-asia
+    kind: rss
+    url: "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"
+    country: SG
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:14:58Z"
+
+  - id: todayonline
+    kind: rss
+    url: "https://www.todayonline.com/feed"
+    country: SG
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 401; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 401)"
+
+  - id: antaranews
+    kind: rss
+    url: "https://www.antaranews.com/rss/terkini.xml"
+    country: ID
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.antaranews.com/berita/5836791/penyadapan-ilegal-depolitisasi-intelijen-demi-ne. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T06:36:32Z"
+
+  - id: bangkokpost
+    kind: rss
+    url: "https://www.bangkokpost.com/rss/data/topstories.xml"
+    country: TH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal and non-commercial\u201d (https://www.bangkokpost.com/terms)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:00:00Z"
+
+  - id: vnexpress
+    kind: rss
+    url: "https://e.vnexpress.net/rss/news.rss"
+    country: VN
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://e.vnexpress.net/terms-of-service. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 60 items, newest 2026-11-21T06:00:00Z"
+
+  - id: vietnamnews
+    kind: rss
+    url: "https://vietnamnews.vn/rss/home.rss"
+    country: VN
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 1 items, newest 2026-11-21T05:31:04Z"
+
+  - id: mb-ph
+    kind: rss
+    url: "https://mb.com.ph/feed/"
+    country: PH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: inquirer
+    kind: rss
+    url: "https://newsinfo.inquirer.net/feed"
+    country: PH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 40 items, newest 2026-11-21T14:17:05Z"
+
+  - id: rappler
+    kind: rss
+    url: "https://www.rappler.com/feed/"
+    country: PH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:00:00Z"
+
+  - id: philstar
+    kind: rss
+    url: "https://www.philstar.com/rss/headlines"
+    country: PH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T04:56:00Z"
+
+  - id: japantimes
+    kind: rss
+    url: "https://www.japantimes.co.jp/feed/"
+    country: JP
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.japantimes.co.jp/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T04:42:00Z"
+
+  - id: asahi
+    kind: rss
+    url: "https://www.asahi.com/rss/asahi/newsheadlines.rdf"
+    country: JP
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 40 items, newest 2026-11-21T03:23:02Z"
+
+  - id: mainichi
+    kind: rss
+    url: "https://mainichi.jp/rss/etc/mainichi-flash.rss"
+    country: JP
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://mainichi.jp/USmidterm2026. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:32:34Z"
+
+  - id: koreatimes
+    kind: rss
+    url: "https://www.koreatimes.co.kr/www/rss/rss.xml"
+    country: KR
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.koreatimes.co.kr/?utm_source=legacy_url&utm_medium=redirect&utm_campaign=www_path_cleanup. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 34 items, newest 2026-11-21T06:37:02Z"
+
+  - id: yonhap
+    kind: rss
+    url: "https://en.yna.co.kr/RSS/news.xml"
+    country: KR
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://join.yna.co.kr/ko/policy/terms); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 99 items, newest 2026-11-21T05:38:06Z"
+
+  - id: taipeitimes
+    kind: rss
+    url: "https://www.taipeitimes.com/xml/index.rss"
+    country: TW
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 47 items, newest 2026-11-21T00:00:00Z"
+
+  - id: nikkei-asia
+    kind: rss
+    url: "https://asia.nikkei.com/rss/feed/nar"
+    country: JP
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://asia.nikkei.com/terms-of-use."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: thediplomat
+    kind: rss
+    url: "https://thediplomat.com/feed/"
+    country: US
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://thediplomat.com/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 96 items, newest 2026-11-20T18:20:00Z"
+
+  - id: eastasiaforum
+    kind: rss
+    url: "https://eastasiaforum.org/feed/"
+    country: AU
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: asiatimes
+    kind: rss
+    url: "https://asiatimes.com/feed/"
+    country: HK
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://asiatimes.com/terms-of-use-2/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T04:57:26Z"
+
+  - id: khmertimeskh
+    kind: rss
+    url: "https://www.khmertimeskh.com/feed/"
+    country: KH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: freemalaysiatoday
+    kind: rss
+    url: "https://www.freemalaysiatoday.com/feed/"
+    country: MY
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.freemalaysiatoday.com/terms/); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-21T06:14:38Z"
+
+  - id: smh
+    kind: rss
+    url: "https://www.smh.com.au/rss/feed.xml"
+    country: AU
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.nine.com.au/terms-of-use); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:16:15Z"
+
+  - id: theage
+    kind: rss
+    url: "https://www.theage.com.au/rss/feed.xml"
+    country: AU
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.nine.com.au/terms-of-use); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:16:15Z"
+
+  - id: newscomau
+    kind: rss
+    url: "https://www.news.com.au/content-feeds/latest-news-national/"
+    country: AU
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: sbs-news
+    kind: rss
+    url: "https://www.sbs.com.au/news/feed"
+    country: AU
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.sbs.com.au/aboutus/terms-and-conditions/)."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-08-26T02:04:02Z"
+
+  - id: rnz
+    kind: rss
+    url: "https://www.rnz.co.nz/rss/news.xml"
+    country: NZ
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non commercial\u201d (https://www.rnz.co.nz/about/legal)."
+    notes: "feed check 2026-11-20: ok, 35 items, newest 2026-11-21T06:19:52Z"
+
+  - id: postcourier
+    kind: rss
+    url: "https://www.postcourier.com.pg/feed/"
+    country: PG
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.postcourier.com.pg/terms-mine-extension-renegotiated/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:31:34Z"
+
+  - id: mexiconewsdaily
+    kind: rss
+    url: "https://mexiconewsdaily.com/feed/"
+    country: MX
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T23:37:48Z"
+
+  - id: eluniversal-mx
+    kind: rss
+    url: "https://www.eluniversal.com.mx/rss"
+    country: MX
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: batimes
+    kind: rss
+    url: "https://www.batimes.com.ar/feed"
+    country: AR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.batimes.com.ar/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-21T03:30:00Z"
+
+  - id: mercopress
+    kind: rss
+    url: "https://en.mercopress.com/rss/"
+    country: UY
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:25:00Z"
+
+  - id: riotimes
+    kind: rss
+    url: "https://riotimesonline.com/feed/"
+    country: BR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.riotimesonline.com/terms-of-service)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T05:37:13Z"
+
+  - id: colombiareports
+    kind: rss
+    url: "https://colombiareports.com/feed/"
+    country: CO
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://colombiareports.com/conditions-colombias-largest-paramilitary-group-seeking-surrender-leader/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T17:43:20Z"
+
+  - id: perureports
+    kind: rss
+    url: "https://perureports.com/feed/"
+    country: PE
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://perureports.com/alleged-illegal-miners-dynamite-transmission-towers-at-perus-la-po. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-20T22:05:23Z"
+
+  - id: insightcrime
+    kind: rss
+    url: "https://insightcrime.org/feed/"
+    country: US
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 11 items, newest 2026-11-20T16:51:05Z"
+
+  - id: telesurenglish
+    kind: rss
+    url: "https://www.telesurenglish.net/rss"
+    country: VE
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.telesurenglish.net/conditions-are-not-met-for-china-japan-and-south-korea-summit/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-21T04:27:03Z"
+
+  - id: prensa-latina
+    kind: rss
+    url: "https://www.prensa-latina.cu/rss"
+    country: CU
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.prensa-latina.cu/2025/10/25/legalizacion-de-mas-de-200-partidos-marca-semana-n. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T07:30:23Z"
+
+  - id: caracaschronicles
+    kind: rss
+    url: "https://www.caracaschronicles.com/feed/"
+    country: VE
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.caracaschronicles.com/2018/04/04/legal-dissection-of-the-petro-questions-you-were-afraid-to-ask-your-lawyer/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 3 items, newest 2026-11-19T22:15:51Z"
+
+  - id: argentinareports
+    kind: rss
+    url: "https://www.argentinareports.com/feed/"
+    country: AR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-10T20:38:52Z"
+
+  - id: brasildefato
+    kind: rss
+    url: "https://www.brasildefato.com.br/feed"
+    country: BR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.brasildefato.com.br/2024/03/19/legal-amazon-records-the-lowest-deforestation-rate-for-january-and-february-of-the-last-six-years-says-imazon/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 99 items, newest 2026-11-21T01:06:15Z"
+
+  - id: latinamericanpost
+    kind: rss
+    url: "https://latinamericanpost.com/feed/"
+    country: CO
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 30 items, newest 2026-11-20T14:35:22Z"
+
+  - id: jamaicaobserver
+    kind: rss
+    url: "https://www.jamaicaobserver.com/feed/"
+    country: JM
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 37 items, newest 2026-11-21T03:27:43Z"
+
+  - id: dialogo-americas
+    kind: rss
+    url: "https://dialogo-americas.com/feed/"
+    country: US
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: guyanachronicle
+    kind: rss
+    url: "https://guyanachronicle.com/feed/"
+    country: GY
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T06:35:45Z"
+
+  - id: kaieteurnews
+    kind: rss
+    url: "https://kaieteurnewsonline.com/feed/"
+    country: GY
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://kaieteurnewsonline.com/2022/09/09/terms-of-reference-of-special-audit-not-adhered-to/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 25 items, newest 2026-11-20T14:25:05Z"
+
+  - id: dominicantoday
+    kind: rss
+    url: "https://dominicantoday.com/feed/"
+    country: DO
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://dominicantoday.com/legal-dispute-over-dhario-primeros-music-catalog-returns-to-u-s-courts/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T20:13:52Z"
+
+  - id: akipress
+    kind: rss
+    url: "https://akipress.com/rss/"
+    country: KG
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://akipress.com/terms. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T06:28:53Z"
+
+  - id: uzdaily
+    kind: rss
+    url: "https://www.uzdaily.uz/en/rss"
+    country: UZ
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T05:30:00Z"
+
+  - id: eurasianet
+    kind: rss
+    url: "https://eurasianet.org/rss"
+    country: US
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest n/a"
+
+  - id: intellinews
+    kind: rss
+    url: "https://www.intellinews.com/feed/"
+    country: GB
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed)"
+
+  - id: timesca
+    kind: rss
+    url: "https://timesca.com/feed/"
+    country: KZ
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://timesca.com/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T12:42:31Z"
+
+  - id: news-am
+    kind: rss
+    url: "https://news.am/eng/rss/"
+    country: AM
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://news.am/eng/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-20T14:46:36Z"
+
+  - id: newscentralasia
+    kind: rss
+    url: "https://www.newscentralasia.net/feed/"
+    country: TM
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.newscentralasia.net/2011/06/05/legalizing-assisted-suicide/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 14 items, newest 2026-11-21T04:20:19Z"
+
+  - id: jam-news
+    kind: rss
+    url: "https://jam-news.net/feed/"
+    country: AM
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://jam-news.net/legal-dispute-between-georgian-chess-player-and-netflix-ends-in-settlement/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T14:25:32Z"
+
+  - id: osw-waw
+    kind: rss
+    url: "https://www.osw.waw.pl/en/rss.xml"
+    country: PL
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-17T12:00:00Z"
+
+  - id: nature
+    kind: rss
+    url: "https://www.nature.com/nature.rss"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.nature.com/info/legal-notice?error=cookies_not_supported&code=15c393df-9893-4d. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 75 items, newest 2026-11-20T00:00:00Z"
+
+  - id: science-mag
+    kind: rss
+    url: "https://www.science.org/rss/news_current.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest n/a"
+
+  - id: newscientist
+    kind: rss
+    url: "https://www.newscientist.com/feed/home/"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /feed/; kept disabled for a human access review. Terms: https://www.newscientist.com/terms/."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /feed/)"
+
+  - id: statnews
+    kind: rss
+    url: "https://www.statnews.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.statnews.com/wunderkinds-2020/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T23:43:53Z"
+
+  - id: technologyreview
+    kind: rss
+    url: "https://www.technologyreview.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.technologyreview.com/terms-of-service/."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: techcrunch
+    kind: rss
+    url: "https://techcrunch.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal noncommercial\u201d (https://techcrunch.com/terms-of-service/)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T04:00:00Z"
+
+  - id: theverge
+    kind: rss
+    url: "https://www.theverge.com/rss/index.xml"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cmay not copy, make derivate works, resell, distribute, or make any commercial use\u201d (https://www.voxmedia.com/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T20:43:52Z"
+
+  - id: arstechnica
+    kind: rss
+    url: "https://feeds.arstechnica.com/arstechnica/index"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.condenast.com/user-agreement)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T22:28:24Z"
+
+  - id: wired
+    kind: rss
+    url: "https://www.wired.com/feed/rss"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: Cond\u00e9 Nast terms are personal, non-commercial use only and content is paywalled. Terms reviewed: https://www.condenast.com/user-agreement."
+    notes: "Disabled by the terms review: Cond\u00e9 Nast terms are personal, non-commercial use only and content is paywalled"
+
+  - id: theregister
+    kind: rss
+    url: "https://www.theregister.com/headlines.atom"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /; kept disabled for a human access review. Terms: https://www.theregister.com/legal."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /)"
+
+  - id: engadget
+    kind: rss
+    url: "https://www.engadget.com/rss.xml"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cmay not copy, make derivate works, resell, distribute, or make any commercial use\u201d (https://www.voxmedia.com/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T23:48:00Z"
+
+  - id: venturebeat
+    kind: rss
+    url: "https://venturebeat.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 429; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 429)"
+
+  - id: variety
+    kind: rss
+    url: "https://variety.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://variety.com/2013/film/reviews/terms-and-conditions-may-apply-1117949067/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T03:21:11Z"
+
+  - id: hollywoodreporter
+    kind: rss
+    url: "https://www.hollywoodreporter.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.pmc.com/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T01:50:09Z"
+
+  - id: rollingstone
+    kind: rss
+    url: "https://www.rollingstone.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.pmc.com/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T04:52:50Z"
+
+  - id: billboard
+    kind: rss
+    url: "https://www.billboard.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.pmc.com/terms-of-use)."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-21T01:54:57Z"
+
+  - id: deadline
+    kind: rss
+    url: "https://deadline.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://deadline.com/2016/09/terms-of-endearment-sets-north-american-stage-debut-1201820850/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 12 items, newest 2026-11-21T04:17:52Z"
+
+  - id: artnet
+    kind: rss
+    url: "https://news.artnet.com/feed"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T22:30:40Z"
+
+  - id: hyperallergic
+    kind: rss
+    url: "https://hyperallergic.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://hyperallergic.com/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-20T23:51:17Z"
+
+  - id: carbonbrief
+    kind: rss
+    url: "https://www.carbonbrief.org/feed/"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.carbonbrief.org/toshiba-warns-survival-forecasts-7bn-losses-government-given-21-days-explain-climate-change-failures-face-legal-action. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 12 items, newest 2026-11-17T05:00:00Z"
+
+  - id: climatehomenews
+    kind: rss
+    url: "https://www.climatechangenews.com/feed/"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.climatechangenews.com/terms-and-conditions-the-climate-diplomat-book-giveaway/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 40 items, newest 2026-11-20T15:05:35Z"
+
+  - id: insideclimatenews
+    kind: rss
+    url: "https://insideclimatenews.org/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://insideclimatenews.org/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T23:32:21Z"
+
+  - id: grist
+    kind: rss
+    url: "https://grist.org/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, informational, and noncommercial\u201d (https://grist.org/terms/)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T09:45:00Z"
+
+  - id: mongabay
+    kind: rss
+    url: "https://news.mongabay.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, informational, and non-commercial\u201d (https://news.mongabay.com/terms/)."
+    notes: "feed check 2026-11-20: ok, 32 items, newest 2026-11-21T03:14:33Z"
+
+  - id: globalvoices
+    kind: rss
+    url: "https://globalvoices.org/feed/"
+    country: NL
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://globalvoices.org/2026/08/06/legal-access-in-a-shrinking-space-building-ecosystems-to-end-statelessness/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-21T06:12:59Z"
+
+  - id: un-news
+    kind: rss
+    url: "https://news.un.org/feed/subscribe/en/news/all/rss.xml"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow */news/; kept disabled for a human access review. Terms: https://www.un.org/en/about-us/terms-of-use."
+    notes: "feed check 2026-11-20: not cleared (robots disallow */news/)"
+
+  - id: who-news
+    kind: rss
+    url: "https://www.who.int/rss-feeds/news-english.xml"
+    country: CH
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.who.int/about/policies/terms-of-use. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 83 items, newest n/a"
+
+  - id: hrw
+    kind: rss
+    url: "https://www.hrw.org/rss/news"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T17:00:01Z"
+
+  - id: amnesty
+    kind: rss
+    url: "https://www.amnesty.org/en/latest/feed/"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.amnesty.org/en/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 12 items, newest 2026-11-20T11:06:28Z"
+
+  - id: reliefweb-updates
+    kind: rss
+    url: "https://reliefweb.int/updates/rss.xml"
+    country: CH
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: robots disallow /*/rss.xml; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (robots disallow /*/rss.xml)"
+
+  - id: devex
+    kind: rss
+    url: "https://www.devex.com/rss"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: passblue
+    kind: rss
+    url: "https://www.passblue.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://passblue.com/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 1 items, newest 2026-11-21T00:51:12Z"
+
+  - id: defenseone
+    kind: rss
+    url: "https://www.defenseone.com/rss/all/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.defenseone.com/policy/2026/11/secret-terms-trumps-venezuelan-oil-deal/417246/?. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 23 items, newest 2026-11-21T01:18:33Z"
+
+  - id: breakingdefense
+    kind: rss
+    url: "https://breakingdefense.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://breakingdefense.com/terms-of-service/)."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-11-20T23:52:57Z"
+
+  - id: warontherocks
+    kind: rss
+    url: "https://warontherocks.com/feed/"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://warontherocks.com/terms-use-privacy-policies/)."
+    notes: "feed check 2026-11-20: ok, 100 items, newest 2026-11-20T17:18:04Z"
+
+  - id: lawfare
+    kind: rss
+    url: "https://www.lawfaremedia.org/feed"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Not cleared: HTTP 403; kept disabled for a human access review."
+    notes: "feed check 2026-11-20: not cleared (HTTP 403)"
+
+  - id: africanews
+    kind: rss
+    url: "https://www.africanews.com/feed/"
+    country: FR
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, non-commercial\u201d (https://www.africanews.com/terms-and-conditions)."
+    notes: "feed check 2026-11-20: ok, 50 items, newest 2026-11-20T22:54:31Z"
+
+  - id: irrawaddy
+    kind: rss
+    url: "https://www.irrawaddy.com/feed"
+    country: MM
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T12:22:13Z"
+
+  - id: rfi-en
+    kind: rss
+    url: "https://www.rfi.fr/en/rss"
+    country: FR
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21 pending verification: a terms page exists but could not be read (https://www.rfi.fr/en/terms); an inaccessible or JS-only page is not treated as permission."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-20T16:38:58Z"
+
+  - id: bloomberg-markets
+    kind: rss
+    url: "https://feeds.bloomberg.com/markets/news.rss"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.bloomberg.com/notices/tos."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: pbs-newshour
+    kind: rss
+    url: "https://www.pbs.org/newshour/feeds/rss/headlines"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled 2026-11-21: publisher terms restrict applicable use to personal or non-commercial use \u2014 \u201cpersonal, noncommercial\u201d (https://www.pbs.org/about/about-pbs/terms-of-use/)."
+    notes: "feed check 2026-11-20: ok, 20 items, newest 2026-11-21T00:28:54Z"
+
+  - id: minnpost
+    kind: rss
+    url: "https://www.minnpost.com/feed/"
+    country: US
+    region: north-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.minnpost.com/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 10 items, newest 2026-11-20T20:02:43Z"
+
+  - id: newstatesman
+    kind: rss
+    url: "https://www.newstatesman.com/feed"
+    country: GB
+    region: europe
+    lang: en
+    interval_s: 60
+    enabled: false
+    terms_ok: false
+    terms_note: "Disabled: subscription terms and paywalled content. Terms reviewed: https://www.newstatesman.com/terms-and-conditions."
+    notes: "Disabled by the terms review: subscription terms and paywalled content"
+
+  - id: opendemocracy
+    kind: rss
+    url: "https://www.opendemocracy.net/en/feed/"
+    country: GB
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-20: ok, 15 items, newest 2026-04-24T09:49:23Z"
+
+  - id: leadership-ng
+    kind: rss
+    url: "https://leadership.ng/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T09:19:08Z"
+
+  - id: sunnewsonline
+    kind: rss
+    url: "https://www.sunnewsonline.com/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://thesun.ng/terms-of-service/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T07:47:33Z"
+
+  - id: ugstandard
+    kind: rss
+    url: "https://www.ugstandard.com/feed/"
+    country: UG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T08:04:02Z"
+
+  - id: citizen-za
+    kind: rss
+    url: "https://www.citizen.co.za/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.citizen.co.za/legal-notice/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 75 items, newest 2026-11-21T09:00:00Z"
+
+  - id: georgeherald
+    kind: rss
+    url: "https://www.georgeherald.com/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 25 items, newest 2026-11-21T08:01:00Z"
+
+  - id: thesouthafrican
+    kind: rss
+    url: "https://www.thesouthafrican.com/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thesouthafrican.com/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 100 items, newest 2026-11-21T06:32:00Z"
+
+  - id: capetownetc
+    kind: rss
+    url: "https://www.capetownetc.com/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T08:00:25Z"
+
+  - id: citizen-za-news
+    kind: rss
+    url: "https://www.citizen.co.za/news/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.citizen.co.za/legal-notice/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 75 items, newest 2026-11-21T07:11:24Z"
+
+  - id: premiumtimes-news
+    kind: rss
+    url: "https://www.premiumtimesng.com/category/news/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 15 items, newest 2026-11-21T08:53:32Z"
+
+  - id: thesouthafrican-news
+    kind: rss
+    url: "https://www.thesouthafrican.com/news/feed/"
+    country: ZA
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.thesouthafrican.com/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 100 items, newest 2026-11-21T05:22:58Z"
+
+  - id: punch-news
+    kind: rss
+    url: "https://punchng.com/topics/news/feed/"
+    country: NG
+    region: africa
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://punchng.com/legal-500-launches-nigeria-gc-power-list-recognises-leading-in-house-counsel/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 30 items, newest 2026-11-21T10:13:57Z"
+
+  - id: buenosairesherald
+    kind: rss
+    url: "https://buenosairesherald.com/feed/"
+    country: AR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-20T20:26:06Z"
+
+  - id: caymancompass
+    kind: rss
+    url: "https://www.caymancompass.com/feed/"
+    country: KY
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 72 items, newest 2026-11-21T05:01:45Z"
+
+  - id: barbadostoday
+    kind: rss
+    url: "https://barbadostoday.bb/feed/"
+    country: BB
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://barbadostoday.bb/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T00:14:55Z"
+
+  - id: guyanatimesgy
+    kind: rss
+    url: "https://guyanatimesgy.com/feed/"
+    country: GY
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://guyanatimesgy.com/terms/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T08:05:41Z"
+
+  - id: ticotimes
+    kind: rss
+    url: "https://ticotimes.net/feed/"
+    country: CR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-20T22:09:00Z"
+
+  - id: havanatimes
+    kind: rss
+    url: "https://www.havanatimes.org/feed/"
+    country: CU
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 7 items, newest 2026-11-20T21:56:17Z"
+
+  - id: stlucianewsonline
+    kind: rss
+    url: "https://www.stlucianewsonline.com/feed/"
+    country: LC
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://www.stlucianewsonline.com/terms-and-conditions/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-07-01T05:51:40Z"
+
+  - id: buenosairesherald-politics
+    kind: rss
+    url: "https://buenosairesherald.com/category/politics/feed/"
+    country: AR
+    region: latin-america
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-20T14:19:19Z"
+
+  - id: astanatimes
+    kind: rss
+    url: "https://astanatimes.com/feed/"
+    country: KZ
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T06:14:14Z"
+
+  - id: astanatimes-nation
+    kind: rss
+    url: "https://astanatimes.com/category/nation/feed/"
+    country: KZ
+    region: central-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T05:30:56Z"
+
+  - id: khabarhub
+    kind: rss
+    url: "https://english.khabarhub.com/feed"
+    country: NP
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://english.khabarhub.com/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 12 items, newest 2026-11-21T09:11:22Z"
+
+  - id: island-lk
+    kind: rss
+    url: "https://island.lk/feed/"
+    country: LK
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T00:53:25Z"
+
+  - id: thebhutanese
+    kind: rss
+    url: "https://thebhutanese.bt/feed/"
+    country: BT
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-14T09:29:51Z"
+
+  - id: khabarhub-politics
+    kind: rss
+    url: "https://english.khabarhub.com/category/politics/feed/"
+    country: NP
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://english.khabarhub.com/terms-of-use/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 12 items, newest 2026-11-21T08:40:41Z"
+
+  - id: island-news
+    kind: rss
+    url: "https://island.lk/category/news/feed/"
+    country: LK
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T00:06:10Z"
+
+  - id: bhutanese-news
+    kind: rss
+    url: "https://thebhutanese.bt/category/news/feed/"
+    country: BT
+    region: south-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-14T09:10:31Z"
+
+  - id: coconuts
+    kind: rss
+    url: "https://coconuts.co/feed/"
+    country: ID
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "Publisher terms checked 2026-11-21: https://coconuts.co/terms-service/. No personal/non-commercial restriction covering the feed was found; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 30 items, newest 2024-06-19T08:39:17Z"
+
+  - id: mindanews
+    kind: rss
+    url: "https://www.mindanews.com/feed/"
+    country: PH
+    region: east-asia
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 50 items, newest 2026-11-21T08:12:40Z"
+
+  - id: bahrainthisweek
+    kind: rss
+    url: "https://www.bahrainthisweek.com/feed/"
+    country: BH
+    region: middle-east
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: ok, 10 items, newest 2026-11-21T07:08:19Z"
+
+  - id: stuff-nz
+    kind: rss
+    url: "https://www.stuff.co.nz/rss"
+    country: NZ
+    region: pacific
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "No published terms page found after checking the publisher site on 2026-11-21; robots.txt allows the feed path; headline, snippet and link only, attributed."
+    notes: "feed check 2026-11-21: HTTP 200 XML (manual URL check)"
+
+  - id: gdelt-gkg
+    kind: gdelt
+    url: "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+    country: US
+    region: global
+    lang: en
+    interval_s: 60
+    enabled: true
+    terms_ok: true
+    terms_note: "GDELT 2.0 15-minute GKG files. Public dataset; on-screen attribution required."
+    notes: "feed check 2026-11-20: ok, 571 items, newest 2026-11-21T06:45:00Z"
+
+  - id: usgs-earthquakes
+    kind: usgs
+    url: "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson"
+    country: US
+    region: global
+    lang: en
+    interval_s: 120
+    enabled: true
+    terms_ok: true
+    terms_note: "USGS public GeoJSON feed; US Government work, public domain."
+    hazard: earthquake
+    notes: "feed check 2026-11-20: ok, 7 items, newest 2026-11-21T06:23:37Z"
+
+  - id: gdacs-alerts
+    kind: gdacs
+    url: "https://www.gdacs.org/xml/rss_7d.xml"
+    country: BE
+    region: global
+    lang: en
+    interval_s: 300
+    enabled: true
+    terms_ok: true
+    terms_note: "GDACS public RSS; European Union CC BY 4.0, reuse allowed with credit."
+    hazard: multi
+    notes: "feed check 2026-11-20: ok, 351 items, newest 2026-11-21T05:26:15Z"
+
+  - id: nasa-eonet
+    kind: eonet
+    url: "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&days=7"
+    country: US
+    region: global
+    lang: en
+    interval_s: 600
+    enabled: true
+    terms_ok: true
+    terms_note: "NASA EONET v3 public API; US Government work, public domain."
+    hazard: multi
+    notes: "feed check 2026-11-20: ok, 8 items, newest 2026-11-21T00:00:00Z"
+
+  - id: reliefweb-reports
+    kind: reliefweb
+    url: "https://api.reliefweb.int/v2/reports?limit=30&sort[]=date.created:desc&fields[include][]=title&fields[include][]=url&fields[include][]=date.created&fields[include][]=country&fields[include][]=primary_country&fields[include][]=source&fields[include][]=disaster_type"
+    country: CH
+    region: global
+    lang: en
+    interval_s: 3600
+    enabled: false
+    terms_ok: true
+    terms_note: "ReliefWeb API v2 requires an approved appname; anonymous access returns HTTP 403. Adapter ships disabled."
+    hazard: multi
+    notes: "feed check 2026-11-20: fetch: https://api.reliefweb.int/v2/reports?limit=30&sort[]=date.created:desc&fields[include][]=title&fields[include][]=url&fields[include][]=date.created&fields[include][]=country&fields[include][]=primary_country&field"
+

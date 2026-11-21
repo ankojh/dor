@@ -19,6 +19,8 @@ import (
 
 	"github.com/ankojh/dor/internal/agents"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/fetch"
+	"github.com/ankojh/dor/internal/record"
 )
 
 const version = "0.1.0-dev"
@@ -33,6 +35,17 @@ type config struct {
 	maxAckPending   int
 	provision       bool
 	shutdownTimeout time.Duration
+
+	sourcesFile       string
+	recordDir         string
+	httpUserAgent     string
+	rssShards         int
+	rssShard          int
+	rssConcurrency    int
+	gdeltFile         string
+	gdeltMaxItems     int
+	gdeltExtraDomains string
+	reliefWebAppname  string
 }
 
 func runCommand(args []string) error {
@@ -46,6 +59,17 @@ func runCommand(args []string) error {
 		maxAckPending:   envIntOr("DOR_MAX_ACK_PENDING", bus.DefaultMaxAckPending),
 		provision:       envBoolOr("DOR_PROVISION", false),
 		shutdownTimeout: envDurationOr("DOR_SHUTDOWN_TIMEOUT", 45*time.Second),
+
+		sourcesFile:       envOr("DOR_SOURCES_FILE", "deploy/sources/sources.yaml"),
+		recordDir:         envOr("DOR_RECORD_DIR", ""),
+		httpUserAgent:     envOr("DOR_HTTP_USER_AGENT", ""),
+		rssShards:         envIntOr("DOR_RSS_SHARDS", 3),
+		rssShard:          envIntOr("DOR_RSS_SHARD", -1),
+		rssConcurrency:    envIntOr("DOR_RSS_CONCURRENCY", 8),
+		gdeltFile:         envOr("DOR_GDELT_FILE", "gkg"),
+		gdeltMaxItems:     envIntOr("DOR_GDELT_MAX_ITEMS", 300),
+		gdeltExtraDomains: envOr("DOR_GDELT_EXTRA_DOMAINS", ""),
+		reliefWebAppname:  envOr("DOR_RELIEFWEB_APPNAME", ""),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -59,6 +83,16 @@ func runCommand(args []string) error {
 	fs.IntVar(&cfg.maxAckPending, "max-ack-pending", cfg.maxAckPending, "default consumer MaxAckPending")
 	fs.BoolVar(&cfg.provision, "provision", cfg.provision, "provision streams/KV on an external bus; embedded mode always provisions")
 	fs.DurationVar(&cfg.shutdownTimeout, "shutdown-timeout", cfg.shutdownTimeout, "total shutdown budget")
+	fs.StringVar(&cfg.sourcesFile, "sources-file", cfg.sourcesFile, "reviewed source seed list")
+	fs.StringVar(&cfg.recordDir, "record-dir", cfg.recordDir, "record the raw stream to <dir> (empty disables record mode)")
+	fs.StringVar(&cfg.httpUserAgent, "http-user-agent", cfg.httpUserAgent, "crawler User-Agent for source fetches")
+	fs.IntVar(&cfg.rssShards, "rss-shards", cfg.rssShards, "number of RSS feed shards (plan: 3)")
+	fs.IntVar(&cfg.rssShard, "rss-shard", cfg.rssShard, "run only this RSS shard (0-based); -1 runs every shard in this process")
+	fs.IntVar(&cfg.rssConcurrency, "rss-concurrency", cfg.rssConcurrency, "concurrent fetches per RSS shard")
+	fs.StringVar(&cfg.gdeltFile, "gdelt-file", cfg.gdeltFile, "GDELT file family: gkg or export")
+	fs.IntVar(&cfg.gdeltMaxItems, "gdelt-max-items", cfg.gdeltMaxItems, "cap items published per GDELT file")
+	fs.StringVar(&cfg.gdeltExtraDomains, "gdelt-extra-domains", cfg.gdeltExtraDomains, "comma-separated extra domains for the GDELT allowlist")
+	fs.StringVar(&cfg.reliefWebAppname, "reliefweb-appname", cfg.reliefWebAppname, "approved ReliefWeb appname (empty keeps the adapter disabled)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -108,7 +142,37 @@ func runCommand(args []string) error {
 	}()
 
 	metrics := agents.NewMetrics()
-	registry, err := agents.Builtins(b, metrics, logger)
+
+	fetchMetrics := fetch.NewMetrics(metrics.Registry())
+
+	var recorder *record.Writer
+	if cfg.recordDir != "" {
+		recorder, err = record.NewWriter(record.Options{Dir: cfg.recordDir, Metrics: fetchMetrics})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := recorder.Close(); err != nil {
+				logger.Warn("record close", "err", err)
+			}
+			logger.Info("record mode stopped", "dir", cfg.recordDir,
+				"written", recorder.Written(), "dropped", recorder.Dropped())
+		}()
+	}
+
+	registry, err := agents.Builtins(ctx, b, metrics, logger, agents.Config{
+		SourcesFile:       cfg.sourcesFile,
+		Recorder:          recorder,
+		UserAgent:         cfg.httpUserAgent,
+		RSSShards:         cfg.rssShards,
+		RSSShard:          cfg.rssShard,
+		RSSConcurrency:    cfg.rssConcurrency,
+		GDELTFile:         cfg.gdeltFile,
+		GDELTMaxItems:     cfg.gdeltMaxItems,
+		GDELTExtraDomains: splitList(cfg.gdeltExtraDomains),
+		ReliefWebAppname:  cfg.reliefWebAppname,
+		FetchMetrics:      fetchMetrics,
+	})
 	if err != nil {
 		return err
 	}
@@ -264,4 +328,15 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// splitList parses a comma-separated flag value, dropping empty entries.
+func splitList(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

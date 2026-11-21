@@ -23,12 +23,15 @@ import {
   LinkSchema,
   LinkType,
   Precision,
+  RawArticleSchema,
+  RecordFrameSchema,
   ResyncSchema,
   Role,
   ServerMessageSchema,
   SetFiltersSchema,
   SetPromptsSchema,
   SnapshotSchema,
+  SourceKind,
   Story,
   StorySchema,
   WireRow,
@@ -132,6 +135,43 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
 
   it("Story, including every location field", () => {
     expectStory(load(StorySchema, "story"));
+  });
+
+  it("RawArticle, including every hint field", () => {
+    const raw = load(RawArticleSchema, "raw_article");
+    expect(raw.id).toBe("raw:0123456789abcdef");
+    expect(raw.sourceId).toBe("bbc-world");
+    expect(raw.kind).toBe(SourceKind.RSS);
+    expect(raw.url).toBe("https://example.com/b/world/flooding-in-paris");
+    expect(raw.title).toBe("Flooding «Paris»");
+    expect(raw.summary).toBe("Short snippet with emoji 🌍 and ünïcødé.");
+    expect(raw.publishedAt).toBe(1_700_000_000n);
+    expect(raw.fetchedAt).toBe(1_700_000_030n);
+    expect(raw.lang).toBe("en");
+    expect(raw.burst).toBe(true);
+    const hints = raw.hints;
+    if (!hints) throw new Error("missing hints");
+    expect(hints.located).toBe(true);
+    expect(hints.lat).toBe(48.5);
+    expect(hints.lon).toBe(2.25);
+    expect(hints.precision).toBe(Precision.CITY);
+    expect(hints.themes).toEqual(["PROTEST", "ECON_ENERGY"]);
+    expect(hints.country).toBe("FR");
+    expect(hints.hazard).toBe("flood");
+    expect(hints.magnitude).toBe(5.4);
+    expect(hints.severity).toBe(0.75);
+    expect(hints.eventId).toBe("us7000abcd");
+    expect(hints.magnitudeUnit).toBe("Mw");
+    expect(hints.place).toBe("Paris, France");
+    expect(hints.revision).toBe("1700000030");
+  });
+
+  it("RecordFrame", () => {
+    const frame = load(RecordFrameSchema, "record_frame");
+    expect(frame.subject).toBe("article.raw.priority");
+    expect(frame.msgId).toBe("raw:0123456789abcdef");
+    expect(frame.receivedAtMs).toBe(1_700_000_030_123n);
+    expect(Array.from(frame.payload)).toEqual([1, 2, 3]);
   });
 
   it("Link", () => {

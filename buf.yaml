@@ -1,0 +1,12 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Zero values follow the plan's names: CATEGORY_OTHER, PRECISION_COUNTRY, ...
+    - ENUM_ZERO_VALUE_SUFFIX
+breaking:
+  use:
+    - FILE

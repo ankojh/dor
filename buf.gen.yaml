@@ -1,0 +1,8 @@
+version: v2
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: internal/pb
+    opt: paths=import,module=github.com/ankojh/dor/internal/pb
+  - local: protoc-gen-es
+    out: web/src/gen
+    opt: target=ts

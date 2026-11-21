@@ -1,0 +1,232 @@
+// Dor wire protocol.
+//
+// Field numbers and enum values follow the plan (section 6 "Data model &
+// schemas" and section 7 "Realtime protocol"). Do not renumber or reuse tags:
+// browser tabs and agents may be running older builds.
+//
+// Enum zero values intentionally carry the plan's names (OTHER, COUNTRY,
+// VENUE, ...) even though classic protobuf style suggests an _UNSPECIFIED
+// suffix. The ENUM_ZERO_VALUE_SUFFIX buf lint rule is disabled for that reason.
+syntax = "proto3";
+
+package dor.v1;
+
+option go_package = "github.com/ankojh/dor/internal/pb/dorv1;dorv1";
+
+// Category is the topic of an article or story.
+enum Category {
+  CATEGORY_OTHER = 0;
+  CATEGORY_CONFLICT = 1;
+  CATEGORY_POLITICS = 2;
+  CATEGORY_ECONOMY = 3;
+  CATEGORY_TECH = 4;
+  CATEGORY_CLIMATE = 5;
+  CATEGORY_DISASTER = 6;
+  CATEGORY_HEALTH = 7;
+  CATEGORY_SCIENCE = 8;
+  CATEGORY_SPORTS = 9;
+  CATEGORY_CULTURE = 10;
+}
+
+// Precision says how exactly a location is known.
+enum Precision {
+  PRECISION_COUNTRY = 0;
+  PRECISION_REGION = 1;
+  PRECISION_CITY = 2;
+  PRECISION_STREET = 3;
+  PRECISION_POINT = 4;
+}
+
+// Role is what a place is to an article or story.
+enum Role {
+  ROLE_VENUE = 0;
+  ROLE_ORIGIN = 1;
+  ROLE_PARTY = 2;
+  ROLE_AFFECTED = 3;
+  ROLE_MENTIONED = 4;
+}
+
+// LinkType is the kind of relationship between two stories.
+enum LinkType {
+  LINK_TYPE_CAUSAL = 0;
+  LINK_TYPE_REACTION = 1;
+  LINK_TYPE_THEMATIC = 2;
+}
+
+// Direction says which story acted on the other.
+enum Direction {
+  DIRECTION_A_TO_B = 0;
+  DIRECTION_B_TO_A = 1;
+  DIRECTION_UNCLEAR = 2;
+}
+
+// JoinKind says how an article entered its story.
+enum JoinKind {
+  JOIN_KIND_NEW = 0;    // the article started a new story
+  JOIN_KIND_JOINED = 1; // the article joined an existing story
+}
+
+// Location is one place attached to an article or story.
+message Location {
+  string place_id = 1;
+  string name = 2;
+  float lat = 3;
+  float lon = 4;
+  Precision precision = 5;
+  Role role = 6;
+  float weight = 7;
+}
+
+// Article is the normalized ingest record. The full text is never stored.
+message Article {
+  string id = 1;
+  string source_id = 2;
+  string url = 3;
+  string title = 4;
+  string lede = 5;
+  int64 published_at = 6; // unix seconds
+  string lang = 7;
+  string dateline = 8;
+}
+
+// Story is a cluster of articles about one event.
+// The brief is fetched lazily, so it is not part of this message.
+message Story {
+  string id = 1;
+  string title = 2;
+  Category category = 3;
+  repeated Location locations = 4;
+  uint32 primary = 5; // index into locations
+  uint32 source_count = 6;
+  float heat = 7;
+  int64 first_seen = 8;  // unix seconds
+  int64 updated_at = 9;  // unix seconds
+}
+
+// Link is a typed relationship between two stories, with a < b.
+message Link {
+  string a = 1;
+  string b = 2;
+  LinkType type = 3;
+  Direction dir = 4;
+  float confidence = 5;
+  float strength = 6;
+  int64 updated_at = 7; // unix seconds
+}
+
+// LinkKey identifies a link without its mutable scores.
+message LinkKey {
+  string a = 1;
+  string b = 2;
+}
+
+// AlertHit is a user alert firing for a story.
+message AlertHit {
+  string alert_id = 1;
+  string story_id = 2;
+  string level = 3;    // "new" or "escalated"
+  int64 fired_at = 4;  // unix seconds
+  string title = 5;    // story title at fire time
+  string prompt = 6;   // the alert prompt
+}
+
+// WireRow is one row in the live wire.
+message WireRow {
+  string article_id = 1;
+  string story_id = 2;
+  string title = 3;
+  string source = 4;
+  string place = 5;
+  Category category = 6;
+  int64 at = 7; // unix seconds
+  JoinKind join = 8;
+  map<string, float> prompt_scores = 9;
+}
+
+// Delta is one numbered change pushed to browsers.
+message Delta {
+  uint64 seq = 1;
+  oneof body {
+    Story story_upsert = 2;
+    string story_expire = 3;
+    Link link_upsert = 4;
+    LinkKey link_remove = 5;
+    WireRow wire = 6;
+    AlertHit alert = 7;
+  }
+}
+
+// Snapshot is the full live state a client starts from.
+message Snapshot {
+  uint64 seq = 1;
+  repeated Story stories = 2;
+  repeated Link links = 3;
+  int64 built_at = 4; // unix seconds
+}
+
+// DeltaBatch carries deltas from a snapshot seq onwards.
+message DeltaBatch {
+  repeated Delta deltas = 1;
+}
+
+// Resync tells a client to discard local state and start from a snapshot.
+message Resync {
+  uint64 seq = 1;
+  string reason = 2;
+}
+
+// ServerMessage is the envelope for everything the server sends.
+message ServerMessage {
+  oneof body {
+    Snapshot snapshot = 1;
+    DeltaBatch deltas = 2;
+    Resync resync = 3;
+  }
+}
+
+// Hello is the first client message.
+message Hello {
+  uint64 last_seq = 1;
+  string client_version = 2;
+}
+
+// SetFilters replaces the client's wire filters.
+message SetFilters {
+  repeated Category categories = 1;
+  repeated string regions = 2;
+  uint32 min_sources = 3;
+  repeated string lang = 4;
+}
+
+// SetPrompts replaces the client's prompts. The server backfills 1 h.
+message SetPrompts {
+  repeated string prompts = 1;
+}
+
+// Focus raises prefetch priority for one story.
+message Focus {
+  string story_id = 1;
+}
+
+// GetText asks for lazy text (story briefs and link "why").
+message GetText {
+  repeated string story_ids = 1;
+  repeated LinkKey link_keys = 2;
+}
+
+// Ack acknowledges the last applied delta seq.
+message Ack {
+  uint64 seq = 1;
+}
+
+// ClientMessage is the envelope for everything the client sends.
+message ClientMessage {
+  oneof body {
+    Hello hello = 1;
+    SetFilters set_filters = 2;
+    SetPrompts set_prompts = 3;
+    Focus focus = 4;
+    GetText get_text = 5;
+    Ack ack = 6;
+  }
+}

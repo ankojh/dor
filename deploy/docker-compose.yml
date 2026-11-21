@@ -1,0 +1,75 @@
+name: dor
+
+# Host ports are chosen to avoid the usual local Postgres (5432), Redis (6379)
+# and the Dor gateway (8080). See docs/conventions.md.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_USER: dor
+      POSTGRES_PASSWORD: dor
+      POSTGRES_DB: dor
+    volumes:
+      - dor-pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-vector.sql:ro
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dor -d dor"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # bge-small-en-v1.5, 384 dimensions. The CPU image is amd64-only, so it runs
+  # under Rosetta on Apple Silicon (documented in docs/decisions.md).
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    platform: linux/amd64
+    command: ["--model-id", "BAAI/bge-small-en-v1.5", "--port", "80"]
+    ports:
+      - "127.0.0.1:8090:80"
+    volumes:
+      - dor-hf-cache:/data
+    environment:
+      HF_HOME: /data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 300s
+
+  # Photon is opt-in because even a country index is large and the first start
+  # downloads it. Default region: Andorra (tiny, prebuilt index).
+  #   make dev-photon
+  # Use PHOTON_REGION=france-monacco or another prebuilt region to change it.
+  photon:
+    image: rtuszik/photon-docker:latest
+    profiles: ["photon"]
+    ports:
+      - "127.0.0.1:2322:2322"
+    environment:
+      IMPORT_MODE: db
+      REGION: ${PHOTON_REGION:-andorra}
+      UPDATE_STRATEGY: DISABLED
+      INITIAL_DOWNLOAD: "TRUE"
+      LOG_LEVEL: INFO
+    volumes:
+      - dor-photon-data:/photon/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS 'http://127.0.0.1:2322/api?q=andorra&limit=1' >/dev/null || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 600s
+
+volumes:
+  dor-pgdata:
+  dor-hf-cache:
+  dor-photon-data:

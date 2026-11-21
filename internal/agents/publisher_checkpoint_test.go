@@ -214,10 +214,10 @@ func TestPublisherRootCASFailureLeavesUnreferencedChunks(t *testing.T) {
 	ctx, cancel := durabilityCtx(t)
 	defer cancel()
 	core := newPublisherCore(b, testLogger())
-	if err := core.restore(ctx); err != nil {
+	if err := core.restoreV1(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer core.release(context.Background())
+	defer core.releaseLegacy(context.Background())
 	kv, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		t.Fatal(err)
@@ -269,17 +269,17 @@ func TestPublisherLeaseOnlyRootUpdatesReuseIdenticalChunks(t *testing.T) {
 	ctx, cancel := durabilityCtx(t)
 	defer cancel()
 	core := newPublisherCore(b, testLogger())
-	if err := core.restore(ctx); err != nil {
+	if err := core.restoreV1(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer core.release(context.Background())
+	defer core.releaseLegacy(context.Background())
 	kv, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	cp := largeCheckpoint(t, 505)
-	if err := core.saveCheckpoint(ctx, cp); err != nil {
+	if err := core.saveLegacyCheckpoint(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
 	first := core.checkpoint
@@ -294,7 +294,7 @@ func TestPublisherLeaseOnlyRootUpdatesReuseIdenticalChunks(t *testing.T) {
 		}
 		revisions[key] = entry.Revision()
 	}
-	if err := core.saveCheckpoint(ctx, first); err != nil {
+	if err := core.saveLegacyCheckpoint(ctx, first); err != nil {
 		t.Fatal(err)
 	}
 	second := core.checkpoint
@@ -338,16 +338,16 @@ func TestPublisherChunkReaderOverlapsWriterWithoutMixedGeneration(t *testing.T) 
 	ctx, cancel := durabilityCtx(t)
 	defer cancel()
 	core := newPublisherCore(b, testLogger())
-	if err := core.restore(ctx); err != nil {
+	if err := core.restoreV1(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer core.release(context.Background())
+	defer core.releaseLegacy(context.Background())
 	kv, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := largeCheckpoint(t, 606)
-	if err := core.saveCheckpoint(ctx, old); err != nil {
+	if err := core.saveLegacyCheckpoint(ctx, old); err != nil {
 		t.Fatal(err)
 	}
 	oldRootEntry, err := kv.Get(ctx, publisherCheckpointKey)
@@ -411,15 +411,15 @@ func TestPublisherChunkGCTakeoverRevalidatesRootBeforePurge(t *testing.T) {
 	ctx, cancel := durabilityCtx(t)
 	defer cancel()
 	core := newPublisherCore(b, testLogger())
-	if err := core.restore(ctx); err != nil {
+	if err := core.restoreV1(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer core.release(context.Background())
+	defer core.releaseLegacy(context.Background())
 	kv, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := core.saveCheckpoint(ctx, largeCheckpoint(t, 808)); err != nil {
+	if err := core.saveLegacyCheckpoint(ctx, largeCheckpoint(t, 808)); err != nil {
 		t.Fatal(err)
 	}
 	rootEntry, err := kv.Get(ctx, publisherCheckpointKey)

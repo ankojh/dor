@@ -18,6 +18,7 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 func durabilityBus(t *testing.T) *bus.Bus {
@@ -92,6 +93,9 @@ func TestPublisherSnapshotOverwriteGuardAndPublicProjection(t *testing.T) {
 	if err := c.flush(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.writeSnapshot(ctx); err != nil {
+		t.Fatalf("write public snapshot cache: %v", err)
+	}
 	kv, err := b.KV(ctx, bus.KVBucketLiveState)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +105,7 @@ func TestPublisherSnapshotOverwriteGuardAndPublicProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snap dorv1.Snapshot
-	if err := proto.Unmarshal(entry.Value(), &snap); err != nil {
+	if err := live.UnmarshalSnapshot(entry.Value(), &snap); err != nil {
 		t.Fatal(err)
 	}
 	if len(snap.Links) != 1 || snap.Links[0].B != "strong" {
@@ -119,10 +123,11 @@ func TestPublisherSnapshotOverwriteGuardAndPublicProjection(t *testing.T) {
 		t.Fatalf("wire longitude %.8f, want %.8f", got, wantLon)
 	}
 
-	c.mu.Lock()
-	c.stories = make(map[string]*dorv1.Story)
-	c.mu.Unlock()
-	if err := c.writeSnapshot(ctx); err == nil {
+	empty := newPublisherCore(b, testLogger())
+	empty.storage = c.storage
+	empty.committed = c.committed.Clone()
+	empty.committed.Stories = map[string]*dorv1.Story{}
+	if err := empty.writeSnapshot(ctx); err == nil {
 		t.Fatal("expected refusal to replace nonempty snapshot with empty state")
 	}
 	entry, err = kv.Get(ctx, bus.KVLiveStateSnapshotKey)
@@ -130,7 +135,7 @@ func TestPublisherSnapshotOverwriteGuardAndPublicProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var after dorv1.Snapshot
-	if err := proto.Unmarshal(entry.Value(), &after); err != nil {
+	if err := live.UnmarshalSnapshot(entry.Value(), &after); err != nil {
 		t.Fatal(err)
 	}
 	if len(after.Stories) != 1 || after.Stories[0].Id != "retained" {
@@ -179,7 +184,7 @@ func TestPublisherFailedPublishRetriesImmutableBatchAndDelaysAck(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-ctx.Done():
-		t.Fatal("input acknowledgement did not follow snapshot commit")
+		t.Fatal("input acknowledgement did not follow authoritative journal commit")
 	}
 	if len(payloads) != 2 || !reflect.DeepEqual(payloads[0], payloads[1]) {
 		t.Fatalf("retry payload changed: %x / %x", payloads[0], payloads[1])
@@ -247,25 +252,9 @@ func TestPublisherRestartsSavedPendingBatchAndFencesStaleOwner(t *testing.T) {
 		t.Fatalf("recovered seq=%d, want 1", fresh.seq)
 	}
 
-	// The former owner cannot commit after a successful lease takeover.
-	kv, err := b.KV(ctx, bus.KVBucketPublisher)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry, err := kv.Get(ctx, publisherCheckpointKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cp publisherCheckpoint
-	if err := decodePublisherCheckpoint(entry.Value(), &cp); err != nil {
-		t.Fatal(err)
-	}
-	cp.LeaseUntil = time.Now().Add(-time.Second).UnixNano()
-	data, err := encodePublisherCheckpoint(cp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := kv.Update(ctx, publisherCheckpointKey, data, entry.Revision()); err != nil {
+	// The former owner cannot renew after a successful lease takeover. Releasing
+	// the store lease leaves the v2 root and journal authoritative.
+	if err := fresh.storage.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
 	takeover := newPublisherCore(b, testLogger())
@@ -631,9 +620,9 @@ func TestPublisherConsumersSustainFiftyArticlesPerSecondAndDrain(t *testing.T) {
 	t.Logf("publisher input rate %.1f articles/s over %s; max combined consumer lag=%d; final lag=%d", publishedRate, publishedDuration, maxLag, lag)
 }
 
-func TestPublisherOversizedSnapshotPreservesLastGoodValue(t *testing.T) {
+func TestPublisherOversizedSnapshotCacheDoesNotBlockAuthoritativeRecovery(t *testing.T) {
 	b := durabilityBus(t)
-	ctx, cancel := durabilityCtx(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	c := newPublisherCore(b, testLogger())
 	if err := c.restore(ctx); err != nil {
@@ -644,33 +633,125 @@ func TestPublisherOversizedSnapshotPreservesLastGoodValue(t *testing.T) {
 	if err := c.flush(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.writeSnapshot(ctx); err != nil {
+		t.Fatalf("write baseline public cache: %v", err)
+	}
+	liveKV, err := b.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastGood, err := liveKV.Get(ctx, bus.KVLiveStateSnapshotKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	rng := mathrand.New(mathrand.NewSource(81))
-	title := make([]byte, 1800*1024)
-	for i := range title {
-		title[i] = alphabet[rng.Intn(len(alphabet))]
+	const (
+		storyCount = 800
+		perBatch   = 50
+		titleSize  = 2048
+	)
+	for start := 0; start < storyCount; start += perBatch {
+		var lastAck chan error
+		for i := start; i < min(start+perBatch, storyCount); i++ {
+			title := make([]byte, titleSize)
+			for j := range title {
+				title[j] = alphabet[rng.Intn(len(alphabet))]
+			}
+			story := &dorv1.Story{Id: fmt.Sprintf("s-%04d", i), Title: string(title)}
+			if i == storyCount-1 {
+				lastAck = make(chan error, 1)
+				go func() { lastAck <- c.accept(ctx, func() { c.onStory(story) }) }()
+				waitFor(t, "last story admission", func() bool {
+					c.mu.Lock()
+					defer c.mu.Unlock()
+					return c.pending["story:"+story.Id] != nil
+				})
+			} else {
+				c.onStory(story)
+			}
+		}
+		if err := c.flush(ctx); err != nil {
+			t.Fatalf("commit bounded story group %d: %v", start/perBatch, err)
+		}
+		if lastAck != nil {
+			select {
+			case err := <-lastAck:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("input acknowledgement did not follow authoritative commit")
+			}
+		}
 	}
-	c.mu.Lock()
-	c.stories["keep"] = &dorv1.Story{Id: "keep", Title: string(title)}
-	c.mu.Unlock()
-	if err := c.writeSnapshot(ctx); err == nil {
-		t.Fatal("expected oversized snapshot to be rejected")
+	if err := c.writeSnapshot(ctx); err != nil {
+		t.Fatalf("chunk oversized public cache: %v", err)
 	}
-	kv, err := b.KV(ctx, bus.KVBucketLiveState)
+	chunkedCache, err := liveKV.Get(ctx, bus.KVLiveStateSnapshotKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := kv.Get(ctx, bus.KVLiveStateSnapshotKey)
+	if chunkedCache.Revision() == lastGood.Revision() {
+		t.Fatalf("oversized snapshot cache was not installed; live-state revision stayed %d", lastGood.Revision())
+	}
+	decoded, err := c.storage.DecodeCache(ctx, chunkedCache.Value())
+	if err != nil {
+		t.Fatalf("decode chunked public cache: %v", err)
+	}
+	if decoded.Seq != storyCount+1 || len(decoded.Stories) != storyCount+1 {
+		t.Fatalf("chunked cache seq=%d stories=%d, want seq=%d stories=%d", decoded.Seq, len(decoded.Stories), storyCount+1, storyCount+1)
+	}
+	publisherKV, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got dorv1.Snapshot
-	if err := live.UnmarshalSnapshot(entry.Value(), &got); err != nil {
+	served, err := publication.Snapshot(ctx, publisherKV, liveKV)
+	if err != nil {
+		t.Fatalf("snapshot read from chunked cache/authority: %v", err)
+	}
+	if served.Seq != storyCount+1 || len(served.Stories) != storyCount+1 {
+		t.Fatalf("snapshot read from chunked cache/authority: seq/stories=%d/%d", served.Seq, len(served.Stories))
+	}
+	// A transient cache write failure is independent of an already committed
+	// journal record and cannot hold up its input barrier.
+	short, stop := context.WithCancel(ctx)
+	stop()
+	if err := c.writeSnapshot(short); err == nil {
+		t.Fatal("expected canceled public cache write to fail")
+	}
+	unchanged, err := liveKV.Get(ctx, bus.KVLiveStateSnapshotKey)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Seq != 1 || len(got.Stories) != 1 || got.Stories[0].Title != "known good" {
-		t.Fatalf("oversized write replaced last good snapshot: seq=%d stories=%d title=%q", got.Seq, len(got.Stories), got.Stories[0].Title)
+	if unchanged.Revision() != chunkedCache.Revision() {
+		t.Fatalf("failed transient cache write changed revision %d -> %d", chunkedCache.Revision(), unchanged.Revision())
+	}
+
+	if err := c.release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := liveKV.Update(ctx, bus.KVLiveStateSnapshotKey, []byte("corrupt cache"), unchanged.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	served, err = publication.Snapshot(ctx, publisherKV, liveKV)
+	if err != nil {
+		t.Fatalf("corrupt cache prevented authority fallback: %v", err)
+	}
+	if served.Seq != storyCount+1 || len(served.Stories) != storyCount+1 {
+		t.Fatalf("corrupt cache authority fallback: seq/stories=%d/%d", served.Seq, len(served.Stories))
+	}
+	recovered := newPublisherCore(b, testLogger())
+	if err := recovered.restore(ctx); err != nil {
+		t.Fatalf("restore from authoritative journal with corrupt/oversized cache: %v", err)
+	}
+	defer recovered.release(context.Background())
+	if recovered.seq != storyCount+1 || len(recovered.stories) != storyCount+1 {
+		t.Fatalf("authoritative recovery seq=%d stories=%d, want seq=%d stories=%d", recovered.seq, len(recovered.stories), storyCount+1, storyCount+1)
+	}
+	if got := recovered.stories[fmt.Sprintf("s-%04d", storyCount-1)]; got == nil || len(got.Title) != titleSize {
+		t.Fatalf("last committed story missing or truncated: %v", got)
 	}
 }
 
@@ -700,26 +781,9 @@ func TestPublisherExpectedLastSequenceFencesDelayedOldOwner(t *testing.T) {
 	}
 
 	// Simulate lease expiry/takeover while the old owner is paused after its
-	// checkpoint reservation but before its NATS publish.
-	kv, err := b.KV(ctx, bus.KVBucketPublisher)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry, err := kv.Get(ctx, publisherCheckpointKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cp publisherCheckpoint
-	if err := decodePublisherCheckpoint(entry.Value(), &cp); err != nil {
-		t.Fatal(err)
-	}
-	cp.Owner, cp.LeaseUntil, cp.Pending = "", 0, nil
-	cp.PendingRevisions, cp.PendingScores = nil, nil
-	data, err := encodePublisherCheckpoint(cp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := kv.Update(ctx, publisherCheckpointKey, data, entry.Revision()); err != nil {
+	// journal reservation but before its NATS publish. Releasing the lease
+	// preserves the immutable pending record for the successor to settle.
+	if err := old.storage.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -730,7 +794,7 @@ func TestPublisherExpectedLastSequenceFencesDelayedOldOwner(t *testing.T) {
 	defer current.release(context.Background())
 	current.onStory(&dorv1.Story{Id: "new", Title: "current owner output"})
 	if err := current.flush(ctx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("successor could not settle inherited pending record: %v", err)
 	}
 	close(releasePublish)
 	select {
@@ -741,6 +805,9 @@ func TestPublisherExpectedLastSequenceFencesDelayedOldOwner(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("delayed stale owner did not return")
 	}
+	if err := current.flush(ctx); err != nil {
+		t.Fatalf("successor could not publish newer output after inherited record: %v", err)
+	}
 
 	stream, err := b.StreamNamed(ctx, bus.StreamDelta)
 	if err != nil {
@@ -750,19 +817,21 @@ func TestPublisherExpectedLastSequenceFencesDelayedOldOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.State.LastSeq != 1 {
-		t.Fatalf("DELTA stream last sequence=%d, want only current-owner publication at 1", info.State.LastSeq)
+	if info.State.LastSeq != 2 {
+		t.Fatalf("DELTA stream last sequence=%d, want inherited pending then successor output", info.State.LastSeq)
 	}
-	msg, err := stream.GetMsg(ctx, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var batch dorv1.DeltaBatch
-	if err := proto.Unmarshal(msg.Data, &batch); err != nil {
-		t.Fatal(err)
-	}
-	if len(batch.Deltas) != 1 || batch.Deltas[0].GetStoryUpsert().Id != "new" {
-		t.Fatalf("stale output occupies sequence 1: %v", &batch)
+	for seq, want := range map[uint64]string{1: "old", 2: "new"} {
+		msg, err := stream.GetMsg(ctx, seq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var batch dorv1.DeltaBatch
+		if err := proto.Unmarshal(msg.Data, &batch); err != nil {
+			t.Fatal(err)
+		}
+		if len(batch.Deltas) != 1 || batch.Deltas[0].GetStoryUpsert().Id != want {
+			t.Fatalf("DELTA sequence %d contains %v, want story %q", seq, &batch, want)
+		}
 	}
 }
 

@@ -17,17 +17,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	dorconfig "github.com/ankojh/dor/config"
 	"github.com/ankojh/dor/internal/agents"
-	"github.com/ankojh/dor/internal/budget"
 	"github.com/ankojh/dor/internal/bus"
-	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/fetch"
 	"github.com/ankojh/dor/internal/gateway"
-	"github.com/ankojh/dor/internal/llm"
+	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/record"
-	"github.com/ankojh/dor/internal/textsvc"
-
 	"github.com/ankojh/dor/internal/store"
 )
 
@@ -64,6 +59,9 @@ type config struct {
 	modelsConfig     string
 	thresholdsConfig string
 	budgetConfig     string
+	geonamesDir      string
+	photonURL        string
+	teiURL           string
 	relationShards   int
 	relationShard    int
 	relationDebounce time.Duration
@@ -102,6 +100,9 @@ func runCommand(args []string) error {
 		modelsConfig:     envOr("DOR_MODELS_CONFIG", "config/models.yaml"),
 		thresholdsConfig: envOr("DOR_THRESHOLDS_CONFIG", "config/thresholds.yaml"),
 		budgetConfig:     envOr("DOR_BUDGET_CONFIG", "config/budget.yaml"),
+		geonamesDir:      envOr("DOR_GEONAMES_DIR", geo.DefaultDir),
+		photonURL:        envOr("DOR_PHOTON_URL", ""),
+		teiURL:           envOr("DOR_TEI_URL", "http://127.0.0.1:8090"),
 		relationShards:   envIntOr("DOR_RELATION_SHARDS", 3),
 		relationShard:    envIntOr("DOR_RELATION_SHARD", -1),
 		relationDebounce: envDurationOr("DOR_RELATION_DEBOUNCE", 3*time.Second),
@@ -138,6 +139,9 @@ func runCommand(args []string) error {
 	fs.StringVar(&cfg.modelsConfig, "models-config", cfg.modelsConfig, "model pins and price config")
 	fs.StringVar(&cfg.thresholdsConfig, "thresholds-config", cfg.thresholdsConfig, "decision thresholds")
 	fs.StringVar(&cfg.budgetConfig, "budget-config", cfg.budgetConfig, "daily/per-API budget limits")
+	fs.StringVar(&cfg.geonamesDir, "geonames-dir", cfg.geonamesDir, "GeoNames cache directory")
+	fs.StringVar(&cfg.photonURL, "photon-url", cfg.photonURL, "Photon base URL; empty disables precise geocoding")
+	fs.StringVar(&cfg.teiURL, "tei-url", cfg.teiURL, "TEI embedding base URL; empty disables remote embeddings")
 	fs.IntVar(&cfg.relationShards, "relation-shards", cfg.relationShards, "number of relation-judge shards")
 	fs.IntVar(&cfg.relationShard, "relation-shard", cfg.relationShard, "run only this relation shard (0-based); -1 runs all")
 	fs.DurationVar(&cfg.relationDebounce, "relation-debounce", cfg.relationDebounce, "per-story relation debounce")
@@ -265,86 +269,20 @@ func runCommand(args []string) error {
 		}()
 	}
 
-	modelsCfg := dorconfig.DefaultModels()
-	if m, err := dorconfig.LoadModels(cfg.modelsConfig); err != nil {
-		logger.Warn("models config unavailable; using defaults", "err", err)
-	} else {
-		modelsCfg = m
+	enrichmentDeps := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	if dbStore != nil {
+		enrichmentDeps.StoryIndex = dbStore
 	}
-	thresholds := dorconfig.DefaultThresholds()
-	if t, err := dorconfig.LoadThresholds(cfg.thresholdsConfig); err != nil {
-		logger.Warn("thresholds config unavailable; using defaults", "err", err)
-	} else {
-		thresholds = t
+	enrichmentDeps.RelationShards = cfg.relationShards
+	enrichmentDeps.RelationShard = cfg.relationShard
+	enrichmentDeps.RelationDebounce = cfg.relationDebounce
+	enrichmentDeps.EditorDebounce = cfg.editorDebounce
+	if dbStore != nil {
+		seedSources(ctx, dbStore, cfg.sourcesFile, logger)
 	}
-	budgetCfg := dorconfig.DefaultBudget()
-	if bc, err := dorconfig.LoadBudget(cfg.budgetConfig); err != nil {
-		logger.Warn("budget config unavailable; using defaults", "err", err)
-	} else {
-		budgetCfg = bc
-	}
-	budgetMgr := budget.NewMemory(budgetCfg)
-	if tokenKV, err := b.KV(ctx, bus.KVBucketBudgets); err != nil {
-		logger.Warn("budget KV unavailable; using in-memory budgets", "err", err)
-	} else if spendKV, err := b.KV(ctx, bus.KVBucketSpend); err != nil {
-		logger.Warn("spend KV unavailable; using in-memory budgets", "err", err)
-	} else {
-		budgetMgr = budget.New(budget.NewKVStore(tokenKV), budget.NewKVStore(spendKV), budgetCfg)
-	}
+	textSvc := enrichmentDeps.Text
 
-	var jevClient *decide.Client
-	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		c, err := decide.NewClientFromModels(modelsCfg, os.Getenv("DOR_JEV_BASE_URL"), key, budgetMgr)
-		if err != nil {
-			logger.Warn("jev client disabled", "err", err)
-		} else {
-			jevClient = c
-		}
-	} else {
-		logger.Info("jev client disabled: OPENROUTER_API_KEY is not set")
-	}
-	var claudeClient *llm.Client
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		c, err := llm.New(llm.Config{
-			APIKey:     key,
-			HaikuModel: modelsCfg.Claude.HaikuModel,
-			OpusModel:  modelsCfg.Claude.OpusModel,
-			Effort:     modelsCfg.Claude.Effort,
-			Timeout:    modelsCfg.Claude.Timeout.Std(),
-			MaxRetries: modelsCfg.Claude.MaxRetries,
-			MinBackoff: modelsCfg.Claude.MinBackoff.Std(),
-			MaxBackoff: modelsCfg.Claude.MaxBackoff.Std(),
-			Price:      modelsCfg.Claude.Price,
-			Logger:     logger,
-		}, budgetMgr)
-		if err != nil {
-			logger.Warn("claude client disabled", "err", err)
-		} else {
-			claudeClient = c
-		}
-	} else {
-		logger.Info("claude client disabled: ANTHROPIC_API_KEY is not set")
-	}
-	var completer textsvc.Completer
-	if claudeClient != nil {
-		completer = claudeClient
-	}
-	textSvc := textsvc.New(b, logger, completer)
-	var decider agents.RelateDecider
-	if jevClient != nil {
-		decider = jevClient
-	}
-
-	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, agents.Deps{
-		ArticleSink:      articleSink,
-		Decider:          decider,
-		Text:             textSvc,
-		Thresholds:       thresholds,
-		RelationShards:   cfg.relationShards,
-		RelationShard:    cfg.relationShard,
-		RelationDebounce: cfg.relationDebounce,
-		EditorDebounce:   cfg.editorDebounce,
-	})
+	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, enrichmentDeps)
 	if err != nil {
 		return err
 	}

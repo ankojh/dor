@@ -10,6 +10,9 @@ import (
 
 	"github.com/ankojh/dor/config"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/decide"
+	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/llm"
 	"github.com/ankojh/dor/internal/textsvc"
 )
 
@@ -54,12 +57,29 @@ func EchoOutputMsgID(inputID string) string {
 // always registered; --agents selects what runs.
 type Deps struct {
 	ArticleSink ArticleSink
-	// Decider is the jev client. Nil means similarity-only (unverified) links.
-	Decider RelateDecider
+	StorySink   StorySink
+
+	// Gazetteer and Photon are optional; the plotter marks a deterministic
+	// fallback when either is absent.
+	Gazetteer *geo.Gazetteer
+	Photon    *geo.Photon
+
+	// Decider is shared by the plotter, classifier and relation judge. Nil
+	// means the deterministic fallbacks (never a fake model answer).
+	Decider  decide.Decider
+	Enricher *llm.Client
 	// Text is the brief/why service. Nil gets a fallback-only instance.
-	Text *textsvc.Service
-	// Thresholds tunes the relation gate. Zero uses the plan defaults.
+	Text       *textsvc.Service
 	Thresholds config.Thresholds
+
+	// Embedding is the remote TEI client; nil or an error produces a degraded
+	// deterministic vector.
+	Embedding EmbeddingClient
+
+	// StoryIndex is the optional pgvector ANN candidate source. Nil uses the
+	// loaded in-memory 48 h story map.
+	StoryIndex StoryIndex
+
 	// RelationShards and RelationShard partition story shards across replicas.
 	// Shard -1 runs every shard in one process.
 	RelationShards   int
@@ -105,6 +125,35 @@ func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *sl
 	}
 	if err := registry.Register(normalize); err != nil {
 
+		return nil, err
+	}
+
+	plot, err := NewPlotter(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(plot); err != nil {
+		return nil, err
+	}
+	classify, err := NewClassifier(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(classify); err != nil {
+		return nil, err
+	}
+	embed, err := NewEmbedder(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(embed); err != nil {
+		return nil, err
+	}
+	cluster, err := NewClusterer(b, metrics, log, deps)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(cluster); err != nil {
 		return nil, err
 	}
 

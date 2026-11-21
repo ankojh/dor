@@ -536,7 +536,8 @@ type Article struct {
 	// these only save it work and feed hazard heat.
 	Hints *RawHints `protobuf:"bytes,9,opt,name=hints,proto3" json:"hints,omitempty"`
 	Burst bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
-	// Set on article.placed: the story the clusterer assigned and how it joined.
+	// Set only on article.placed; clean articles leave these at their zero
+	// values. Append-only so the existing publisher can still decode Article.
 	StoryId       string   `protobuf:"bytes,11,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
 	Join          JoinKind `protobuf:"varint,12,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -657,6 +658,295 @@ func (x *Article) GetJoin() JoinKind {
 	return JoinKind_JOIN_KIND_NEW
 }
 
+// PlacedArticle is the plotter's output on article.place. It carries the
+// article snapshot so the clusterer can join without a second read.
+type PlacedArticle struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Article       *Article               `protobuf:"bytes,1,opt,name=article,proto3" json:"article,omitempty"`
+	Locations     []*Location            `protobuf:"bytes,2,rep,name=locations,proto3" json:"locations,omitempty"`
+	Primary       uint32                 `protobuf:"varint,3,opt,name=primary,proto3" json:"primary,omitempty"` // index into locations, 0 when global
+	MultiRegion   bool                   `protobuf:"varint,4,opt,name=multi_region,json=multiRegion,proto3" json:"multi_region,omitempty"`
+	Fallback      bool                   `protobuf:"varint,5,opt,name=fallback,proto3" json:"fallback,omitempty"` // a fallback path was used
+	Degraded      bool                   `protobuf:"varint,6,opt,name=degraded,proto3" json:"degraded,omitempty"` // no model/service; deterministic result only
+	Backend       string                 `protobuf:"bytes,7,opt,name=backend,proto3" json:"backend,omitempty"`    // jev, claude, gazetteer, hints, none
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlacedArticle) Reset() {
+	*x = PlacedArticle{}
+	mi := &file_dor_v1_dor_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlacedArticle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlacedArticle) ProtoMessage() {}
+
+func (x *PlacedArticle) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlacedArticle.ProtoReflect.Descriptor instead.
+func (*PlacedArticle) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PlacedArticle) GetArticle() *Article {
+	if x != nil {
+		return x.Article
+	}
+	return nil
+}
+
+func (x *PlacedArticle) GetLocations() []*Location {
+	if x != nil {
+		return x.Locations
+	}
+	return nil
+}
+
+func (x *PlacedArticle) GetPrimary() uint32 {
+	if x != nil {
+		return x.Primary
+	}
+	return 0
+}
+
+func (x *PlacedArticle) GetMultiRegion() bool {
+	if x != nil {
+		return x.MultiRegion
+	}
+	return false
+}
+
+func (x *PlacedArticle) GetFallback() bool {
+	if x != nil {
+		return x.Fallback
+	}
+	return false
+}
+
+func (x *PlacedArticle) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *PlacedArticle) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
+// ClassifiedArticle is the classifier's output on article.class.
+type ClassifiedArticle struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Article       *Article               `protobuf:"bytes,1,opt,name=article,proto3" json:"article,omitempty"`
+	Category      Category               `protobuf:"varint,2,opt,name=category,proto3,enum=dor.v1.Category" json:"category,omitempty"`
+	Confidence    float32                `protobuf:"fixed32,3,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Accepted      bool                   `protobuf:"varint,4,opt,name=accepted,proto3" json:"accepted,omitempty"` // passed the configured threshold
+	Fallback      bool                   `protobuf:"varint,5,opt,name=fallback,proto3" json:"fallback,omitempty"`
+	Degraded      bool                   `protobuf:"varint,6,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	Backend       string                 `protobuf:"bytes,7,opt,name=backend,proto3" json:"backend,omitempty"`
+	Lang          string                 `protobuf:"bytes,8,opt,name=lang,proto3" json:"lang,omitempty"`
+	Entities      []string               `protobuf:"bytes,9,rep,name=entities,proto3" json:"entities,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClassifiedArticle) Reset() {
+	*x = ClassifiedArticle{}
+	mi := &file_dor_v1_dor_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClassifiedArticle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClassifiedArticle) ProtoMessage() {}
+
+func (x *ClassifiedArticle) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClassifiedArticle.ProtoReflect.Descriptor instead.
+func (*ClassifiedArticle) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ClassifiedArticle) GetArticle() *Article {
+	if x != nil {
+		return x.Article
+	}
+	return nil
+}
+
+func (x *ClassifiedArticle) GetCategory() Category {
+	if x != nil {
+		return x.Category
+	}
+	return Category_CATEGORY_OTHER
+}
+
+func (x *ClassifiedArticle) GetConfidence() float32 {
+	if x != nil {
+		return x.Confidence
+	}
+	return 0
+}
+
+func (x *ClassifiedArticle) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *ClassifiedArticle) GetFallback() bool {
+	if x != nil {
+		return x.Fallback
+	}
+	return false
+}
+
+func (x *ClassifiedArticle) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *ClassifiedArticle) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
+func (x *ClassifiedArticle) GetLang() string {
+	if x != nil {
+		return x.Lang
+	}
+	return ""
+}
+
+func (x *ClassifiedArticle) GetEntities() []string {
+	if x != nil {
+		return x.Entities
+	}
+	return nil
+}
+
+// EmbeddedArticle is the embedder's output on article.vec.
+type EmbeddedArticle struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Article  *Article               `protobuf:"bytes,1,opt,name=article,proto3" json:"article,omitempty"`
+	Vector   []float32              `protobuf:"fixed32,2,rep,packed,name=vector,proto3" json:"vector,omitempty"` // 384-d
+	Model    string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	Degraded bool                   `protobuf:"varint,4,opt,name=degraded,proto3" json:"degraded,omitempty"` // deterministic hash fallback, not TEI
+	// Set on article.placed: the story the clusterer assigned and how it joined.
+	StoryId       string   `protobuf:"bytes,11,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
+	Join          JoinKind `protobuf:"varint,12,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EmbeddedArticle) Reset() {
+	*x = EmbeddedArticle{}
+	mi := &file_dor_v1_dor_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EmbeddedArticle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EmbeddedArticle) ProtoMessage() {}
+
+func (x *EmbeddedArticle) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EmbeddedArticle.ProtoReflect.Descriptor instead.
+func (*EmbeddedArticle) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *EmbeddedArticle) GetArticle() *Article {
+	if x != nil {
+		return x.Article
+	}
+	return nil
+}
+
+func (x *EmbeddedArticle) GetVector() []float32 {
+	if x != nil {
+		return x.Vector
+	}
+	return nil
+}
+
+func (x *EmbeddedArticle) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *EmbeddedArticle) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *EmbeddedArticle) GetStoryId() string {
+	if x != nil {
+		return x.StoryId
+	}
+	return ""
+}
+
+func (x *EmbeddedArticle) GetJoin() JoinKind {
+	if x != nil {
+		return x.Join
+	}
+	return JoinKind_JOIN_KIND_NEW
+}
+
 // Story is a cluster of articles about one event.
 // The brief is fetched lazily, so it is not part of this message.
 type Story struct {
@@ -676,7 +966,7 @@ type Story struct {
 
 func (x *Story) Reset() {
 	*x = Story{}
-	mi := &file_dor_v1_dor_proto_msgTypes[2]
+	mi := &file_dor_v1_dor_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +978,7 @@ func (x *Story) String() string {
 func (*Story) ProtoMessage() {}
 
 func (x *Story) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[2]
+	mi := &file_dor_v1_dor_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +991,7 @@ func (x *Story) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Story.ProtoReflect.Descriptor instead.
 func (*Story) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{2}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Story) GetId() string {
@@ -786,7 +1076,7 @@ type Link struct {
 
 func (x *Link) Reset() {
 	*x = Link{}
-	mi := &file_dor_v1_dor_proto_msgTypes[3]
+	mi := &file_dor_v1_dor_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -798,7 +1088,7 @@ func (x *Link) String() string {
 func (*Link) ProtoMessage() {}
 
 func (x *Link) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[3]
+	mi := &file_dor_v1_dor_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -811,7 +1101,7 @@ func (x *Link) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Link.ProtoReflect.Descriptor instead.
 func (*Link) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{3}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Link) GetA() string {
@@ -881,7 +1171,7 @@ type LinkKey struct {
 
 func (x *LinkKey) Reset() {
 	*x = LinkKey{}
-	mi := &file_dor_v1_dor_proto_msgTypes[4]
+	mi := &file_dor_v1_dor_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -893,7 +1183,7 @@ func (x *LinkKey) String() string {
 func (*LinkKey) ProtoMessage() {}
 
 func (x *LinkKey) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[4]
+	mi := &file_dor_v1_dor_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -906,7 +1196,7 @@ func (x *LinkKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkKey.ProtoReflect.Descriptor instead.
 func (*LinkKey) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{4}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *LinkKey) GetA() string {
@@ -938,7 +1228,7 @@ type AlertHit struct {
 
 func (x *AlertHit) Reset() {
 	*x = AlertHit{}
-	mi := &file_dor_v1_dor_proto_msgTypes[5]
+	mi := &file_dor_v1_dor_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -950,7 +1240,7 @@ func (x *AlertHit) String() string {
 func (*AlertHit) ProtoMessage() {}
 
 func (x *AlertHit) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[5]
+	mi := &file_dor_v1_dor_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -963,7 +1253,7 @@ func (x *AlertHit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlertHit.ProtoReflect.Descriptor instead.
 func (*AlertHit) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{5}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *AlertHit) GetAlertId() string {
@@ -1026,7 +1316,7 @@ type WireRow struct {
 
 func (x *WireRow) Reset() {
 	*x = WireRow{}
-	mi := &file_dor_v1_dor_proto_msgTypes[6]
+	mi := &file_dor_v1_dor_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1038,7 +1328,7 @@ func (x *WireRow) String() string {
 func (*WireRow) ProtoMessage() {}
 
 func (x *WireRow) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[6]
+	mi := &file_dor_v1_dor_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1051,7 +1341,7 @@ func (x *WireRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WireRow.ProtoReflect.Descriptor instead.
 func (*WireRow) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{6}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *WireRow) GetArticleId() string {
@@ -1136,7 +1426,7 @@ type Delta struct {
 
 func (x *Delta) Reset() {
 	*x = Delta{}
-	mi := &file_dor_v1_dor_proto_msgTypes[7]
+	mi := &file_dor_v1_dor_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1148,7 +1438,7 @@ func (x *Delta) String() string {
 func (*Delta) ProtoMessage() {}
 
 func (x *Delta) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[7]
+	mi := &file_dor_v1_dor_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1161,7 +1451,7 @@ func (x *Delta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Delta.ProtoReflect.Descriptor instead.
 func (*Delta) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{7}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Delta) GetSeq() uint64 {
@@ -1289,7 +1579,7 @@ type Snapshot struct {
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_dor_v1_dor_proto_msgTypes[8]
+	mi := &file_dor_v1_dor_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1301,7 +1591,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[8]
+	mi := &file_dor_v1_dor_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1314,7 +1604,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{8}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Snapshot) GetSeq() uint64 {
@@ -1362,7 +1652,7 @@ type DeltaBatch struct {
 
 func (x *DeltaBatch) Reset() {
 	*x = DeltaBatch{}
-	mi := &file_dor_v1_dor_proto_msgTypes[9]
+	mi := &file_dor_v1_dor_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1374,7 +1664,7 @@ func (x *DeltaBatch) String() string {
 func (*DeltaBatch) ProtoMessage() {}
 
 func (x *DeltaBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[9]
+	mi := &file_dor_v1_dor_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1387,7 +1677,7 @@ func (x *DeltaBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeltaBatch.ProtoReflect.Descriptor instead.
 func (*DeltaBatch) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{9}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DeltaBatch) GetDeltas() []*Delta {
@@ -1408,7 +1698,7 @@ type Resync struct {
 
 func (x *Resync) Reset() {
 	*x = Resync{}
-	mi := &file_dor_v1_dor_proto_msgTypes[10]
+	mi := &file_dor_v1_dor_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1420,7 +1710,7 @@ func (x *Resync) String() string {
 func (*Resync) ProtoMessage() {}
 
 func (x *Resync) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[10]
+	mi := &file_dor_v1_dor_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1433,7 +1723,7 @@ func (x *Resync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resync.ProtoReflect.Descriptor instead.
 func (*Resync) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{10}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Resync) GetSeq() uint64 {
@@ -1465,7 +1755,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_dor_v1_dor_proto_msgTypes[11]
+	mi := &file_dor_v1_dor_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1477,7 +1767,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[11]
+	mi := &file_dor_v1_dor_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1490,7 +1780,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{11}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ServerMessage) GetBody() isServerMessage_Body {
@@ -1560,7 +1850,7 @@ type Hello struct {
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_dor_v1_dor_proto_msgTypes[12]
+	mi := &file_dor_v1_dor_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1572,7 +1862,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[12]
+	mi := &file_dor_v1_dor_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1585,7 +1875,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{12}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Hello) GetLastSeq() uint64 {
@@ -1615,7 +1905,7 @@ type SetFilters struct {
 
 func (x *SetFilters) Reset() {
 	*x = SetFilters{}
-	mi := &file_dor_v1_dor_proto_msgTypes[13]
+	mi := &file_dor_v1_dor_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1627,7 +1917,7 @@ func (x *SetFilters) String() string {
 func (*SetFilters) ProtoMessage() {}
 
 func (x *SetFilters) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[13]
+	mi := &file_dor_v1_dor_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1640,7 +1930,7 @@ func (x *SetFilters) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetFilters.ProtoReflect.Descriptor instead.
 func (*SetFilters) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{13}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SetFilters) GetCategories() []Category {
@@ -1681,7 +1971,7 @@ type SetPrompts struct {
 
 func (x *SetPrompts) Reset() {
 	*x = SetPrompts{}
-	mi := &file_dor_v1_dor_proto_msgTypes[14]
+	mi := &file_dor_v1_dor_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1693,7 +1983,7 @@ func (x *SetPrompts) String() string {
 func (*SetPrompts) ProtoMessage() {}
 
 func (x *SetPrompts) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[14]
+	mi := &file_dor_v1_dor_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1706,7 +1996,7 @@ func (x *SetPrompts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPrompts.ProtoReflect.Descriptor instead.
 func (*SetPrompts) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{14}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SetPrompts) GetPrompts() []string {
@@ -1726,7 +2016,7 @@ type Focus struct {
 
 func (x *Focus) Reset() {
 	*x = Focus{}
-	mi := &file_dor_v1_dor_proto_msgTypes[15]
+	mi := &file_dor_v1_dor_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1738,7 +2028,7 @@ func (x *Focus) String() string {
 func (*Focus) ProtoMessage() {}
 
 func (x *Focus) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[15]
+	mi := &file_dor_v1_dor_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1751,7 +2041,7 @@ func (x *Focus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Focus.ProtoReflect.Descriptor instead.
 func (*Focus) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{15}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Focus) GetStoryId() string {
@@ -1772,7 +2062,7 @@ type GetText struct {
 
 func (x *GetText) Reset() {
 	*x = GetText{}
-	mi := &file_dor_v1_dor_proto_msgTypes[16]
+	mi := &file_dor_v1_dor_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1784,7 +2074,7 @@ func (x *GetText) String() string {
 func (*GetText) ProtoMessage() {}
 
 func (x *GetText) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[16]
+	mi := &file_dor_v1_dor_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1797,7 +2087,7 @@ func (x *GetText) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetText.ProtoReflect.Descriptor instead.
 func (*GetText) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{16}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetText) GetStoryIds() []string {
@@ -1824,7 +2114,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_dor_v1_dor_proto_msgTypes[17]
+	mi := &file_dor_v1_dor_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1836,7 +2126,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[17]
+	mi := &file_dor_v1_dor_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1849,7 +2139,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{17}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Ack) GetSeq() uint64 {
@@ -1877,7 +2167,7 @@ type ClientMessage struct {
 
 func (x *ClientMessage) Reset() {
 	*x = ClientMessage{}
-	mi := &file_dor_v1_dor_proto_msgTypes[18]
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1889,7 +2179,7 @@ func (x *ClientMessage) String() string {
 func (*ClientMessage) ProtoMessage() {}
 
 func (x *ClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[18]
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1902,7 +2192,7 @@ func (x *ClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientMessage.ProtoReflect.Descriptor instead.
 func (*ClientMessage) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{18}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ClientMessage) GetBody() isClientMessage_Body {
@@ -2030,7 +2320,7 @@ type RawHints struct {
 
 func (x *RawHints) Reset() {
 	*x = RawHints{}
-	mi := &file_dor_v1_dor_proto_msgTypes[19]
+	mi := &file_dor_v1_dor_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2042,7 +2332,7 @@ func (x *RawHints) String() string {
 func (*RawHints) ProtoMessage() {}
 
 func (x *RawHints) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[19]
+	mi := &file_dor_v1_dor_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2055,7 +2345,7 @@ func (x *RawHints) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawHints.ProtoReflect.Descriptor instead.
 func (*RawHints) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{19}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RawHints) GetLocated() bool {
@@ -2171,7 +2461,7 @@ type RawArticle struct {
 
 func (x *RawArticle) Reset() {
 	*x = RawArticle{}
-	mi := &file_dor_v1_dor_proto_msgTypes[20]
+	mi := &file_dor_v1_dor_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2183,7 +2473,7 @@ func (x *RawArticle) String() string {
 func (*RawArticle) ProtoMessage() {}
 
 func (x *RawArticle) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[20]
+	mi := &file_dor_v1_dor_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2196,7 +2486,7 @@ func (x *RawArticle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawArticle.ProtoReflect.Descriptor instead.
 func (*RawArticle) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{20}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *RawArticle) GetId() string {
@@ -2291,7 +2581,7 @@ type RecordFrame struct {
 
 func (x *RecordFrame) Reset() {
 	*x = RecordFrame{}
-	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	mi := &file_dor_v1_dor_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2303,7 +2593,7 @@ func (x *RecordFrame) String() string {
 func (*RecordFrame) ProtoMessage() {}
 
 func (x *RecordFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	mi := &file_dor_v1_dor_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2316,7 +2606,7 @@ func (x *RecordFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordFrame.ProtoReflect.Descriptor instead.
 func (*RecordFrame) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{21}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RecordFrame) GetSubject() string {
@@ -2372,6 +2662,33 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x05hints\x18\t \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
 	"\x05burst\x18\n" +
 	" \x01(\bR\x05burst\x12\x19\n" +
+	"\bstory_id\x18\v \x01(\tR\astoryId\x12$\n" +
+	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\xf9\x01\n" +
+	"\rPlacedArticle\x12)\n" +
+	"\aarticle\x18\x01 \x01(\v2\x0f.dor.v1.ArticleR\aarticle\x12.\n" +
+	"\tlocations\x18\x02 \x03(\v2\x10.dor.v1.LocationR\tlocations\x12\x18\n" +
+	"\aprimary\x18\x03 \x01(\rR\aprimary\x12!\n" +
+	"\fmulti_region\x18\x04 \x01(\bR\vmultiRegion\x12\x1a\n" +
+	"\bfallback\x18\x05 \x01(\bR\bfallback\x12\x1a\n" +
+	"\bdegraded\x18\x06 \x01(\bR\bdegraded\x12\x18\n" +
+	"\abackend\x18\a \x01(\tR\abackend\"\xaa\x02\n" +
+	"\x11ClassifiedArticle\x12)\n" +
+	"\aarticle\x18\x01 \x01(\v2\x0f.dor.v1.ArticleR\aarticle\x12,\n" +
+	"\bcategory\x18\x02 \x01(\x0e2\x10.dor.v1.CategoryR\bcategory\x12\x1e\n" +
+	"\n" +
+	"confidence\x18\x03 \x01(\x02R\n" +
+	"confidence\x12\x1a\n" +
+	"\baccepted\x18\x04 \x01(\bR\baccepted\x12\x1a\n" +
+	"\bfallback\x18\x05 \x01(\bR\bfallback\x12\x1a\n" +
+	"\bdegraded\x18\x06 \x01(\bR\bdegraded\x12\x18\n" +
+	"\abackend\x18\a \x01(\tR\abackend\x12\x12\n" +
+	"\x04lang\x18\b \x01(\tR\x04lang\x12\x1a\n" +
+	"\bentities\x18\t \x03(\tR\bentities\"\xc7\x01\n" +
+	"\x0fEmbeddedArticle\x12)\n" +
+	"\aarticle\x18\x01 \x01(\v2\x0f.dor.v1.ArticleR\aarticle\x12\x16\n" +
+	"\x06vector\x18\x02 \x03(\x02R\x06vector\x12\x14\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x1a\n" +
+	"\bdegraded\x18\x04 \x01(\bR\bdegraded\x12\x19\n" +
 	"\bstory_id\x18\v \x01(\tR\astoryId\x12$\n" +
 	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\x9a\x02\n" +
 	"\x05Story\x12\x0e\n" +
@@ -2581,79 +2898,88 @@ func file_dor_v1_dor_proto_rawDescGZIP() []byte {
 }
 
 var file_dor_v1_dor_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_dor_v1_dor_proto_goTypes = []any{
-	(Category)(0),         // 0: dor.v1.Category
-	(Precision)(0),        // 1: dor.v1.Precision
-	(Role)(0),             // 2: dor.v1.Role
-	(LinkType)(0),         // 3: dor.v1.LinkType
-	(Direction)(0),        // 4: dor.v1.Direction
-	(JoinKind)(0),         // 5: dor.v1.JoinKind
-	(SourceKind)(0),       // 6: dor.v1.SourceKind
-	(*Location)(nil),      // 7: dor.v1.Location
-	(*Article)(nil),       // 8: dor.v1.Article
-	(*Story)(nil),         // 9: dor.v1.Story
-	(*Link)(nil),          // 10: dor.v1.Link
-	(*LinkKey)(nil),       // 11: dor.v1.LinkKey
-	(*AlertHit)(nil),      // 12: dor.v1.AlertHit
-	(*WireRow)(nil),       // 13: dor.v1.WireRow
-	(*Delta)(nil),         // 14: dor.v1.Delta
-	(*Snapshot)(nil),      // 15: dor.v1.Snapshot
-	(*DeltaBatch)(nil),    // 16: dor.v1.DeltaBatch
-	(*Resync)(nil),        // 17: dor.v1.Resync
-	(*ServerMessage)(nil), // 18: dor.v1.ServerMessage
-	(*Hello)(nil),         // 19: dor.v1.Hello
-	(*SetFilters)(nil),    // 20: dor.v1.SetFilters
-	(*SetPrompts)(nil),    // 21: dor.v1.SetPrompts
-	(*Focus)(nil),         // 22: dor.v1.Focus
-	(*GetText)(nil),       // 23: dor.v1.GetText
-	(*Ack)(nil),           // 24: dor.v1.Ack
-	(*ClientMessage)(nil), // 25: dor.v1.ClientMessage
-	(*RawHints)(nil),      // 26: dor.v1.RawHints
-	(*RawArticle)(nil),    // 27: dor.v1.RawArticle
-	(*RecordFrame)(nil),   // 28: dor.v1.RecordFrame
-	nil,                   // 29: dor.v1.WireRow.PromptScoresEntry
+	(Category)(0),             // 0: dor.v1.Category
+	(Precision)(0),            // 1: dor.v1.Precision
+	(Role)(0),                 // 2: dor.v1.Role
+	(LinkType)(0),             // 3: dor.v1.LinkType
+	(Direction)(0),            // 4: dor.v1.Direction
+	(JoinKind)(0),             // 5: dor.v1.JoinKind
+	(SourceKind)(0),           // 6: dor.v1.SourceKind
+	(*Location)(nil),          // 7: dor.v1.Location
+	(*Article)(nil),           // 8: dor.v1.Article
+	(*PlacedArticle)(nil),     // 9: dor.v1.PlacedArticle
+	(*ClassifiedArticle)(nil), // 10: dor.v1.ClassifiedArticle
+	(*EmbeddedArticle)(nil),   // 11: dor.v1.EmbeddedArticle
+	(*Story)(nil),             // 12: dor.v1.Story
+	(*Link)(nil),              // 13: dor.v1.Link
+	(*LinkKey)(nil),           // 14: dor.v1.LinkKey
+	(*AlertHit)(nil),          // 15: dor.v1.AlertHit
+	(*WireRow)(nil),           // 16: dor.v1.WireRow
+	(*Delta)(nil),             // 17: dor.v1.Delta
+	(*Snapshot)(nil),          // 18: dor.v1.Snapshot
+	(*DeltaBatch)(nil),        // 19: dor.v1.DeltaBatch
+	(*Resync)(nil),            // 20: dor.v1.Resync
+	(*ServerMessage)(nil),     // 21: dor.v1.ServerMessage
+	(*Hello)(nil),             // 22: dor.v1.Hello
+	(*SetFilters)(nil),        // 23: dor.v1.SetFilters
+	(*SetPrompts)(nil),        // 24: dor.v1.SetPrompts
+	(*Focus)(nil),             // 25: dor.v1.Focus
+	(*GetText)(nil),           // 26: dor.v1.GetText
+	(*Ack)(nil),               // 27: dor.v1.Ack
+	(*ClientMessage)(nil),     // 28: dor.v1.ClientMessage
+	(*RawHints)(nil),          // 29: dor.v1.RawHints
+	(*RawArticle)(nil),        // 30: dor.v1.RawArticle
+	(*RecordFrame)(nil),       // 31: dor.v1.RecordFrame
+	nil,                       // 32: dor.v1.WireRow.PromptScoresEntry
 }
 var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 0: dor.v1.Location.precision:type_name -> dor.v1.Precision
 	2,  // 1: dor.v1.Location.role:type_name -> dor.v1.Role
-	26, // 2: dor.v1.Article.hints:type_name -> dor.v1.RawHints
+	29, // 2: dor.v1.Article.hints:type_name -> dor.v1.RawHints
 	5,  // 3: dor.v1.Article.join:type_name -> dor.v1.JoinKind
-	0,  // 4: dor.v1.Story.category:type_name -> dor.v1.Category
-	7,  // 5: dor.v1.Story.locations:type_name -> dor.v1.Location
-	3,  // 6: dor.v1.Link.type:type_name -> dor.v1.LinkType
-	4,  // 7: dor.v1.Link.dir:type_name -> dor.v1.Direction
-	0,  // 8: dor.v1.WireRow.category:type_name -> dor.v1.Category
-	5,  // 9: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
-	29, // 10: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
-	9,  // 11: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
-	10, // 12: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
-	11, // 13: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
-	13, // 14: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
-	12, // 15: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
-	9,  // 16: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
-	10, // 17: dor.v1.Snapshot.links:type_name -> dor.v1.Link
-	13, // 18: dor.v1.Snapshot.recent_wire:type_name -> dor.v1.WireRow
-	14, // 19: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
-	15, // 20: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
-	16, // 21: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
-	17, // 22: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
-	0,  // 23: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
-	11, // 24: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
-	19, // 25: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
-	20, // 26: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
-	21, // 27: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
-	22, // 28: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
-	23, // 29: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
-	24, // 30: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
-	1,  // 31: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
-	6,  // 32: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
-	26, // 33: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
-	34, // [34:34] is the sub-list for method output_type
-	34, // [34:34] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	8,  // 4: dor.v1.PlacedArticle.article:type_name -> dor.v1.Article
+	7,  // 5: dor.v1.PlacedArticle.locations:type_name -> dor.v1.Location
+	8,  // 6: dor.v1.ClassifiedArticle.article:type_name -> dor.v1.Article
+	0,  // 7: dor.v1.ClassifiedArticle.category:type_name -> dor.v1.Category
+	8,  // 8: dor.v1.EmbeddedArticle.article:type_name -> dor.v1.Article
+	5,  // 9: dor.v1.EmbeddedArticle.join:type_name -> dor.v1.JoinKind
+	0,  // 10: dor.v1.Story.category:type_name -> dor.v1.Category
+	7,  // 11: dor.v1.Story.locations:type_name -> dor.v1.Location
+	3,  // 12: dor.v1.Link.type:type_name -> dor.v1.LinkType
+	4,  // 13: dor.v1.Link.dir:type_name -> dor.v1.Direction
+	0,  // 14: dor.v1.WireRow.category:type_name -> dor.v1.Category
+	5,  // 15: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
+	32, // 16: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
+	12, // 17: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
+	13, // 18: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
+	14, // 19: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
+	16, // 20: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
+	15, // 21: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
+	12, // 22: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
+	13, // 23: dor.v1.Snapshot.links:type_name -> dor.v1.Link
+	16, // 24: dor.v1.Snapshot.recent_wire:type_name -> dor.v1.WireRow
+	17, // 25: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
+	18, // 26: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
+	19, // 27: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
+	20, // 28: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
+	0,  // 29: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
+	14, // 30: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
+	22, // 31: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
+	23, // 32: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
+	24, // 33: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
+	25, // 34: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
+	26, // 35: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
+	27, // 36: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
+	1,  // 37: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
+	6,  // 38: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
+	29, // 39: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
+	40, // [40:40] is the sub-list for method output_type
+	40, // [40:40] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_dor_v1_dor_proto_init() }
@@ -2661,7 +2987,7 @@ func file_dor_v1_dor_proto_init() {
 	if File_dor_v1_dor_proto != nil {
 		return
 	}
-	file_dor_v1_dor_proto_msgTypes[7].OneofWrappers = []any{
+	file_dor_v1_dor_proto_msgTypes[10].OneofWrappers = []any{
 		(*Delta_StoryUpsert)(nil),
 		(*Delta_StoryExpire)(nil),
 		(*Delta_LinkUpsert)(nil),
@@ -2669,12 +2995,12 @@ func file_dor_v1_dor_proto_init() {
 		(*Delta_Wire)(nil),
 		(*Delta_Alert)(nil),
 	}
-	file_dor_v1_dor_proto_msgTypes[11].OneofWrappers = []any{
+	file_dor_v1_dor_proto_msgTypes[14].OneofWrappers = []any{
 		(*ServerMessage_Snapshot)(nil),
 		(*ServerMessage_Deltas)(nil),
 		(*ServerMessage_Resync)(nil),
 	}
-	file_dor_v1_dor_proto_msgTypes[18].OneofWrappers = []any{
+	file_dor_v1_dor_proto_msgTypes[21].OneofWrappers = []any{
 		(*ClientMessage_Hello)(nil),
 		(*ClientMessage_SetFilters)(nil),
 		(*ClientMessage_SetPrompts)(nil),
@@ -2688,7 +3014,7 @@ func file_dor_v1_dor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dor_v1_dor_proto_rawDesc), len(file_dor_v1_dor_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   23,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

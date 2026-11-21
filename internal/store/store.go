@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -190,4 +192,138 @@ ON CONFLICT (id) DO UPDATE SET
 		return fmt.Errorf("store: commit sources: %w", err)
 	}
 	return nil
+}
+
+// UpsertStories writes story metadata and replaces its location votes in one
+// transaction. It also stamps story_id on every article in ArticleIDs.
+func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin stories batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	const storySQL = `
+INSERT INTO stories (id, title, brief, category, primary_loc, source_count, heat,
+                     centroid, entities, first_seen, updated_at, expires_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::vector,$9,$10,$11,$12)
+ON CONFLICT (id) DO UPDATE SET
+    title = EXCLUDED.title,
+    brief = EXCLUDED.brief,
+    category = EXCLUDED.category,
+    primary_loc = EXCLUDED.primary_loc,
+    source_count = EXCLUDED.source_count,
+    heat = EXCLUDED.heat,
+    centroid = COALESCE(EXCLUDED.centroid, stories.centroid),
+    entities = EXCLUDED.entities,
+    first_seen = LEAST(stories.first_seen, EXCLUDED.first_seen),
+    updated_at = EXCLUDED.updated_at,
+    expires_at = EXCLUDED.expires_at`
+	for _, r := range records {
+		if r.Title == "" {
+			r.Title = "Untitled"
+		}
+		if r.SourceCount <= 0 {
+			r.SourceCount = 1
+		}
+		if r.FirstSeen.IsZero() {
+			r.FirstSeen = now
+		}
+		if r.UpdatedAt.IsZero() {
+			r.UpdatedAt = now
+		}
+		if r.ExpiresAt.IsZero() {
+			r.ExpiresAt = r.UpdatedAt.Add(48 * time.Hour)
+		}
+		if r.Heat < 0 {
+			r.Heat = 0
+		}
+		if r.Heat > 1 {
+			r.Heat = 1
+		}
+		entities := r.Entities
+		if entities == nil {
+			entities = []string{}
+		}
+		if _, err := tx.Exec(ctx, storySQL,
+			r.ID, r.Title, r.Brief, r.Category, r.PrimaryLoc, r.SourceCount, r.Heat,
+			formatVector(r.Centroid), entities, r.FirstSeen, r.UpdatedAt, r.ExpiresAt,
+		); err != nil {
+			return fmt.Errorf("store: upsert story %s: %w", r.ID, err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM story_locations WHERE story_id = $1`, r.ID); err != nil {
+			return fmt.Errorf("store: clear story locations %s: %w", r.ID, err)
+		}
+		for _, loc := range r.Locations {
+			if _, err := tx.Exec(ctx, `
+INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role, weight)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight,
+			); err != nil {
+				return fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
+			}
+		}
+		if len(r.ArticleIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+UPDATE articles SET story_id = $2,
+    category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
+WHERE id = ANY($1)`, r.ArticleIDs, r.ID, r.Category); err != nil {
+				return fmt.Errorf("store: assign story %s: %w", r.ID, err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit stories batch: %w", err)
+	}
+	return nil
+}
+
+func formatVector(v []float32) string {
+	if len(v) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// FindStoryCandidates is the pgvector ANN shortlist used by the clusterer.
+// It returns live story ids ordered by cosine distance; the caller still
+// applies time/place/entity guards. An empty vector returns no rows.
+func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit int) ([]string, error) {
+	if len(vector) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 64 {
+		limit = 32
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id
+FROM stories
+WHERE expires_at > now() AND centroid IS NOT NULL
+ORDER BY centroid <=> $1::vector
+LIMIT $2`, formatVector(vector), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: story candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: story candidate scan: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

@@ -22,6 +22,7 @@ const PublisherAgentName = "publisher"
 const (
 	defaultFlushInterval    = 250 * time.Millisecond
 	defaultSnapshotInterval = 5 * time.Second
+	publisherStoryTTL       = 48 * time.Hour
 	// publisherWireHistory is the bounded cold-start wire history placed in
 	// every snapshot. It is not a replay of old deltas; rows carry no seq.
 	publisherWireHistory = 500
@@ -146,7 +147,7 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 		return err
 	}
 	p.running.Store(true)
-	p.wg.Add(2)
+	p.wg.Add(3)
 	go func() {
 		defer p.wg.Done()
 		p.core.flushLoop(runCtx, defaultFlushInterval)
@@ -154,6 +155,10 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 	go func() {
 		defer p.wg.Done()
 		p.core.snapshotLoop(runCtx, defaultSnapshotInterval)
+	}()
+	go func() {
+		defer p.wg.Done()
+		p.core.expireLoop(runCtx, time.Minute)
 	}()
 	p.core.log.Info("publisher started")
 	// Publish the first snapshot immediately so a gateway started in the same
@@ -339,6 +344,36 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	}
 	c.mu.Unlock()
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})
+}
+
+func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.expireStories(c.now())
+		}
+	}
+}
+
+func (c *publisherCore) expireStories(now time.Time) {
+	c.mu.Lock()
+	ids := make([]string, 0)
+	for id, s := range c.stories {
+		if s == nil || s.UpdatedAt <= 0 {
+			continue
+		}
+		if now.Sub(time.Unix(s.UpdatedAt, 0)) >= publisherStoryTTL {
+			ids = append(ids, id)
+		}
+	}
+	c.mu.Unlock()
+	for _, id := range ids {
+		c.enqueue("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+	}
 }
 
 func (c *publisherCore) onStory(s *dorv1.Story) {

@@ -33,24 +33,29 @@ func DefaultWriterOptions() WriterOptions {
 
 // WriterStats is a snapshot of the writer counters.
 type WriterStats struct {
-	Enqueued     int64
-	DroppedQueue int64
-	DroppedBatch int64
-	Batches      int64
-	Errors       int64
-	Pending      int
+	Enqueued        int64
+	DroppedQueue    int64
+	DroppedBatch    int64
+	Batches         int64
+	Errors          int64
+	Pending         int
+	EnqueuedStories int64
+	DroppedStories  int64
+	StoryBatches    int64
+	PendingStories  int
 }
 
 // Writer is the non-blocking path from agents to Postgres. Enqueue only sends
 // on a bounded channel; it never touches the database. A full queue drops the
 // record and increments DroppedQueue.
 type Writer struct {
-	store *Store
-	opts  WriterOptions
-	log   *slog.Logger
-	queue chan ArticleRecord
-	done  chan struct{}
-	ready chan struct{}
+	store      *Store
+	opts       WriterOptions
+	log        *slog.Logger
+	queue      chan ArticleRecord
+	storyQueue chan StoryRecord
+	done       chan struct{}
+	ready      chan struct{}
 
 	mu     sync.RWMutex
 	closed bool
@@ -58,12 +63,15 @@ type Writer struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 
-	started      atomic.Bool
-	enqueued     atomic.Int64
-	droppedQueue atomic.Int64
-	droppedBatch atomic.Int64
-	batches      atomic.Int64
-	errors       atomic.Int64
+	started         atomic.Bool
+	enqueued        atomic.Int64
+	droppedQueue    atomic.Int64
+	droppedBatch    atomic.Int64
+	batches         atomic.Int64
+	errors          atomic.Int64
+	enqueuedStories atomic.Int64
+	droppedStories  atomic.Int64
+	storyBatches    atomic.Int64
 }
 
 // NewWriter builds a writer over an open store.
@@ -91,12 +99,13 @@ func NewWriter(s *Store, opts WriterOptions) (*Writer, error) {
 		opts.Logger = slog.Default()
 	}
 	return &Writer{
-		store: s,
-		opts:  opts,
-		log:   opts.Logger,
-		queue: make(chan ArticleRecord, opts.QueueSize),
-		done:  make(chan struct{}),
-		ready: make(chan struct{}),
+		store:      s,
+		opts:       opts,
+		log:        opts.Logger,
+		queue:      make(chan ArticleRecord, opts.QueueSize),
+		storyQueue: make(chan StoryRecord, max(64, opts.QueueSize/4)),
+		done:       make(chan struct{}),
+		ready:      make(chan struct{}),
 	}, nil
 }
 
@@ -126,13 +135,31 @@ func (w *Writer) Enqueue(rec ArticleRecord) bool {
 	}
 }
 
-// Close stops accepting records, drains the queue and waits for the final
+// EnqueueStory offers one story update. Like Enqueue it never blocks.
+func (w *Writer) EnqueueStory(rec StoryRecord) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.closed {
+		return false
+	}
+	select {
+	case w.storyQueue <- rec:
+		w.enqueuedStories.Add(1)
+		return true
+	default:
+		w.droppedStories.Add(1)
+		return false
+	}
+}
+
+// Close stops accepting records, drains both queues and waits for the final
 // batch. It is bounded by ctx; a slow database does not hold shutdown forever.
 func (w *Writer) Close(ctx context.Context) error {
 	w.closeOnce.Do(func() {
 		w.mu.Lock()
 		w.closed = true
 		close(w.queue)
+		close(w.storyQueue)
 		w.mu.Unlock()
 	})
 	if !w.started.Load() {
@@ -149,12 +176,16 @@ func (w *Writer) Close(ctx context.Context) error {
 // Stats returns a snapshot of the counters and current queue depth.
 func (w *Writer) Stats() WriterStats {
 	return WriterStats{
-		Enqueued:     w.enqueued.Load(),
-		DroppedQueue: w.droppedQueue.Load(),
-		DroppedBatch: w.droppedBatch.Load(),
-		Batches:      w.batches.Load(),
-		Errors:       w.errors.Load(),
-		Pending:      len(w.queue),
+		Enqueued:        w.enqueued.Load(),
+		DroppedQueue:    w.droppedQueue.Load(),
+		DroppedBatch:    w.droppedBatch.Load(),
+		Batches:         w.batches.Load(),
+		Errors:          w.errors.Load(),
+		Pending:         len(w.queue),
+		EnqueuedStories: w.enqueuedStories.Load(),
+		DroppedStories:  w.droppedStories.Load(),
+		StoryBatches:    w.storyBatches.Load(),
+		PendingStories:  len(w.storyQueue),
 	}
 }
 
@@ -167,28 +198,68 @@ func (w *Writer) loop() {
 	ticker := time.NewTicker(w.opts.FlushInterval)
 	defer ticker.Stop()
 	buffer := make([]ArticleRecord, 0, w.opts.BatchSize)
+	stories := make([]StoryRecord, 0, max(8, w.opts.BatchSize/4))
 	flush := func() {
-		if len(buffer) == 0 {
-			return
+		if len(buffer) > 0 {
+			w.flush(buffer)
+			buffer = buffer[:0]
 		}
-		w.flush(buffer)
-		buffer = buffer[:0]
+		if len(stories) > 0 {
+			w.flushStories(stories)
+			stories = stories[:0]
+		}
 	}
-	for {
+	articlesOpen, storiesOpen := true, true
+	articles := w.queue
+	storyUpdates := w.storyQueue
+	for articlesOpen || storiesOpen {
 		select {
-		case rec, ok := <-w.queue:
+		case rec, ok := <-articles:
 			if !ok {
-				flush()
-				return
+				articlesOpen = false
+				articles = nil
+				continue
 			}
 			buffer = append(buffer, rec)
 			if len(buffer) >= w.opts.BatchSize {
-				flush()
+				w.flush(buffer)
+				buffer = buffer[:0]
+			}
+		case rec, ok := <-storyUpdates:
+			if !ok {
+				storiesOpen = false
+				storyUpdates = nil
+				continue
+			}
+			stories = append(stories, rec)
+			if len(stories) >= max(8, w.opts.BatchSize/4) {
+				w.flushStories(stories)
+				stories = stories[:0]
 			}
 		case <-ticker.C:
 			flush()
 		}
 	}
+	flush()
+}
+
+func (w *Writer) flushStories(batch []StoryRecord) {
+	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
+		err := w.store.UpsertStories(ctx, batch)
+		cancel()
+		if err == nil {
+			w.storyBatches.Add(1)
+			return
+		}
+		w.errors.Add(1)
+		w.log.Warn("store story batch failed", "attempt", attempt+1, "rows", len(batch), "err", err)
+		if attempt < w.opts.MaxRetries {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+	}
+	w.droppedStories.Add(int64(len(batch)))
+	w.log.Error("store story batch dropped after retries", "rows", len(batch))
 }
 
 func (w *Writer) flush(batch []ArticleRecord) {

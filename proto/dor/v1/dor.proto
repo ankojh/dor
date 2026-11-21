@@ -91,6 +91,43 @@ message Article {
   // these only save it work and feed hazard heat.
   RawHints hints = 9;
   bool burst = 10; // GDELT bulk item; the wire collapses bursts
+  // Set only on article.placed; clean articles leave these at their zero
+  // values. Append-only so the existing publisher can still decode Article.
+  string story_id = 11;
+  JoinKind join = 12;
+}
+
+// PlacedArticle is the plotter's output on article.place. It carries the
+// article snapshot so the clusterer can join without a second read.
+message PlacedArticle {
+  Article article = 1;
+  repeated Location locations = 2;
+  uint32 primary = 3; // index into locations, 0 when global
+  bool multi_region = 4;
+  bool fallback = 5;   // a fallback path was used
+  bool degraded = 6;   // no model/service; deterministic result only
+  string backend = 7;  // jev, claude, gazetteer, hints, none
+}
+
+// ClassifiedArticle is the classifier's output on article.class.
+message ClassifiedArticle {
+  Article article = 1;
+  Category category = 2;
+  float confidence = 3;
+  bool accepted = 4;   // passed the configured threshold
+  bool fallback = 5;
+  bool degraded = 6;
+  string backend = 7;
+  string lang = 8;
+  repeated string entities = 9;
+}
+
+// EmbeddedArticle is the embedder's output on article.vec.
+message EmbeddedArticle {
+  Article article = 1;
+  repeated float vector = 2; // 384-d
+  string model = 3;
+  bool degraded = 4; // deterministic hash fallback, not TEI
   // Set on article.placed: the story the clusterer assigned and how it joined.
   string story_id = 11;
   JoinKind join = 12;

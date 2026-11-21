@@ -77,5 +77,13 @@ func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logge
 			return nil, err
 		}
 	}
+
+	publisher, err := NewPublisher(b, metrics, log)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(publisher); err != nil {
+		return nil, err
+	}
 	return registry, nil
 }

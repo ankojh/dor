@@ -49,6 +49,12 @@ const (
 	KVBucketLiveState    = "live_state"
 	KVBucketSourceHealth = "source_health"
 
+	// KVLiveStateSnapshotKey holds the publisher's cached Snapshot binary;
+	// gateway replicas serve it on hello/resync.
+	KVLiveStateSnapshotKey = "snapshot"
+	// KVPublisherSeqKey holds the publisher's last assigned delta sequence.
+	KVPublisherSeqKey = "publisher.seq"
+
 	KVSeenTTL         = 48 * time.Hour
 	KVJoinsTTL        = 30 * time.Second
 	KVBudgetsTTL      = time.Hour

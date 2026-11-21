@@ -20,6 +20,7 @@ import (
 	"github.com/ankojh/dor/internal/agents"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/fetch"
+	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/record"
 )
 
@@ -46,6 +47,8 @@ type config struct {
 	gdeltMaxItems     int
 	gdeltExtraDomains string
 	reliefWebAppname  string
+	gatewayAddr       string
+	gatewayOrigins    string
 }
 
 func runCommand(args []string) error {
@@ -70,6 +73,8 @@ func runCommand(args []string) error {
 		gdeltMaxItems:     envIntOr("DOR_GDELT_MAX_ITEMS", 300),
 		gdeltExtraDomains: envOr("DOR_GDELT_EXTRA_DOMAINS", ""),
 		reliefWebAppname:  envOr("DOR_RELIEFWEB_APPNAME", ""),
+		gatewayAddr:       envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
+		gatewayOrigins:    envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -93,6 +98,8 @@ func runCommand(args []string) error {
 	fs.IntVar(&cfg.gdeltMaxItems, "gdelt-max-items", cfg.gdeltMaxItems, "cap items published per GDELT file")
 	fs.StringVar(&cfg.gdeltExtraDomains, "gdelt-extra-domains", cfg.gdeltExtraDomains, "comma-separated extra domains for the GDELT allowlist")
 	fs.StringVar(&cfg.reliefWebAppname, "reliefweb-appname", cfg.reliefWebAppname, "approved ReliefWeb appname (empty keeps the adapter disabled)")
+	fs.StringVar(&cfg.gatewayAddr, "gateway-addr", cfg.gatewayAddr, "WebSocket gateway listen address; empty disables it")
+	fs.StringVar(&cfg.gatewayOrigins, "gateway-origins", cfg.gatewayOrigins, "comma-separated WebSocket Origin patterns")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -185,6 +192,23 @@ func runCommand(args []string) error {
 		return err
 	}
 
+	var gw *gateway.Server
+	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
+		gw, err = gateway.New(gateway.Config{
+			Addr:    cfg.gatewayAddr,
+			Origins: splitList(cfg.gatewayOrigins),
+			Bus:     b,
+			Logger:  logger,
+		})
+		if err != nil {
+			return err
+		}
+		if err := gw.Start(ctx); err != nil {
+			return err
+		}
+		logger.Info("gateway listening", "addr", gw.Addr(), "origins", cfg.gatewayOrigins)
+	}
+
 	var admin *http.Server
 	adminErr := make(chan error, 1)
 	if cfg.adminAddr != "" {
@@ -231,6 +255,13 @@ func runCommand(args []string) error {
 			logger.Warn("admin shutdown", "err", err)
 		}
 		adminCancel()
+	}
+	if gw != nil {
+		gwCtx, gwCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+		if err := gw.Stop(gwCtx); err != nil {
+			logger.Warn("gateway shutdown", "err", err)
+		}
+		gwCancel()
 	}
 	if err := runner.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("agent shutdown", "err", err)
@@ -328,6 +359,21 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// runsPublisher reports whether this process should serve the gateway. The
+// gateway is a component, not an agent; it runs when the publisher is selected.
+func runsPublisher(selection string) bool {
+	selection = strings.TrimSpace(selection)
+	if selection == "all" {
+		return true
+	}
+	for _, name := range strings.Split(selection, ",") {
+		if strings.TrimSpace(name) == "publisher" {
+			return true
+		}
+	}
+	return false
 }
 
 // splitList parses a comma-separated flag value, dropping empty entries.

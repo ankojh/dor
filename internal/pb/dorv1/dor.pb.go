@@ -1222,6 +1222,9 @@ type AlertHit struct {
 	FiredAt       int64                  `protobuf:"varint,4,opt,name=fired_at,json=firedAt,proto3" json:"fired_at,omitempty"` // unix seconds
 	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`                     // story title at fire time
 	Prompt        string                 `protobuf:"bytes,6,opt,name=prompt,proto3" json:"prompt,omitempty"`                   // the alert prompt
+	Generation    uint64                 `protobuf:"varint,7,opt,name=generation,proto3" json:"generation,omitempty"`          // 0=new, then one per sources doubling
+	Approx        bool                   `protobuf:"varint,8,opt,name=approx,proto3" json:"approx,omitempty"`                  // embedding/lexical match without jev
+	SourceCount   uint32                 `protobuf:"varint,9,opt,name=source_count,json=sourceCount,proto3" json:"source_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1296,6 +1299,27 @@ func (x *AlertHit) GetPrompt() string {
 		return x.Prompt
 	}
 	return ""
+}
+
+func (x *AlertHit) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *AlertHit) GetApprox() bool {
+	if x != nil {
+		return x.Approx
+	}
+	return false
+}
+
+func (x *AlertHit) GetSourceCount() uint32 {
+	if x != nil {
+		return x.SourceCount
+	}
+	return 0
 }
 
 // WireRow is one row in the live wire.
@@ -2872,14 +2896,19 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"unverified\"%\n" +
 	"\aLinkKey\x12\f\n" +
 	"\x01a\x18\x01 \x01(\tR\x01a\x12\f\n" +
-	"\x01b\x18\x02 \x01(\tR\x01b\"\x9f\x01\n" +
+	"\x01b\x18\x02 \x01(\tR\x01b\"\xfa\x01\n" +
 	"\bAlertHit\x12\x19\n" +
 	"\balert_id\x18\x01 \x01(\tR\aalertId\x12\x19\n" +
 	"\bstory_id\x18\x02 \x01(\tR\astoryId\x12\x14\n" +
 	"\x05level\x18\x03 \x01(\tR\x05level\x12\x19\n" +
 	"\bfired_at\x18\x04 \x01(\x03R\afiredAt\x12\x14\n" +
 	"\x05title\x18\x05 \x01(\tR\x05title\x12\x16\n" +
-	"\x06prompt\x18\x06 \x01(\tR\x06prompt\"\x87\x04\n" +
+	"\x06prompt\x18\x06 \x01(\tR\x06prompt\x12\x1e\n" +
+	"\n" +
+	"generation\x18\a \x01(\x04R\n" +
+	"generation\x12\x16\n" +
+	"\x06approx\x18\b \x01(\bR\x06approx\x12!\n" +
+	"\fsource_count\x18\t \x01(\rR\vsourceCount\"\x87\x04\n" +
 	"\aWireRow\x12\x1d\n" +
 	"\n" +
 	"article_id\x18\x01 \x01(\tR\tarticleId\x12\x19\n" +

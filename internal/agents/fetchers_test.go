@@ -659,7 +659,7 @@ func TestProcessGDELTFileFiltersAndPublishes(t *testing.T) {
 	out := testEmitter(t, rt)
 	src := sources.Source{ID: "gdelt-test", Kind: sources.KindGDELT, URL: srv.URL + "/lastupdate.txt", Enabled: true, TermsOK: true}
 	seen := newSeenSet(100, 48*time.Hour)
-	n, err := rt.processGDELTFile(context.Background(), out, src, srv.URL+"/file.zip", seen, time.Now())
+	n, err := rt.processGDELTFile(context.Background(), out, src, srv.URL+"/file.zip", seen, time.Now(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestProcessGDELTFileFiltersAndPublishes(t *testing.T) {
 		t.Fatalf("article.raw has %d messages, want 1", got)
 	}
 	// A second pass must publish nothing: the seen set holds the URL.
-	if n, err := rt.processGDELTFile(context.Background(), out, src, srv.URL+"/file.zip", seen, time.Now()); err != nil || n != 0 {
+	if n, err := rt.processGDELTFile(context.Background(), out, src, srv.URL+"/file.zip", seen, time.Now(), 100); err != nil || n != 0 {
 		t.Fatalf("second pass = %d, %v", n, err)
 	}
 	// The title comes from the GKG PAGE_TITLE extras.

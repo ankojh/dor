@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -62,8 +63,8 @@ func (p *plotter) handle(ctx context.Context, msg *Message, out *Emitter) error 
 	return nil
 }
 
-func (p *plotter) place(ctx context.Context, article *dorv1.Article) *dorv1.PlacedArticle {
-	res := &dorv1.PlacedArticle{Article: article, Primary: 0}
+func (p *plotter) place(ctx context.Context, article *dorv1.Article) (res *dorv1.PlacedArticle) {
+	res = &dorv1.PlacedArticle{Article: article, Primary: 0}
 	hints := article.GetHints()
 	countryHint := ""
 	if hints != nil {
@@ -72,9 +73,12 @@ func (p *plotter) place(ctx context.Context, article *dorv1.Article) *dorv1.Plac
 			countryHint = strings.TrimSpace(hints.GetPlace())
 		}
 	}
+	// Every path, including upstream hints and model fallbacks, crosses this
+	// boundary before it can publish a dot.
+	defer func() { p.validateLocations(res, countryHint) }()
 	// A hazard or GDELT item with coordinates is already the event location;
 	// use it first and never spend a model call just to move the dot.
-	if hints != nil && hints.GetLocated() && hints.GetHazard() != "" {
+	if hints != nil && hints.GetLocated() && hints.GetHazard() != "" && geo.ValidCoordinates(hints.GetLat(), hints.GetLon()) {
 		res.Locations = []*dorv1.Location{{
 			PlaceId:   "hint:" + firstNonEmpty(hints.GetEventId(), article.GetId()),
 			Name:      firstNonEmpty(hints.GetPlace(), article.GetDateline(), countryHint, "Hazard location"),
@@ -92,8 +96,8 @@ func (p *plotter) place(ctx context.Context, article *dorv1.Article) *dorv1.Plac
 
 	candidates := p.candidates(article, countryHint, 8)
 	if p.deps.Decider != nil && len(candidates) > 0 {
-		ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-		resp, err := p.deps.Decider.Decide(ctx, decide.PlotRequest(decideArticle(article), toDecideCandidates(candidates)))
+		decideCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+		resp, err := p.deps.Decider.Decide(decideCtx, decide.PlotRequest(decideArticle(article), toDecideCandidates(candidates)))
 		cancel()
 		if err == nil {
 			combined := decide.CombinePlot(resp, toDecideCandidates(candidates), p.thresholds())
@@ -109,7 +113,7 @@ func (p *plotter) place(ctx context.Context, article *dorv1.Article) *dorv1.Plac
 			return placed
 		}
 	}
-	if hints != nil && hints.GetLocated() && hints.GetLat() != 0 && hints.GetLon() != 0 {
+	if hints != nil && hints.GetLocated() && geo.ValidCoordinates(hints.GetLat(), hints.GetLon()) {
 		res.Locations = []*dorv1.Location{{
 			PlaceId:   "hint:" + firstNonEmpty(hints.GetEventId(), article.GetId()),
 			Name:      firstNonEmpty(hints.GetPlace(), article.GetDateline(), countryHint, "Hinted location"),
@@ -168,7 +172,7 @@ func (p *plotter) fromJev(ctx context.Context, article *dorv1.Article, candidate
 		if w <= 0 {
 			w = 0.7
 		}
-		locations = append(locations, placeLocation(c, dorv1.Precision_PRECISION_CITY, dorv1.Role_ROLE_PARTY, float32(w)))
+		locations = append(locations, placeLocation(c, dorv1.Precision(geo.PrecisionOf(c)), dorv1.Role_ROLE_PARTY, float32(w)))
 	}
 	return &dorv1.PlacedArticle{
 		Article:     article,
@@ -214,19 +218,19 @@ func (p *plotter) fromClaude(ctx context.Context, article *dorv1.Article, candid
 	if placeName != "" && p.deps.Gazetteer != nil {
 		chosen, ok = p.deps.Gazetteer.Lookup(placeName, country)
 	}
-	if !ok && country != "" && p.deps.Gazetteer != nil {
-		chosen, ok = p.deps.Gazetteer.CountryCentroid(country)
-	}
 	if !ok && placeName != "" && p.deps.Photon != nil {
-		places, gerr := p.deps.Photon.Geocode(callCtx, strings.TrimSpace(placeName+", "+country), 0, 0, 1)
+		places, gerr := p.deps.Photon.Geocode(ctx, strings.TrimSpace(placeName+", "+country), 0, 0, 1)
 		if gerr == nil && len(places) > 0 {
 			chosen, ok = places[0], true
 		}
 	}
-	if !ok {
+	if !ok && country != "" && p.deps.Gazetteer != nil {
+		chosen, ok = p.deps.Gazetteer.CountryCentroid(country)
+	}
+	if !ok || !geo.ValidCoordinates(chosen.Lat, chosen.Lon) {
 		return nil, false
 	}
-	prec := dorv1.Precision_PRECISION_CITY
+	prec := dorv1.Precision(geo.PrecisionOf(chosen))
 	if placeName == "" || strings.EqualFold(placeName, country) || chosen.CountryID {
 		prec = dorv1.Precision_PRECISION_COUNTRY
 	}
@@ -252,8 +256,8 @@ func (p *plotter) deterministic(article *dorv1.Article, candidates []geo.Place, 
 		// strong signal (title/dateline). Otherwise a country centroid is more
 		// honest than a confident-looking city guess.
 		c := candidates[0]
-		if c.Score >= 10 || len(candidates) == 1 {
-			prec := dorv1.Precision_PRECISION_CITY
+		if c.Score >= 10 && p.deps.Gazetteer.SupportsPlace(c.ID, article.GetLede(), article.GetTitle(), article.GetDateline()) {
+			prec := dorv1.Precision(geo.PrecisionOf(c))
 			if c.CountryID {
 				prec = dorv1.Precision_PRECISION_COUNTRY
 			}
@@ -282,28 +286,26 @@ func (p *plotter) deterministic(article *dorv1.Article, candidates []geo.Place, 
 }
 
 func (p *plotter) geocodePrecise(ctx context.Context, article *dorv1.Article, c geo.Place, prec dorv1.Precision, role dorv1.Role) *dorv1.Location {
-	fallback := placeLocation(c, prec, role, 1)
-	if p.deps.Photon == nil {
+	fallback := placeLocation(c, dorv1.Precision(geo.PrecisionOf(c)), role, 1)
+	if prec < dorv1.Precision_PRECISION_STREET || p.deps.Photon == nil || geo.PrecisionOf(c) < geo.CityResolution {
 		return fallback
 	}
-	query := strings.TrimSpace(c.Name + ", " + c.Admin + ", " + c.Country)
-	if query == ", , " || query == "" {
-		query = firstNonEmpty(article.GetDateline(), article.GetTitle())
+	feature := extractedFeature(article.GetTitle() + ". " + article.GetLede())
+	if feature == "" {
+		return fallback
 	}
+	query := strings.TrimSpace(feature + ", " + c.Name + ", " + c.Country)
 	places, err := p.deps.Photon.Geocode(ctx, query, c.Lat, c.Lon, 1)
 	if err != nil || len(places) == 0 {
 		return fallback
 	}
 	g := places[0]
-	return &dorv1.Location{
-		PlaceId:   g.ID,
-		Name:      g.Name,
-		Lat:       float32(g.Lat),
-		Lon:       float32(g.Lon),
-		Precision: prec,
-		Role:      role,
-		Weight:    1,
+	if !geo.ValidCoordinates(g.Lat, g.Lon) ||
+		c.CountryCode != "" && g.CountryCode != "" && c.CountryCode != g.CountryCode ||
+		geo.DistanceKM(c.Lat, c.Lon, g.Lat, g.Lon) > 100 {
+		return fallback
 	}
+	return placeLocation(g, prec, role, 1)
 }
 
 func (p *plotter) thresholds() config.Thresholds {
@@ -335,6 +337,12 @@ func toDecideCandidates(in []geo.Place) []decide.Candidate {
 }
 
 func placeLocation(c geo.Place, prec dorv1.Precision, role dorv1.Role, weight float32) *dorv1.Location {
+	if !geo.ValidCoordinates(c.Lat, c.Lon) {
+		return nil
+	}
+	if supported := dorv1.Precision(geo.PrecisionOf(c)); prec > supported {
+		prec = supported
+	}
 	return &dorv1.Location{
 		PlaceId:   c.ID,
 		Name:      c.Name,
@@ -370,7 +378,7 @@ func datelineMatches(dateline string, c geo.Place) bool {
 	if n == "" {
 		return false
 	}
-	return d == n || strings.Contains(d, n) || strings.Contains(n, d)
+	return strings.Contains(" "+d+" ", " "+n+" ")
 }
 
 func normalizeWords(s string) string {
@@ -385,10 +393,16 @@ func normalizeWords(s string) string {
 }
 
 func capLocations(in []*dorv1.Location) []*dorv1.Location {
-	if len(in) <= 6 {
-		return in
+	out := make([]*dorv1.Location, 0, 6)
+	for _, loc := range in {
+		if loc != nil && geo.ValidCoordinates(float64(loc.Lat), float64(loc.Lon)) {
+			out = append(out, loc)
+		}
+		if len(out) == 6 {
+			break
+		}
 	}
-	return in[:6]
+	return out
 }
 
 func multiCountry(candidates []geo.Place, locations []*dorv1.Location) bool {
@@ -397,7 +411,7 @@ func multiCountry(candidates []geo.Place, locations []*dorv1.Location) bool {
 		if i == 0 {
 			continue
 		}
-		if l.Role != dorv1.Role_ROLE_PARTY {
+		if l == nil || l.Role != dorv1.Role_ROLE_PARTY {
 			continue
 		}
 		for _, c := range candidates {
@@ -407,4 +421,28 @@ func multiCountry(candidates []geo.Place, locations []*dorv1.Location) bool {
 		}
 	}
 	return len(seen) > 1
+}
+
+// A conservative extractor: only named street/address and landmark phrases
+// actually present in the snippet can request a more precise coordinate.
+var preciseFeature = regexp.MustCompile(`\b(?:[0-9]+[A-Za-z]? +)?(?:[A-Z][\p{L}0-9'’.-]* +){1,5}(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Lane|Drive|Square|Bridge|Tower|Museum|Palace|Cathedral|Airport|Station)\b\.?`)
+
+func extractedFeature(text string) string {
+	return strings.TrimSpace(preciseFeature.FindString(text))
+}
+
+func (p *plotter) validateLocations(res *dorv1.PlacedArticle, countryHint string) {
+	if res == nil {
+		return
+	}
+	res.Locations = capLocations(res.Locations)
+	res.Primary = 0
+	if len(res.Locations) == 0 {
+		if c, ok := p.deps.Gazetteer.CountryCentroid(countryHint); ok {
+			res.Locations = []*dorv1.Location{placeLocation(c, dorv1.Precision_PRECISION_COUNTRY, dorv1.Role_ROLE_ORIGIN, 0.5)}
+			res.Fallback, res.Degraded, res.Backend = true, true, "gazetteer"
+		} else {
+			res.Backend = "none"
+		}
+	}
 }

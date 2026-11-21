@@ -180,7 +180,9 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 			return 0
 		}
 	}
-	qualified := independentQualifier(p, words, start, count, dateline) || hint != "" && p.CountryCode == hint
+	textQualified := independentQualifier(p, words, start, count, dateline)
+	hintQualified := hint != "" && p.CountryCode == hint
+	qualified := textQualified || hintQualified
 	if !p.CountryID {
 		if _, countryCollision := g.Country(p.Name); countryCollision && !qualified {
 			return 0
@@ -193,7 +195,7 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 	if end := start + count; end < len(words) && words[end].norm == "based" {
 		locative = true
 	}
-	if ambiguous && !qualified {
+	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
 		return 0
 	}
 	if dateline {

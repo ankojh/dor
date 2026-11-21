@@ -642,6 +642,36 @@ func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 			t.Fatalf("proper %s form should resolve as country %s: %+v", tc.name, tc.country, placed.Locations)
 		})
 	}
+	for _, tc := range []struct {
+		name, title, lede, dateline, hintCountry, wantPlace string
+		wantPrecision                                       dorv1.Precision
+	}{
+		{"Victoria Beckham with Australia country hint", "Victoria Beckham launches a new collection", "The designer spoke at the event.", "", "AU", "country:AU", dorv1.Precision_PRECISION_COUNTRY},
+		{"Toyota recall with Japan country hint", "Toyota recalls vehicles over airbag fault", "The recall covers several models.", "", "JP", "country:JP", dorv1.Precision_PRECISION_COUNTRY},
+		{"qualified Victoria in Canada", "Victoria residents gather for a public meeting", "The meeting was held in Victoria, British Columbia.", "Victoria, Canada", "", "", dorv1.Precision_PRECISION_CITY},
+	} {
+		t.Run("hint_"+tc.name, func(t *testing.T) {
+			article := &dorv1.Article{Id: "hint-" + tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline}
+			if tc.hintCountry != "" {
+				article.Hints = &dorv1.RawHints{Country: tc.hintCountry}
+			}
+			placed := p.place(context.Background(), article)
+			if len(placed.Locations) == 0 {
+				t.Fatalf("expected country or qualified city result, got %+v", placed)
+			}
+			loc := placed.Locations[0]
+			if tc.wantPlace != "" {
+				if loc.PlaceId != tc.wantPlace || loc.Precision != tc.wantPrecision {
+					t.Fatalf("country-only hint must not make a false precise match: got %+v, want %s at country precision", loc, tc.wantPlace)
+				}
+				return
+			}
+			place, ok := g.ByID(loc.PlaceId)
+			if !ok || place.CountryCode != "CA" || loc.Precision != tc.wantPrecision || loc.Role != dorv1.Role_ROLE_VENUE || !strings.Contains(strings.ToLower(loc.Name), "victoria") {
+				t.Fatalf("explicit Victoria, Canada evidence should retain the city venue: loc=%+v place=%+v known=%v all=%+v", loc, place, ok, placed.Locations)
+			}
+		})
+	}
 }
 
 func normalizePlotName(name string) string {

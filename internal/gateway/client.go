@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -29,10 +33,12 @@ const (
 // goroutine. Reads and writes are independent so a slow reader cannot stall
 // the hub, and a slow writer is disconnected rather than buffered forever.
 type client struct {
-	hub  *hub
-	text TextService
-	conn *websocket.Conn
-	log  *slog.Logger
+	hub     *hub
+	text    TextService
+	matcher *matcher.Service
+	id      string
+	conn    *websocket.Conn
+	log     *slog.Logger
 
 	send    chan []byte
 	closed  atomic.Bool
@@ -48,16 +54,28 @@ type client struct {
 	prompts    *dorv1.SetPrompts
 }
 
-func newClient(h *hub, text TextService, conn *websocket.Conn, log *slog.Logger) *client {
+func newClient(h *hub, text TextService, matcherSvc *matcher.Service, conn *websocket.Conn, log *slog.Logger) *client {
 	return &client{
 		hub:        h,
 		text:       text,
+		matcher:    matcherSvc,
+		id:         newClientID(),
 		conn:       conn,
 		log:        log,
 		send:       make(chan []byte, clientQueue),
 		tokens:     clientBurst,
 		lastRefill: time.Now(),
 	}
+}
+
+// newClientID is the per-connection prompt key in live_state. It is random so
+// one tab cannot read another tab's prompt set.
+func newClientID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "client-" + hex.EncodeToString([]byte(time.Now().Format(time.RFC3339Nano)))
+	}
+	return hex.EncodeToString(b)
 }
 
 // run starts the writer, handles client messages, and removes the client when
@@ -68,6 +86,11 @@ func (c *client) run(parent context.Context) {
 	defer func() {
 		cancel()
 		c.hub.removeClient(c)
+		if c.matcher != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			c.matcher.ClearClientPrompts(cleanupCtx, c.id)
+			cleanupCancel()
+		}
 		c.conn.CloseNow()
 	}()
 
@@ -133,6 +156,17 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 		c.mu.Lock()
 		c.prompts = body.SetPrompts
 		c.mu.Unlock()
+		if c.matcher != nil {
+			prompts := []string(nil)
+			if body.SetPrompts != nil {
+				for _, prompt := range body.SetPrompts.Prompts {
+					if prompt = strings.TrimSpace(prompt); prompt != "" {
+						prompts = append(prompts, prompt)
+					}
+				}
+			}
+			c.matcher.SetClientPrompts(ctx, c.id, prompts)
+		}
 	case *dorv1.ClientMessage_Focus:
 		if body.Focus != nil {
 			c.mu.Lock()

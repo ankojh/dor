@@ -79,6 +79,7 @@ func DefaultStreamPolicies() map[string]StreamPolicy {
 				SubjectArticleClass,
 				SubjectArticleVec,
 				SubjectArticlePlaced,
+				SubjectMatchScore,
 			},
 			Storage:    jetstream.FileStorage,
 			MaxAge:     DefaultEnrichMaxAge,
@@ -153,7 +154,8 @@ func StreamForSubject(subject string) string {
 		subject == SubjectArticlePlace,
 		subject == SubjectArticleClass,
 		subject == SubjectArticleVec,
-		subject == SubjectArticlePlaced:
+		subject == SubjectArticlePlaced,
+		subject == SubjectMatchScore:
 		return StreamEnrich
 	case strings.HasPrefix(subject, SubjectStoryChangedPrefix),
 		subject == "story.changed.*",

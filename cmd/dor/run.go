@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,10 +19,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/ankojh/dor/internal/agents"
+	"github.com/ankojh/dor/internal/alert"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/embed"
 	"github.com/ankojh/dor/internal/fetch"
 	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/record"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -66,6 +70,11 @@ type config struct {
 	relationShard    int
 	relationDebounce time.Duration
 	editorDebounce   time.Duration
+
+	ntfyURL        string
+	vapidPublicKey string
+	pushEncryptKey string
+	alertRate      time.Duration
 }
 
 func runCommand(args []string) error {
@@ -107,6 +116,11 @@ func runCommand(args []string) error {
 		relationShard:    envIntOr("DOR_RELATION_SHARD", -1),
 		relationDebounce: envDurationOr("DOR_RELATION_DEBOUNCE", 3*time.Second),
 		editorDebounce:   envDurationOr("DOR_EDITOR_DEBOUNCE", 5*time.Second),
+
+		ntfyURL:        envOr("DOR_NTFY_URL", ""),
+		vapidPublicKey: envOr("DOR_VAPID_PUBLIC_KEY", ""),
+		pushEncryptKey: envOr("DOR_PUSH_ENCRYPTION_KEY", ""),
+		alertRate:      envDurationOr("DOR_ALERT_RATE", time.Minute),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -146,6 +160,10 @@ func runCommand(args []string) error {
 	fs.IntVar(&cfg.relationShard, "relation-shard", cfg.relationShard, "run only this relation shard (0-based); -1 runs all")
 	fs.DurationVar(&cfg.relationDebounce, "relation-debounce", cfg.relationDebounce, "per-story relation debounce")
 	fs.DurationVar(&cfg.editorDebounce, "editor-debounce", cfg.editorDebounce, "per-story editor debounce")
+	fs.StringVar(&cfg.ntfyURL, "ntfy-url", cfg.ntfyURL, "ntfy base URL (empty disables external notifications)")
+	fs.StringVar(&cfg.vapidPublicKey, "vapid-public-key", cfg.vapidPublicKey, "Web Push VAPID public key (empty disables push)")
+	fs.StringVar(&cfg.pushEncryptKey, "push-encryption-key", cfg.pushEncryptKey, "base64 32-byte key encrypting push subscriptions at rest")
+	fs.DurationVar(&cfg.alertRate, "alert-rate", cfg.alertRate, "minimum interval between external alerts per alert")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -288,6 +306,25 @@ func runCommand(args []string) error {
 		textSvc.WithSink(dbWriter)
 	}
 
+	var alertStore *alert.Store
+	if store, err := alert.New(ctx, b, dbStore, logger); err != nil {
+		logger.Warn("alert store unavailable; alert API and notifier disabled", "err", err)
+	} else {
+		alertStore = store
+	}
+	embedder := embed.New(cfg.teiURL, 20*time.Second)
+	if !embedder.Enabled() {
+		logger.Info("TEI embedding disabled: DOR_TEI_URL is not set; prompt filters use lexical prefilter")
+	}
+	matcherSvc := matcher.New(b, logger, enrichmentDeps.Decider, embedder, alertStore, enrichmentDeps.Thresholds)
+	if alertStore == nil {
+		logger.Warn("saved alerts unavailable; prompt filters still match for connected clients")
+	}
+
+	enrichmentDeps.Alerts = alertStore
+	enrichmentDeps.Matcher = matcherSvc
+	enrichmentDeps.NtfyBaseURL = cfg.ntfyURL
+	enrichmentDeps.AlertRate = cfg.alertRate
 	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, enrichmentDeps)
 	if err != nil {
 		return err
@@ -309,6 +346,15 @@ func runCommand(args []string) error {
 			Bus:     b,
 			Logger:  logger,
 			Text:    textSvc,
+			Alerts:  alertStore,
+			Matcher: matcherSvc,
+			Push: gateway.PushConfig{
+				PublicKey:     cfg.vapidPublicKey,
+				EncryptionKey: decodeBase64Key(cfg.pushEncryptKey),
+				// No Web Push sender is compiled in this build; the gateway
+				// reports 503 with a reason rather than faking delivery.
+				Delivery: false,
+			},
 		}
 		if dbStore != nil {
 			gwCfg.Store = dbStore
@@ -493,6 +539,17 @@ func runsPublisher(selection string) bool {
 }
 
 // splitList parses a comma-separated flag value, dropping empty entries.
+func decodeBase64Key(raw string) []byte {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(raw); err == nil {
+		return b
+	}
+	return nil
+}
+
 func splitList(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {

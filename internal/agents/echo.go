@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/ankojh/dor/config"
+	"github.com/ankojh/dor/internal/alert"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/llm"
+	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/textsvc"
 )
 
@@ -89,6 +91,14 @@ type Deps struct {
 	RelationShard    int
 	RelationDebounce time.Duration
 	EditorDebounce   time.Duration
+
+	// M4 prompt filters and alerts. Matcher and Alerts are shared with the
+	// gateway so REST backtests and the live matcher see the same state.
+	Alerts      *alert.Store
+	Matcher     *matcher.Service
+	NtfyBaseURL string
+	Push        PushSender
+	AlertRate   time.Duration
 }
 
 func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config) (*Registry, error) {
@@ -200,6 +210,30 @@ func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *sl
 	}
 	if err := registry.Register(editor); err != nil {
 		return nil, err
+	}
+
+	if deps.Matcher != nil {
+		matcherAgent, err := NewMatcher(b, metrics, log, deps.Matcher)
+		if err != nil {
+			return nil, err
+		}
+		if err := registry.Register(matcherAgent); err != nil {
+			return nil, err
+		}
+	}
+	if deps.Alerts != nil {
+		notifierAgent, err := NewNotifier(b, metrics, log, NotifierConfig{
+			Alerts:      deps.Alerts,
+			NtfyBaseURL: deps.NtfyBaseURL,
+			Push:        deps.Push,
+			MinInterval: deps.AlertRate,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := registry.Register(notifierAgent); err != nil {
+			return nil, err
+		}
 	}
 	return registry, nil
 }

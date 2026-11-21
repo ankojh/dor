@@ -22,9 +22,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ankojh/dor/internal/alert"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/live"
+	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -46,6 +48,32 @@ type TextService interface {
 	PrefetchLink(a, b string)
 }
 
+// PushConfig is the Web Push surface. Delivery is only advertised when both
+// the VAPID key material and a sender are configured; subscriptions are
+// encrypted before they reach the KV store.
+type PushConfig struct {
+	PublicKey     string
+	EncryptionKey []byte
+	Delivery      bool
+}
+
+// Available reports whether push can actually deliver, with an operator-facing
+// reason when it cannot.
+func (p PushConfig) Available() (bool, string) {
+	if !p.Delivery {
+		return false, "web push delivery is not configured (no VAPID sender)"
+	}
+	if strings.TrimSpace(p.PublicKey) == "" {
+		return false, "VAPID public key is not configured"
+	}
+	switch len(p.EncryptionKey) {
+	case 16, 24, 32:
+		return true, ""
+	default:
+		return false, "push encryption key is not configured (expected 32 bytes)"
+	}
+}
+
 // Config configures one gateway process.
 type Config struct {
 	Addr    string
@@ -53,6 +81,9 @@ type Config struct {
 	Bus     *bus.Bus
 	Logger  *slog.Logger
 	Text    TextService
+	Alerts  *alert.Store
+	Matcher *matcher.Service
+	Push    PushConfig
 	Store   StoryStore
 	Places  *geo.Gazetteer
 }
@@ -97,7 +128,16 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
 	mux.HandleFunc("GET /api/places", s.handlePlaces)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	mux.HandleFunc("GET /api/alerts", s.handleAlertsList)
+	mux.HandleFunc("POST /api/alerts", s.handleAlertsCreate)
+	mux.HandleFunc("POST /api/alerts/backtest", s.handleAlertsBacktest)
+	mux.HandleFunc("GET /api/alerts/hits", s.handleAlertsHits)
+	mux.HandleFunc("PATCH /api/alerts/{id}", s.handleAlertsPatch)
+	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleAlertsDelete)
+	mux.HandleFunc("POST /api/alerts/{id}/mute", s.handleAlertsMute)
+	mux.HandleFunc("GET /api/push/key", s.handlePushKey)
+	mux.HandleFunc("POST /api/push/subscriptions", s.handlePushSubscription)
+	s.http = &http.Server{Handler: withCORS(mux), ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
 
@@ -227,7 +267,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(64 << 10)
-	c := newClient(s.hub, s.cfg.Text, conn, s.log)
+	c := newClient(s.hub, s.cfg.Text, s.cfg.Matcher, conn, s.log)
 	s.hub.addClient(c)
 	c.run(r.Context())
 }

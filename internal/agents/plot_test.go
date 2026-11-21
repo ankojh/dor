@@ -2,6 +2,8 @@ package agents
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -31,8 +34,8 @@ func plotFixtureGazetteer(t *testing.T) *geo.Gazetteer {
 		return strings.Join(fields, "\t") + "\n"
 	}
 	files := map[string]string{
-		"countryInfo.txt":      countryRow("US", "USA", "United States", "Washington") + countryRow("CN", "CHN", "China", "Beijing") + countryRow("CH", "CHE", "Switzerland", "Bern") + countryRow("FR", "FRA", "France", "Paris"),
-		"admin1CodesASCII.txt": "US.PA\tPennsylvania\nCH.GE\tGeneva\n",
+		"countryInfo.txt":      countryRow("US", "USA", "United States", "Washington") + countryRow("CN", "CHN", "China", "Beijing") + countryRow("CH", "CHE", "Switzerland", "Bern") + countryRow("FR", "FRA", "France", ""),
+		"admin1CodesASCII.txt": "US.PA\tPennsylvania\nCH.GE\tGeneva Canton\n",
 		"cities15000.txt": cityRow("phl", "Philadelphia", "PPLA", "39.9526", "-75.1652", "US", "PA", "1600000") +
 			cityRow("geneva", "Geneva", "PPLA", "46.2044", "6.1432", "CH", "GE", "200000") +
 			cityRow("washington", "Washington", "PPLC", "38.9072", "-77.0369", "US", "DC", "700000") +
@@ -47,6 +50,86 @@ func plotFixtureGazetteer(t *testing.T) *geo.Gazetteer {
 	g, err := geo.Load(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("load fixture gazetteer: %v", err)
+	}
+	return g
+}
+
+func plotMatchingFixture(t *testing.T) *geo.Gazetteer {
+	t.Helper()
+	dir := t.TempDir()
+	countries := []struct{ code, iso3, name, capital, admin string }{
+		{"US", "USA", "United States", "Washington", "DC"}, {"GB", "GBR", "United Kingdom", "London", "ENG"},
+		{"FR", "FRA", "France", "", "11"}, {"CH", "CHE", "Switzerland", "Bern", "BE"},
+		{"CN", "CHN", "China", "Beijing", "BJ"}, {"CA", "CAN", "Canada", "Ottawa", "ON"},
+		{"PA", "PAN", "Panama", "Panama City", "8"}, {"IL", "ISR", "Israel", "Jerusalem", "JM"},
+		{"MY", "MYS", "Malaysia", "Kuala Lumpur", "14"}, {"TO", "TON", "Tonga", "Nuku'alofa", "04"},
+		{"AS", "ASM", "American Samoa", "Pago Pago", "01"}, {"AT", "AUT", "Austria", "Vienna", "9"},
+		{"SA", "SAU", "Saudi Arabia", "Riyadh", "01"}, {"ZA", "ZAF", "South Africa", "Pretoria", "GP"}, {"UG", "UGA", "Uganda", "Kampala", "C"},
+		{"TN", "TUN", "Tunisia", "Tunis", "11"}, {"CO", "COL", "Colombia", "Bogota", "25"},
+		{"AM", "ARM", "Armenia", "Yerevan", "ER"}, {"IN", "IND", "India", "New Delhi", "DL"},
+		{"RS", "SRB", "Serbia", "Belgrade", "00"}, {"EG", "EGY", "Egypt", "Cairo", "C"},
+		{"BR", "BRA", "Brazil", "Brasilia", "DF"}, {"JP", "JPN", "Japan", "Tokyo", "13"},
+	}
+	var countryData, adminData, cityData strings.Builder
+	for _, c := range countries {
+		countryData.WriteString(strings.Join([]string{c.code, c.iso3, "", "", c.name, c.capital}, "\t") + "\n")
+		adminData.WriteString(c.code + "." + c.admin + "\t" + c.admin + "\n")
+	}
+	adminData.WriteString("US.TX\tTexas\nUS.NY\tNew York\nUS.FL\tFlorida\nFR.11\tIle-de-France\n")
+	add := func(id, name, aliases, feature, lat, lon, code, admin, pop string) {
+		fields := make([]string, 19)
+		fields[0], fields[1], fields[3] = id, name, aliases
+		fields[4], fields[5], fields[7] = lat, lon, feature
+		fields[8], fields[10], fields[14] = code, admin, pop
+		cityData.WriteString(strings.Join(fields, "\t") + "\n")
+	}
+	for i, c := range countries {
+		if c.capital != "" {
+			add(fmt.Sprintf("capital-%02d", i), c.capital, "", "PPLC", fmt.Sprintf("%d", 20+i), fmt.Sprintf("%d", 10+i), c.code, c.admin, "1000000")
+		}
+	}
+	add("100", "Paris", "", "PPLC", "48.8566", "2.3522", "FR", "11", "2161000")
+	add("101", "Paris", "", "PPL", "33.6609", "-95.5555", "US", "TX", "25000")
+	// Deliberate collisions model GeoNames names/alternate names that must not
+	// become an event location from capitalization or a single matching word.
+	for i, name := range []string{"Drug", "Paradise", "March", "It", "Africa", "Toyota", "Michael Jackson", "Victoria Beckham", "Google", "Lula", "STAT+", "International", "Eastern Europe", "Western leaders", "Northern Lights", "Delta Air Lines", "Delta", "Goodyear", "Florida", "York"} {
+		code, admin := "US", "DC"
+		if name == "March" || name == "Victoria Beckham" || name == "York" {
+			code, admin = "GB", "ENG"
+		}
+		if name == "Africa" {
+			code, admin = "ZA", "GP"
+		}
+		if name == "Toyota" {
+			code, admin = "JP", "13"
+		}
+		if name == "Lula" {
+			code, admin = "BR", "DF"
+		}
+		if name == "Florida" {
+			code, admin = "US", "FL"
+		}
+		if name == "Goodyear" {
+			code, admin = "US", "AZ"
+		}
+		add(fmt.Sprintf("collision-%02d", i), name, "", "PPL", fmt.Sprintf("%d", 5+i), fmt.Sprintf("%d", 30+i), code, admin, "500000")
+	}
+	add("mah dia", "Mahdia", "", "PPL", "35.5", "11.06", "TN", "11", "80000")
+	add("floridablanca", "Floridablanca", "", "PPL", "7.06", "-73.09", "CO", "25", "300000")
+	add("armenia-co", "Armenia", "", "PPL", "4.53", "-75.68", "CO", "25", "300000")
+	add("indjija", "Indjija", "", "PPL", "45.05", "20.08", "RS", "00", "50000")
+	add("palmares", "Uniao dos Palmares", "União dos Palmares,Palmares", "PPL", "-9.15", "-36.02", "BR", "DF", "65000")
+	add("new-york", "New York", "New York City,NYC", "PPLA", "40.71", "-74.00", "US", "NY", "8000000")
+	add("frome", "Frome", "", "PPL", "51.23", "-2.32", "GB", "ENG", "28000")
+	add("nis", "Nis", "Niš", "PPL", "43.32", "21.89", "RS", "00", "260000")
+	for name, data := range map[string]string{"cities15000.txt": cityData.String(), "countryInfo.txt": countryData.String(), "admin1CodesASCII.txt": adminData.String()} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, err := geo.Load(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("load matching fixture: %v", err)
 	}
 	return g
 }
@@ -246,4 +329,238 @@ func TestInvalidHintsFallBackToCountryOrGlobal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeterministicPlottingRejectsTextCollisions(t *testing.T) {
+	g := plotMatchingFixture(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	falseMatches := []struct{ title, lede, dateline string }{
+		{"Residents complain about services in drug", "Officials opened an investigation.", ""},
+		{"Travel troubles in paradise", "The resort is under new management.", ""},
+		{"Debate continues in March", "A proposal remains under review.", ""},
+		{"Coach says team will learn from it", "The club announced a change.", ""},
+		{"Africa’s growth outlook improves", "Analysts expect another strong year.", ""},
+		{"SA’s first female deputy president dies", "The announcement was made today.", ""},
+		{"It’s a dream come true", "The singer thanked her supporters.", ""},
+		{"CA officials reject the proposal", "The decision followed a lengthy debate.", ""},
+		{"PA lawmakers announce a new bill", "The measure will be debated next week.", ""},
+		{"IL officials confirm the report", "No additional details were provided.", ""},
+		{"my team is ready to compete", "The coach spoke to reporters.", ""},
+		{"We need to act as soon as possible", "The announcement came on Tuesday.", ""},
+		{"They travelled to the capital", "Officials declined to comment.", ""},
+		{"The meeting starts at noon", "The agenda was released yesterday.", ""},
+		{"Toyota recalls vehicles over airbag fault", "The recall covers several models.", ""},
+		{"Michael Jackson film breaks box office records", "The biopic opened this weekend.", ""},
+		{"Victoria Beckham launches a new collection", "The designer spoke at the event.", ""},
+		{"Google announces a new AI model", "The company shared details online.", ""},
+		{"Lula vetoes pension bill", "The president issued a statement.", ""},
+		{"STAT+ reports new clinical findings", "Researchers said more study is needed.", ""},
+		{"International flights face long delays", "Airports reported disruptions.", ""},
+		{"Eastern Europe braces for winter", "Forecasters expect freezing conditions.", ""},
+		{"Western leaders meet to discuss aid", "The talks lasted several hours.", ""},
+		{"Northern Lights visible tonight", "The display may continue through morning.", ""},
+		{"Delta Air Lines cancels hundreds of flights", "The airline cited a technical issue.", ""},
+	}
+	for i, tc := range falseMatches {
+		t.Run(fmt.Sprintf("false_%02d", i), func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: fmt.Sprintf("false-%d", i), Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if len(placed.Locations) != 0 {
+				t.Errorf("ordinary text should not plot as a town: title=%q lede=%q dateline=%q locations=%+v", tc.title, tc.lede, tc.dateline, placed.Locations)
+			}
+		})
+	}
+}
+
+func TestDeterministicPlottingUsesFullArticleEvidenceForRealPlaces(t *testing.T) {
+	g := plotMatchingFixture(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	cases := []struct {
+		name, title, lede, dateline, wantID, wantCountry string
+		wantRole                                         dorv1.Role
+	}{
+		{"uganda versus mahdia", "Uganda faces Mahdia in friendly", "The match was played in Mahdia, Tunisia.", "Mahdia, Tunisia", "mah dia", "TN", dorv1.Role_ROLE_VENUE},
+		{"florida substring collision", "Florida lawmakers debate policy", "The protest took place in Floridablanca, Colombia.", "Floridablanca, Colombia", "floridablanca", "CO", dorv1.Role_ROLE_VENUE},
+		{"armenia city", "Armenia residents await election", "Officials met in Armenia, Colombia.", "Armenia, Colombia", "armenia-co", "CO", dorv1.Role_ROLE_VENUE},
+		{"armenia country", "Armenia signs an accord with Azerbaijan", "Talks continued in Yerevan, Armenia.", "Yerevan, Armenia", "", "AM", dorv1.Role_ROLE_VENUE},
+		{"india versus indjija", "India delegation visits Indjija", "The ceremony took place in Indjija, Serbia.", "Indjija, Serbia", "indjija", "RS", dorv1.Role_ROLE_VENUE},
+		{"egypt versus goodyear", "Egypt reacts to Goodyear announcement", "Officials spoke in Cairo, Egypt.", "Cairo, Egypt", "", "EG", dorv1.Role_ROLE_VENUE},
+		{"new york not york", "New York considers a congestion charge", "The plan affects New York City residents.", "NEW YORK", "new-york", "US", dorv1.Role_ROLE_VENUE},
+		{"paris france", "Officials announce a plan in Paris", "The decision was made in Paris, France.", "Paris, France", "100", "FR", dorv1.Role_ROLE_VENUE},
+		{"paris texas", "Officials announce a plan in Paris", "The decision was made in Paris, Texas.", "Paris, Texas", "101", "US", dorv1.Role_ROLE_VENUE},
+		{"qualified frome", "Residents of Frome discuss new plan", "The debate was held in Frome, England.", "Frome, United Kingdom", "frome", "GB", dorv1.Role_ROLE_VENUE},
+		{"qualified nis", "Niš residents welcome new rail service", "The station is in Niš, Serbia.", "Niš, Serbia", "nis", "RS", dorv1.Role_ROLE_VENUE},
+		{"locative multiword alias", "Officials meet in União dos Palmares", "The meeting was held in the town.", "União dos Palmares, Brazil", "palmares", "BR", dorv1.Role_ROLE_VENUE},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if len(placed.Locations) == 0 {
+				t.Fatalf("expected a supported place, got none (backend=%s)", placed.Backend)
+			}
+			loc := placed.Locations[0]
+			if tc.wantID != "" && loc.PlaceId != tc.wantID {
+				t.Errorf("resolved %s (%s), want canonical ID %s; all locations: %+v", loc.Name, loc.PlaceId, tc.wantID, placed.Locations)
+			}
+			resolved, known := g.ByID(loc.PlaceId)
+			if !known || resolved.CountryCode != tc.wantCountry {
+				t.Errorf("resolved country %q (known=%v), want %q: %+v", resolved.CountryCode, known, tc.wantCountry, loc)
+			}
+			if loc.Role != tc.wantRole {
+				t.Errorf("resolved role %s, want %s: %+v", loc.Role, tc.wantRole, loc)
+			}
+		})
+	}
+}
+
+func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
+	dir := os.Getenv("DOR_TEST_GEONAMES_DIR")
+	if dir == "" {
+		t.Skip("set DOR_TEST_GEONAMES_DIR to run these cases against the full cached GeoNames dataset")
+	}
+	for _, file := range []string{"cities15000.txt", "countryInfo.txt", "admin1CodesASCII.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+			t.Fatalf("configured GeoNames dataset is incomplete (%s): %v", file, err)
+		}
+	}
+	g, err := geo.Load(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	for _, tc := range []struct {
+		name, title, lede, dateline string
+		want                        string
+	}{
+		{"lowercase common word", "Residents complain in drug", "Officials opened an investigation.", "", ""},
+		{"possessive country word", "Africa’s growth outlook improves", "Analysts expect another strong year.", "", ""},
+		{"person name", "Michael Jackson film breaks box office records", "The biopic opened this weekend.", "", ""},
+		{"brand name", "Toyota recalls vehicles over airbag fault", "The recall covers several models.", "", ""},
+		{"international", "International flights face long delays", "Airports reported disruptions.", "", ""},
+		{"new york dateline alias", "New York weighs tougher e-bike rules", "Officials announced the proposal.", "NEW YORK", "new york"},
+		{"frome qualified dateline", "Frome residents discuss local plan", "The meeting was held in Frome.", "Frome, England", "frome"},
+		{"nis qualified dateline", "Niš residents welcome new rail service", "The station is in Niš, Serbia.", "Niš, Serbia", "niš"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if tc.want == "" {
+				if len(placed.Locations) != 0 {
+					t.Errorf("false match produced location %+v", placed.Locations)
+				}
+				return
+			}
+			if len(placed.Locations) == 0 || normalizePlotName(placed.Locations[0].Name) != tc.want || placed.Locations[0].Role != dorv1.Role_ROLE_VENUE {
+				t.Errorf("explicit place/dateline should resolve as venue %q: %+v", tc.want, placed)
+			}
+		})
+	}
+}
+
+func normalizePlotName(name string) string {
+	return strings.ToLower(strings.Join(strings.Fields(name), " "))
+}
+
+func TestPlotterCorpusDiagnostic(t *testing.T) {
+	inputPath, outputPath := os.Getenv("DOR_TEST_CORPUS_CSV"), os.Getenv("DOR_TEST_CORPUS_OUT")
+	dataDir := os.Getenv("DOR_TEST_GEONAMES_DIR")
+	if inputPath == "" || outputPath == "" || dataDir == "" {
+		t.Skip("set DOR_TEST_CORPUS_CSV, DOR_TEST_CORPUS_OUT and DOR_TEST_GEONAMES_DIR to run the copied headline corpus")
+	}
+	for _, name := range []string{"cities15000.txt", "countryInfo.txt", "admin1CodesASCII.txt"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); err != nil {
+			t.Fatalf("corpus GeoNames dataset is incomplete (%s): %v", name, err)
+		}
+	}
+	g, err := geo.LoadExisting(context.Background(), dataDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("load corpus GeoNames data: %v", err)
+	}
+	in, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(in).ReadAll()
+	_ = in.Close()
+	if err != nil {
+		t.Fatalf("read corpus CSV: %v", err)
+	}
+	if len(records) > 0 && len(records[0]) > 0 && strings.EqualFold(strings.TrimSpace(records[0][0]), "id") {
+		records = records[1:]
+	}
+	out, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatalf("create corpus JSONL output: %v", err)
+	}
+	defer out.Close()
+	type placeResult struct {
+		PlaceID   string          `json:"place_id"`
+		Name      string          `json:"name"`
+		Lat       float32         `json:"lat"`
+		Lon       float32         `json:"lon"`
+		Precision dorv1.Precision `json:"precision"`
+		Role      dorv1.Role      `json:"role"`
+	}
+	type outcome struct {
+		ID        string        `json:"id,omitempty"`
+		Title     string        `json:"title,omitempty"`
+		Lede      string        `json:"lede,omitempty"`
+		Dateline  string        `json:"dateline,omitempty"`
+		Backend   string        `json:"backend,omitempty"`
+		Degraded  bool          `json:"degraded,omitempty"`
+		Locations []placeResult `json:"locations,omitempty"`
+		Summary   bool          `json:"summary,omitempty"`
+		Rows      int           `json:"rows,omitempty"`
+		Dominant  []frequency   `json:"dominant,omitempty"`
+	}
+	encoder := json.NewEncoder(out)
+	counts := map[string]int{}
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	for i, row := range records {
+		if len(row) < 4 {
+			t.Fatalf("CSV record %d has %d columns, want id,title,lede,dateline", i+1, len(row))
+		}
+		article := &dorv1.Article{Id: row[0], Title: row[1], Lede: row[2], Dateline: row[3]}
+		placed := p.place(context.Background(), article)
+		item := outcome{ID: row[0], Title: row[1], Lede: row[2], Dateline: row[3], Backend: placed.Backend, Degraded: placed.Degraded}
+		for _, loc := range placed.Locations {
+			item.Locations = append(item.Locations, placeResult{loc.PlaceId, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role})
+			counts[loc.PlaceId+"\t"+loc.Name]++
+		}
+		if err := encoder.Encode(item); err != nil {
+			t.Fatalf("write outcome row %d: %v", i+1, err)
+		}
+	}
+	if err := encoder.Encode(outcome{Summary: true, Rows: len(records), Dominant: dominantPlaces(counts, 30)}); err != nil {
+		t.Fatalf("write dominant summary: %v", err)
+	}
+}
+
+type frequency struct {
+	PlaceID string `json:"place_id"`
+	Name    string `json:"name"`
+	Count   int    `json:"count"`
+}
+
+func dominantPlaces(counts map[string]int, limit int) []frequency {
+	items := make([]frequency, 0, len(counts))
+	for k, n := range counts {
+		parts := strings.SplitN(k, "\t", 2)
+		name := ""
+		if len(parts) == 2 {
+			name = parts[1]
+		}
+		items = append(items, frequency{PlaceID: parts[0], Name: name, Count: n})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Count != items[j].Count {
+			return items[i].Count > items[j].Count
+		}
+		if items[i].PlaceID != items[j].PlaceID {
+			return items[i].PlaceID < items[j].PlaceID
+		}
+		return items[i].Name < items[j].Name
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }

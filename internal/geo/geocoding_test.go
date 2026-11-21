@@ -135,79 +135,58 @@ func TestRegionWithoutPlaceDataDowngradesToCountry(t *testing.T) {
 	}
 }
 
-func TestRegionWithoutADM1UsesAliasDeduplicatedPopulationCentre(t *testing.T) {
-	countries := countryRow("US", "USA", "United States", "Washington")
-	admins := "US.TN\tTennessee\n"
-	places := cityRow("301", "Smalltown", "Small Town", "PPL", "20", "20", "US", "TN", "100") +
-		cityRow("302", "Bigcity", "Big City", "PPL", "40", "40", "US", "TN", "300")
+func TestCountryFallbackUsesCapitalAndDoesNotBorrowAnotherCity(t *testing.T) {
+	countries := countryRow("US", "USA", "United States", "Washington") + countryRow("XX", "XXX", "Exampleland", "Missing Capital")
+	admins := ""
+	places := cityRow("401", "Washington", "", "PPLC", "38.9", "-77.0", "US", "DC", "700000") +
+		cityRow("402", "Largeville", "", "PPL", "10", "20", "US", "CA", "9000000") +
+		cityRow("403", "Other City", "", "PPL", "1", "2", "XX", "01", "50000")
 	g := writeGazetteer(t, countries, admins, places)
-	got, ok := g.Lookup("Tennessee", "US")
-	if !ok || got.Feature != "ADM1" || !ValidCoordinates(got.Lat, got.Lon) {
-		t.Fatalf("region should fall back to a population centre: %+v, %v", got, ok)
+	centroid, ok := g.CountryCentroid("US")
+	if !ok || centroid.Lat != 38.9 || centroid.Lon != -77 || centroid.Name != "United States" {
+		t.Fatalf("country fallback should use capital coordinates: %+v, %v", centroid, ok)
 	}
-	wantLat, wantLon, ok := populationCentre([]Place{
-		{ID: "301", CountryCode: "US", AdminCode: "TN", Feature: "PPL", Lat: 20, Lon: 20, Population: 100},
-		{ID: "301", CountryCode: "US", AdminCode: "TN", Feature: "PPL", Lat: 20, Lon: 20, Population: 100}, // alternate name
-		{ID: "302", CountryCode: "US", AdminCode: "TN", Feature: "PPL", Lat: 40, Lon: 40, Population: 300},
-	}, "US", "TN")
-	if !ok || math.Abs(got.Lat-wantLat) > 1e-8 || math.Abs(got.Lon-wantLon) > 1e-8 {
-		t.Errorf("region centre = (%f,%f), want alias-deduplicated weighted centre (%f,%f)", got.Lat, got.Lon, wantLat, wantLon)
+	if _, ok := g.CountryCentroid("XX"); ok {
+		t.Fatal("country without a gazetteer capital must not borrow another city's coordinate")
 	}
 }
 
-func TestPopulationCentreUsesUniqueCitiesAcrossDateline(t *testing.T) {
-	places := []Place{
-		{ID: "west", CountryCode: "XX", Feature: "PPL", Lat: 10, Lon: 179, Population: 100},
-		{ID: "west", CountryCode: "XX", Feature: "PPL", Lat: 10, Lon: 179, Population: 100}, // alias duplicate
-		{ID: "east", CountryCode: "XX", Feature: "PPL", Lat: 10, Lon: -179, Population: 100},
+func TestRegionFallbackUsesSeatOrMostPopulousMemberNotWeightedCentre(t *testing.T) {
+	countries := countryRow("US", "USA", "United States", "Washington")
+	admins := "US.TN\tTennessee\nUS.AL\tAlabama\n"
+	places := cityRow("501", "Seat City", "", "PPLA", "35", "-86", "US", "TN", "10000") +
+		cityRow("502", "Largest City", "", "PPL", "36", "-85", "US", "TN", "900000") +
+		cityRow("503", "Alabama Town", "", "PPL", "32", "-86", "US", "AL", "300000") +
+		cityRow("504", "Alpha", "", "PPL", "30", "-88", "US", "AL", "100000")
+	g := writeGazetteer(t, countries, admins, places)
+	seat, ok := g.Lookup("Tennessee", "US")
+	if !ok || seat.Feature != "ADM1" || seat.Lat != 35 || seat.Lon != -86 {
+		t.Fatalf("region with administrative seat should use seat coordinates: %+v, %v", seat, ok)
 	}
-	lat, lon, ok := populationCentre(places, "XX", "")
-	if !ok || math.Abs(lat-10) > .01 || math.Abs(math.Abs(lon)-180) > .1 {
-		t.Fatalf("dateline-safe, deduplicated centre = (%f,%f,%v)", lat, lon, ok)
+	seatByID, ok := g.ByID(seat.ID)
+	if !ok || seatByID.Lat != seat.Lat || seatByID.Lon != seat.Lon {
+		t.Fatalf("canonical region ID has inconsistent coordinates: region=%+v byID=%+v", seat, seatByID)
+	}
+	otherRegion, ok := g.Lookup("Alabama", "US")
+	if !ok || otherRegion.Lat != 32 || otherRegion.Lon != -86 {
+		t.Fatalf("region without a seat should use its most populous in-region place, got %+v, %v", otherRegion, ok)
 	}
 }
 
-func TestAmbiguousParisAndPlaceLikeEvidence(t *testing.T) {
+func TestExplicitLookupRemainsAvailableForAmbiguousNames(t *testing.T) {
 	g := fixtureGazetteer(t)
 	for _, tc := range []struct {
-		text, title, dateline, country string
-		wantID                         string
+		country, wantID string
 	}{
-		{"", "Paris reports new plan", "", "FR", "100"},
-		{"", "Paris residents vote", "", "FR", "100"},
-		{"", "Officials meet", "Paris, Texas", "US", "101"},
-		{"", "In Paris, officials announce a plan", "Paris, France", "", "100"},
-		{"", "New bridge opens", "Paris, France", "", "100"},
+		{"FR", "100"},
+		{"France", "100"},
+		{"US", "101"},
+		{"United States", "101"},
 	} {
-		cands := g.Candidates(tc.text, tc.title, tc.dateline, tc.country, 8)
-		got := ""
-		if len(cands) != 0 {
-			got = cands[0].ID
+		got, ok := g.Lookup("Paris", tc.country)
+		if !ok || got.ID != tc.wantID {
+			t.Errorf("explicit Lookup(Paris, %q) = %+v, %v; want %q", tc.country, got, ok, tc.wantID)
 		}
-		if got != tc.wantID {
-			t.Errorf("Candidates(%q,%q,%q,%q) first id = %q, want %q (all=%+v)", tc.text, tc.title, tc.dateline, tc.country, got, tc.wantID, cands)
-		}
-	}
-	for _, tc := range []struct{ phrase, title string }{
-		{"marathon", "Philly Marathon draws record crowd"},
-		{"frome", "A minister calls for unity"},
-		{"nis", "Officials praise the new plan"},
-		{"palmares", "Union members celebrate victory"},
-		{"biga", "A business group reports growth"},
-		{"paul", "Paul calls for talks"},
-		{"saint", "The saint was remembered at a service"},
-	} {
-		if got := g.Candidates("", tc.title, "", "", 8); len(got) != 0 {
-			t.Errorf("stray %q in %q became candidate(s): %+v", tc.phrase, tc.title, got)
-		}
-	}
-	for _, title := range []string{"Officials meet in Philadelphia", "New policy announced for Saint-Maximin-la-Sainte-Baume"} {
-		if got := g.Candidates("", title, "", "", 8); len(got) == 0 {
-			t.Errorf("genuine capitalized/locative title %q should match", title)
-		}
-	}
-	if got := g.Candidates("", "Officials in União dos Palmares", "", "", 8); len(got) == 0 || got[0].ID != "107" {
-		t.Errorf("genuine locative multiword place should match: %+v", got)
 	}
 }
 
@@ -223,6 +202,8 @@ func TestRepairLocationInvalidStrayPrecisionAndIdempotency(t *testing.T) {
 	}{
 		{"invalid coordinate replots from valid dateline", StoredLocation{PlaceID: "100", Lat: 0, Lon: 0, Precision: CityResolution}, []TextEvidence{{Title: "Officials meet in Paris", Dateline: "Paris, France"}}, "invalid_coordinate", "100", CityResolution},
 		{"stray alias removes old hit", StoredLocation{PlaceID: "104", Lat: 43.452, Lon: 5.862, Precision: CityResolution}, []TextEvidence{{Title: "Philly Marathon draws record crowd"}}, "unsupported_match", "", 0},
+		{"unresolved historical numeric ID is removed", StoredLocation{PlaceID: "99999999", Lat: 12, Lon: 34, Precision: CityResolution}, []TextEvidence{{Title: "Officials discuss unrelated policy"}}, "unsupported_match", "", 0},
+		{"unresolved historical admin ID is removed", StoredLocation{PlaceID: "admin:US.WY", Lat: 43, Lon: -107, Precision: RegionResolution}, []TextEvidence{{Title: "Officials discuss unrelated policy"}}, "unsupported_match", "", 0},
 		{"precision downgrade", StoredLocation{PlaceID: "100", Lat: 48.8566, Lon: 2.3522, Precision: PointResolution}, []TextEvidence{{Title: "Officials meet in Paris", Dateline: "Paris, France"}}, "precision", "100", CityResolution},
 	}
 	for _, tc := range cases {
@@ -245,6 +226,33 @@ func TestRepairLocationInvalidStrayPrecisionAndIdempotency(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRepairUsesAcceptedLongestSpanAndCanonicalCoordinates(t *testing.T) {
+	g := writeGazetteer(t,
+		countryRow("US", "USA", "United States", "Washington"),
+		"US.TX\tTexas\nUS.NY\tNew York\n",
+		cityRow("601", "Springfield", "", "PPL", "30", "-90", "US", "TX", "100000")+
+			cityRow("602", "New Springfield", "", "PPL", "40", "-75", "US", "NY", "50000")+
+			cityRow("603", "Washington", "", "PPLC", "38.9", "-77", "US", "DC", "700000"),
+	)
+	evidence := []TextEvidence{{Title: "New Springfield officials announce a plan"}}
+	loser := g.RepairLocation(StoredLocation{PlaceID: "601", Lat: 30, Lon: -90, Precision: CityResolution}, evidence)
+	if loser.Reason == "" || loser.Replacement == nil || loser.Replacement.ID != "602" {
+		t.Fatalf("overlapping alias loser should be replaced by accepted longest span: %+v", loser)
+	}
+	canonical := g.RepairLocation(StoredLocation{PlaceID: "602", Lat: 39, Lon: -76, Precision: CityResolution}, []TextEvidence{{Title: "New Springfield", Dateline: "New Springfield, New York"}})
+	if canonical.Reason == "" || canonical.Replacement == nil || canonical.Replacement.ID != "602" || canonical.Replacement.Lat != 40 || canonical.Replacement.Lon != -75 {
+		t.Fatalf("repair should normalize valid-but-noncanonical coordinates: %+v", canonical)
+	}
+}
+
+func TestRepairPreservesValidHazardHintPoint(t *testing.T) {
+	g := fixtureGazetteer(t)
+	decision := g.RepairLocation(StoredLocation{PlaceID: "hint:event-7", Lat: 12.3, Lon: 45.6, Precision: PointResolution}, []TextEvidence{{Title: "Earthquake reported"}})
+	if decision.Reason != "" || decision.Replacement != nil {
+		t.Fatalf("valid hazard point should remain unchanged, got %+v", decision)
 	}
 }
 

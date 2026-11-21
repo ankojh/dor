@@ -152,7 +152,7 @@ func (p *plotter) fromJev(ctx context.Context, article *dorv1.Article, candidate
 		prec = dorv1.Precision_PRECISION_CITY
 	}
 	role := dorv1.Role_ROLE_ORIGIN
-	if datelineMatches(article.GetDateline(), primary) {
+	if p.datelineMatches(article.GetDateline(), primary) {
 		role = dorv1.Role_ROLE_VENUE
 	}
 	loc := placeLocation(primary, prec, role, 1)
@@ -220,7 +220,7 @@ func (p *plotter) fromClaude(ctx context.Context, article *dorv1.Article, candid
 	}
 	if !ok && placeName != "" && p.deps.Photon != nil {
 		places, gerr := p.deps.Photon.Geocode(ctx, strings.TrimSpace(placeName+", "+country), 0, 0, 1)
-		if gerr == nil && len(places) > 0 {
+		if gerr == nil && len(places) > 0 && p.validPhotonPlace(places[0], country, article) {
 			chosen, ok = places[0], true
 		}
 	}
@@ -235,7 +235,7 @@ func (p *plotter) fromClaude(ctx context.Context, article *dorv1.Article, candid
 		prec = dorv1.Precision_PRECISION_COUNTRY
 	}
 	role := dorv1.Role_ROLE_ORIGIN
-	if datelineMatches(article.GetDateline(), chosen) {
+	if p.datelineMatches(article.GetDateline(), chosen) {
 		role = dorv1.Role_ROLE_VENUE
 	}
 	loc := placeLocation(chosen, prec, role, 1)
@@ -251,18 +251,17 @@ func (p *plotter) fromClaude(ctx context.Context, article *dorv1.Article, candid
 
 func (p *plotter) deterministic(article *dorv1.Article, candidates []geo.Place, countryHint string) *dorv1.PlacedArticle {
 	res := &dorv1.PlacedArticle{Article: article, Fallback: true, Degraded: true, Backend: "gazetteer"}
-	if len(candidates) > 0 {
+	if c, ok := geo.DeterministicPrimary(candidates); ok {
 		// Only accept a deterministic candidate when the text itself is a
 		// strong signal (title/dateline). Otherwise a country centroid is more
 		// honest than a confident-looking city guess.
-		c := candidates[0]
-		if c.Score >= 10 && p.deps.Gazetteer.SupportsPlace(c.ID, article.GetLede(), article.GetTitle(), article.GetDateline()) {
+		if c.Score >= 10 {
 			prec := dorv1.Precision(geo.PrecisionOf(c))
 			if c.CountryID {
 				prec = dorv1.Precision_PRECISION_COUNTRY
 			}
 			role := dorv1.Role_ROLE_ORIGIN
-			if datelineMatches(article.GetDateline(), c) {
+			if p.datelineMatches(article.GetDateline(), c) {
 				role = dorv1.Role_ROLE_VENUE
 			}
 			res.Locations = []*dorv1.Location{placeLocation(c, prec, role, 0.6)}
@@ -275,12 +274,7 @@ func (p *plotter) deterministic(article *dorv1.Article, candidates []geo.Place, 
 			return res
 		}
 	}
-	if article.GetDateline() != "" && p.deps.Gazetteer != nil {
-		if c, ok := p.deps.Gazetteer.Lookup(article.GetDateline(), countryHint); ok {
-			res.Locations = []*dorv1.Location{placeLocation(c, dorv1.Precision_PRECISION_CITY, dorv1.Role_ROLE_VENUE, 0.5)}
-			return res
-		}
-	}
+
 	res.Backend = "none"
 	return res
 }
@@ -301,7 +295,7 @@ func (p *plotter) geocodePrecise(ctx context.Context, article *dorv1.Article, c 
 	}
 	g := places[0]
 	if !geo.ValidCoordinates(g.Lat, g.Lon) ||
-		c.CountryCode != "" && g.CountryCode != "" && c.CountryCode != g.CountryCode ||
+		c.CountryCode != "" && c.CountryCode != g.CountryCode ||
 		geo.DistanceKM(c.Lat, c.Lon, g.Lat, g.Lon) > 100 {
 		return fallback
 	}
@@ -445,4 +439,45 @@ func (p *plotter) validateLocations(res *dorv1.PlacedArticle, countryHint string
 			res.Backend = "none"
 		}
 	}
+}
+
+func (p *plotter) datelineMatches(dateline string, c geo.Place) bool {
+	if p.deps.Gazetteer != nil {
+		for _, match := range p.deps.Gazetteer.Candidates("", "", dateline, c.CountryCode, 100) {
+			if match.ID == c.ID {
+				return true
+			}
+		}
+		return false
+	}
+	return datelineMatches(dateline, c)
+}
+
+// Claude's extracted country and any supported dateline/hint location are
+// independent bounds on a Photon answer. Unknown country identity cannot
+// justify a precise foreign result.
+func (p *plotter) validPhotonPlace(g geo.Place, country string, article *dorv1.Article) bool {
+	if !geo.ValidCoordinates(g.Lat, g.Lon) {
+		return false
+	}
+	if country != "" {
+		code := p.deps.Gazetteer.CountryCode(country)
+		if code != "" && g.CountryCode != code {
+			return false
+		}
+		if code == "" && !strings.EqualFold(g.Country, country) {
+			return false
+		}
+	}
+	if p.deps.Gazetteer != nil && article.GetDateline() != "" {
+		for _, anchor := range p.deps.Gazetteer.Candidates("", "", article.GetDateline(), country, 1) {
+			if geo.PrecisionOf(anchor) >= geo.CityResolution && geo.DistanceKM(anchor.Lat, anchor.Lon, g.Lat, g.Lon) > 100 {
+				return false
+			}
+		}
+	}
+	if h := article.GetHints(); h != nil && h.GetLocated() && geo.ValidCoordinates(h.GetLat(), h.GetLon()) && geo.DistanceKM(h.GetLat(), h.GetLon(), g.Lat, g.Lon) > 100 {
+		return false
+	}
+	return true
 }

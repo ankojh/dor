@@ -53,102 +53,47 @@ func (g *Gazetteer) ByID(id string) (Place, bool) {
 	return p, ok && ValidCoordinates(p.Lat, p.Lon)
 }
 
-// populationCentre uses unit vectors so regions across the date line do not
-// average to Greenwich. Alternate names never count as additional population.
-func populationCentre(places []Place, country, admin string) (float64, float64, bool) {
-	seen := make(map[string]bool)
-	var x, y, z float64
+// regionCentre always selects an actual supported in-region coordinate.
+// Administrative seats precede the largest populated place; aliases never
+// affect the selection. GeoNames ADM1 coordinates remain preferred.
+func regionCentre(places []Place, country, admin string) (float64, float64, bool) {
+	var best Place
+	rank := func(p Place) int {
+		if p.Feature == "ADM1" {
+			return 3
+		}
+		if p.Feature == "PPLA" {
+			return 2
+		}
+		if strings.HasPrefix(p.Feature, "PPL") {
+			return 1
+		}
+		return 0
+	}
 	for _, p := range places {
-		if p.CountryCode != country || admin != "" && p.AdminCode != admin ||
-			!strings.HasPrefix(p.Feature, "PPL") || p.Population <= 0 || seen[p.ID] || !ValidCoordinates(p.Lat, p.Lon) {
+		if p.CountryCode != country || p.AdminCode != admin || !ValidCoordinates(p.Lat, p.Lon) || rank(p) == 0 {
 			continue
 		}
-		seen[p.ID] = true
-		lat, lon, weight := p.Lat*math.Pi/180, p.Lon*math.Pi/180, float64(p.Population)
-		x += weight * math.Cos(lat) * math.Cos(lon)
-		y += weight * math.Cos(lat) * math.Sin(lon)
-		z += weight * math.Sin(lat)
-	}
-	if math.Sqrt(x*x+y*y+z*z) < 1e-9 {
-		return 0, 0, false
-	}
-	lat, lon := math.Atan2(z, math.Hypot(x, y))*180/math.Pi, math.Atan2(y, x)*180/math.Pi
-	return lat, lon, ValidCoordinates(lat, lon)
-}
-
-func regionCentre(places []Place, country, admin string) (float64, float64, bool) {
-	for _, p := range places {
-		if p.CountryCode == country && p.AdminCode == admin && p.Feature == "ADM1" && ValidCoordinates(p.Lat, p.Lon) {
-			return p.Lat, p.Lon, true
+		if best.ID == "" || rank(p) > rank(best) || rank(p) == rank(best) && (p.Population > best.Population || p.Population == best.Population && p.ID < best.ID) {
+			best = p
 		}
 	}
-	return populationCentre(places, country, admin)
+	return best.Lat, best.Lon, best.ID != ""
 }
 
 func containsPhrase(text, phrase string) bool {
 	return phrase != "" && strings.Contains(" "+normalize(text)+" ", " "+phrase+" ")
 }
 
-// mentionEvidence deliberately treats automatic headline matching more
-// strictly than an explicit Lookup or Search. The stoplist covers common words,
-// personal names and short/transliterated aliases observed in the live review.
-func (g *Gazetteer) mentionEvidence(p Place, phrase string, words []token, start, count int, dateline string) float64 {
-	if !ValidCoordinates(p.Lat, p.Lon) {
-		return 0
-	}
-	datelineMatch := containsPhrase(dateline, phrase)
-	locative := start > 0 && strings.Contains(" in at near from across around through within outside into ", " "+words[start-1].norm+" ")
-	if end := start + count; end < len(words) && (words[end].norm == "based" || words[end].norm == "s") {
-		locative = true
-	}
-	_, ambiguous := g.skip[phrase]
-	if ambiguous {
-		// Even "from Paul" can name a person. Require an independent geographic
-		// qualifier for ambiguous single words, unless explicitly a dateline.
-		qualified := p.Country != "" && containsPhrase(tokensText(words), normalize(p.Country)) ||
-			p.Admin != "" && normalize(p.Admin) != phrase && containsPhrase(tokensText(words), normalize(p.Admin))
-		if !datelineMatch && !(locative && qualified) {
-			return 0
+// SupportsPlace uses the admitted spans after collision and containment
+// resolution, exactly as production candidate selection does.
+func (g *Gazetteer) SupportsPlace(id, text, title, dateline string) bool {
+	for _, p := range g.matchedPlaces(text, title, dateline, "") {
+		if p.ID == id {
+			return true
 		}
 	}
-	// GeoNames aliases include IATA airport codes (BTS, INI) and ISO
-	// codes that collide with ordinary news abbreviations (MP, CM).
-	// Keep them for explicit lookup; automatic prose needs more evidence.
-	if !p.CountryID && !datelineMatch && len(phrase) <= 3 && phrase != normalize(p.Name) {
-		return 0
-	}
-	if !datelineMatch && !locative && len(phrase) <= 3 && phrase != normalize(p.Name) {
-		if !p.CountryID || !strings.Contains(" us usa uk u s ", " "+phrase+" ") {
-			return 0
-		}
-	}
-	if datelineMatch {
-		return 20
-	}
-	if locative {
-		return 12
-	}
-	if !capitalized(words[start].raw) {
-		return 0
-	}
-	if p.CountryID {
-		if count == 1 && len(phrase) == 2 && words[start].raw != strings.ToUpper(words[start].raw) {
-			return 0
-		}
-		return 2
-	}
-	if count > 1 {
-		for _, w := range words[start : start+count] {
-			if !capitalized(w.raw) && !strings.Contains(" de la le del dos da of the and ", " "+w.norm+" ") {
-				return 0
-			}
-		}
-		return 6
-	}
-	if p.Feature == "ADM1" || p.Population >= 50000 {
-		return 2
-	}
-	return 0
+	return false
 }
 
 func tokensText(words []token) string {
@@ -157,32 +102,4 @@ func tokensText(words []token) string {
 		parts[i] = w.norm
 	}
 	return strings.Join(parts, " ")
-}
-
-// SupportsPlace applies exactly the automatic-candidate evidence rules to an
-// existing location, including its aliases. Used by the one-off data repair.
-func (g *Gazetteer) SupportsPlace(id, text, title, dateline string) bool {
-	p, ok := g.ByID(id)
-	if !ok {
-		return false
-	}
-	for _, field := range []string{title, dateline, text} {
-		words := tokenize(field)
-		for _, alias := range g.aliases[id] {
-			parts := strings.Fields(alias)
-			for i := 0; i+len(parts) <= len(words); i++ {
-				match := true
-				for k, part := range parts {
-					if words[i+k].norm != part {
-						match = false
-						break
-					}
-				}
-				if match && g.mentionEvidence(p, alias, words, i, len(parts), dateline) > 0 {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }

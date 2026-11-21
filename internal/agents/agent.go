@@ -161,6 +161,20 @@ type Emitter struct {
 // carried automatically, and the active span becomes the parent of the next
 // agent's span.
 func (e *Emitter) Publish(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) error {
+	_, err := e.PublishAck(ctx, subject, data, opts...)
+	return err
+}
+
+// PublishAck is Publish plus the JetStream acknowledgement. Callers that need
+// to know whether the message was a duplicate (record mode) use this.
+func (e *Emitter) PublishAck(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) (*jetstream.PubAck, error) {
+	ctx = e.publishContext(ctx)
+	return e.agent.PublishAck(ctx, subject, data, opts...)
+}
+
+// publishContext carries the input article id into a publish when the caller
+// did not set one.
+func (e *Emitter) publishContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = e.ctx
 	}
@@ -169,7 +183,7 @@ func (e *Emitter) Publish(ctx context.Context, subject string, data []byte, opts
 			ctx = WithArticleID(ctx, id)
 		}
 	}
-	return e.agent.Publish(ctx, subject, data, opts...)
+	return ctx
 }
 
 // job is one delivered message plus the heartbeat that protects it from
@@ -543,17 +557,25 @@ func (a *Base) forceStop() {
 
 // Publish writes one message, preserving the article id and trace context.
 func (a *Base) Publish(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) error {
+	_, err := a.PublishAck(ctx, subject, data, opts...)
+	return err
+}
+
+// PublishAck writes one message and returns the JetStream acknowledgement, so
+// a fetcher can skip recording a publish that JetStream deduplicated.
+func (a *Base) PublishAck(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) (*jetstream.PubAck, error) {
 	h := nats.Header{}
 	if id := ArticleIDFrom(ctx); id != "" {
 		h.Set(bus.HeaderArticleID, id)
 	}
 	injectTrace(ctx, h)
 	opts = append(opts, bus.WithHeaders(h))
-	if _, err := a.bus.Publish(ctx, subject, data, opts...); err != nil {
-		return err
+	ack, err := a.bus.Publish(ctx, subject, data, opts...)
+	if err != nil {
+		return nil, err
 	}
 	a.metrics.out.WithLabelValues(a.spec.Name).Inc()
-	return nil
+	return ack, nil
 }
 
 func (a *Base) enqueue(msg jetstream.Msg) {

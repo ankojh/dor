@@ -364,6 +364,70 @@ func (JoinKind) EnumDescriptor() ([]byte, []int) {
 	return file_dor_v1_dor_proto_rawDescGZIP(), []int{5}
 }
 
+// SourceKind is the fetch family of a raw article's source. It is how the
+// normalizer and the wire tell a feed item from a GDELT bulk row or a hazard
+// alert without consulting the source list.
+type SourceKind int32
+
+const (
+	SourceKind_SOURCE_KIND_UNSPECIFIED SourceKind = 0
+	SourceKind_SOURCE_KIND_RSS         SourceKind = 1
+	SourceKind_SOURCE_KIND_GDELT       SourceKind = 2
+	SourceKind_SOURCE_KIND_USGS        SourceKind = 3
+	SourceKind_SOURCE_KIND_GDACS       SourceKind = 4
+	SourceKind_SOURCE_KIND_EONET       SourceKind = 5
+	SourceKind_SOURCE_KIND_RELIEFWEB   SourceKind = 6
+)
+
+// Enum value maps for SourceKind.
+var (
+	SourceKind_name = map[int32]string{
+		0: "SOURCE_KIND_UNSPECIFIED",
+		1: "SOURCE_KIND_RSS",
+		2: "SOURCE_KIND_GDELT",
+		3: "SOURCE_KIND_USGS",
+		4: "SOURCE_KIND_GDACS",
+		5: "SOURCE_KIND_EONET",
+		6: "SOURCE_KIND_RELIEFWEB",
+	}
+	SourceKind_value = map[string]int32{
+		"SOURCE_KIND_UNSPECIFIED": 0,
+		"SOURCE_KIND_RSS":         1,
+		"SOURCE_KIND_GDELT":       2,
+		"SOURCE_KIND_USGS":        3,
+		"SOURCE_KIND_GDACS":       4,
+		"SOURCE_KIND_EONET":       5,
+		"SOURCE_KIND_RELIEFWEB":   6,
+	}
+)
+
+func (x SourceKind) Enum() *SourceKind {
+	p := new(SourceKind)
+	*p = x
+	return p
+}
+
+func (x SourceKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SourceKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_dor_v1_dor_proto_enumTypes[6].Descriptor()
+}
+
+func (SourceKind) Type() protoreflect.EnumType {
+	return &file_dor_v1_dor_proto_enumTypes[6]
+}
+
+func (x SourceKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SourceKind.Descriptor instead.
+func (SourceKind) EnumDescriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{6}
+}
+
 // Location is one place attached to an article or story.
 type Location struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -459,15 +523,19 @@ func (x *Location) GetWeight() float32 {
 
 // Article is the normalized ingest record. The full text is never stored.
 type Article struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	SourceId      string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Url           string                 `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
-	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
-	Lede          string                 `protobuf:"bytes,5,opt,name=lede,proto3" json:"lede,omitempty"`
-	PublishedAt   int64                  `protobuf:"varint,6,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"` // unix seconds
-	Lang          string                 `protobuf:"bytes,7,opt,name=lang,proto3" json:"lang,omitempty"`
-	Dateline      string                 `protobuf:"bytes,8,opt,name=dateline,proto3" json:"dateline,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	SourceId    string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	Url         string                 `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
+	Title       string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	Lede        string                 `protobuf:"bytes,5,opt,name=lede,proto3" json:"lede,omitempty"`
+	PublishedAt int64                  `protobuf:"varint,6,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"` // unix seconds
+	Lang        string                 `protobuf:"bytes,7,opt,name=lang,proto3" json:"lang,omitempty"`
+	Dateline    string                 `protobuf:"bytes,8,opt,name=dateline,proto3" json:"dateline,omitempty"`
+	// Append-only hints from the raw item. The plotter still decides the place;
+	// these only save it work and feed hazard heat.
+	Hints         *RawHints `protobuf:"bytes,9,opt,name=hints,proto3" json:"hints,omitempty"`
+	Burst         bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -556,6 +624,20 @@ func (x *Article) GetDateline() string {
 		return x.Dateline
 	}
 	return ""
+}
+
+func (x *Article) GetHints() *RawHints {
+	if x != nil {
+		return x.Hints
+	}
+	return nil
+}
+
+func (x *Article) GetBurst() bool {
+	if x != nil {
+		return x.Burst
+	}
+	return false
 }
 
 // Story is a cluster of articles about one event.
@@ -1886,6 +1968,347 @@ func (*ClientMessage_GetText) isClientMessage_Body() {}
 
 func (*ClientMessage_Ack) isClientMessage_Body() {}
 
+// RawHints are the fetcher's untrusted location and severity signals. The
+// plotter still decides the final place; hints only save it work and feed the
+// heat boost for hazards.
+type RawHints struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Located       bool                   `protobuf:"varint,1,opt,name=located,proto3" json:"located,omitempty"` // lat/lon are usable
+	Lat           float64                `protobuf:"fixed64,2,opt,name=lat,proto3" json:"lat,omitempty"`
+	Lon           float64                `protobuf:"fixed64,3,opt,name=lon,proto3" json:"lon,omitempty"`
+	Precision     Precision              `protobuf:"varint,4,opt,name=precision,proto3,enum=dor.v1.Precision" json:"precision,omitempty"`
+	Themes        []string               `protobuf:"bytes,5,rep,name=themes,proto3" json:"themes,omitempty"`
+	Country       string                 `protobuf:"bytes,6,opt,name=country,proto3" json:"country,omitempty"`                                   // ISO 3166-1 code when the upstream provides one; empty otherwise
+	Hazard        string                 `protobuf:"bytes,7,opt,name=hazard,proto3" json:"hazard,omitempty"`                                     // earthquake, flood, cyclone, volcano, ...
+	Magnitude     float64                `protobuf:"fixed64,8,opt,name=magnitude,proto3" json:"magnitude,omitempty"`                             // upstream magnitude, e.g. quake Mw
+	Severity      float64                `protobuf:"fixed64,9,opt,name=severity,proto3" json:"severity,omitempty"`                               // normalised 0..1 where the upstream gives a scale
+	EventId       string                 `protobuf:"bytes,10,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`                   // upstream id (USGS/GDACS/EONET/GDELT record)
+	MagnitudeUnit string                 `protobuf:"bytes,11,opt,name=magnitude_unit,json=magnitudeUnit,proto3" json:"magnitude_unit,omitempty"` // "Mw", "m/s", "knots", "acres", ...
+	Place         string                 `protobuf:"bytes,12,opt,name=place,proto3" json:"place,omitempty"`                                      // upstream place name, e.g. "Delhi, India"
+	Revision      string                 `protobuf:"bytes,13,opt,name=revision,proto3" json:"revision,omitempty"`                                // upstream revision (update time, episode+alert level, geometry date)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RawHints) Reset() {
+	*x = RawHints{}
+	mi := &file_dor_v1_dor_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RawHints) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RawHints) ProtoMessage() {}
+
+func (x *RawHints) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RawHints.ProtoReflect.Descriptor instead.
+func (*RawHints) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *RawHints) GetLocated() bool {
+	if x != nil {
+		return x.Located
+	}
+	return false
+}
+
+func (x *RawHints) GetLat() float64 {
+	if x != nil {
+		return x.Lat
+	}
+	return 0
+}
+
+func (x *RawHints) GetLon() float64 {
+	if x != nil {
+		return x.Lon
+	}
+	return 0
+}
+
+func (x *RawHints) GetPrecision() Precision {
+	if x != nil {
+		return x.Precision
+	}
+	return Precision_PRECISION_COUNTRY
+}
+
+func (x *RawHints) GetThemes() []string {
+	if x != nil {
+		return x.Themes
+	}
+	return nil
+}
+
+func (x *RawHints) GetCountry() string {
+	if x != nil {
+		return x.Country
+	}
+	return ""
+}
+
+func (x *RawHints) GetHazard() string {
+	if x != nil {
+		return x.Hazard
+	}
+	return ""
+}
+
+func (x *RawHints) GetMagnitude() float64 {
+	if x != nil {
+		return x.Magnitude
+	}
+	return 0
+}
+
+func (x *RawHints) GetSeverity() float64 {
+	if x != nil {
+		return x.Severity
+	}
+	return 0
+}
+
+func (x *RawHints) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *RawHints) GetMagnitudeUnit() string {
+	if x != nil {
+		return x.MagnitudeUnit
+	}
+	return ""
+}
+
+func (x *RawHints) GetPlace() string {
+	if x != nil {
+		return x.Place
+	}
+	return ""
+}
+
+func (x *RawHints) GetRevision() string {
+	if x != nil {
+		return x.Revision
+	}
+	return ""
+}
+
+// RawArticle is one fetched item before normalization. The fetchers write it
+// to article.raw; hazards write the same message to article.raw.priority.
+// Only a short snippet is carried, never the full article text.
+type RawArticle struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                             // raw:<sha256(url)>; the normalizer assigns the canonical id later
+	SourceId      string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // id from deploy/sources/sources.yaml
+	Kind          SourceKind             `protobuf:"varint,3,opt,name=kind,proto3,enum=dor.v1.SourceKind" json:"kind,omitempty"`
+	Url           string                 `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
+	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	Summary       string                 `protobuf:"bytes,6,opt,name=summary,proto3" json:"summary,omitempty"`                             // short snippet, never full text
+	PublishedAt   int64                  `protobuf:"varint,7,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"` // unix seconds; 0 when the source does not say
+	FetchedAt     int64                  `protobuf:"varint,8,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`       // unix seconds
+	Lang          string                 `protobuf:"bytes,9,opt,name=lang,proto3" json:"lang,omitempty"`                                   // BCP 47 when known
+	Hints         *RawHints              `protobuf:"bytes,10,opt,name=hints,proto3" json:"hints,omitempty"`
+	Burst         bool                   `protobuf:"varint,11,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk: the wire collapses bursts by source/time/place
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RawArticle) Reset() {
+	*x = RawArticle{}
+	mi := &file_dor_v1_dor_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RawArticle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RawArticle) ProtoMessage() {}
+
+func (x *RawArticle) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RawArticle.ProtoReflect.Descriptor instead.
+func (*RawArticle) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RawArticle) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RawArticle) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
+}
+
+func (x *RawArticle) GetKind() SourceKind {
+	if x != nil {
+		return x.Kind
+	}
+	return SourceKind_SOURCE_KIND_UNSPECIFIED
+}
+
+func (x *RawArticle) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *RawArticle) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *RawArticle) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *RawArticle) GetPublishedAt() int64 {
+	if x != nil {
+		return x.PublishedAt
+	}
+	return 0
+}
+
+func (x *RawArticle) GetFetchedAt() int64 {
+	if x != nil {
+		return x.FetchedAt
+	}
+	return 0
+}
+
+func (x *RawArticle) GetLang() string {
+	if x != nil {
+		return x.Lang
+	}
+	return ""
+}
+
+func (x *RawArticle) GetHints() *RawHints {
+	if x != nil {
+		return x.Hints
+	}
+	return nil
+}
+
+func (x *RawArticle) GetBurst() bool {
+	if x != nil {
+		return x.Burst
+	}
+	return false
+}
+
+// RecordFrame is one raw pipeline message inside a record-mode file. See
+// docs/record-format.md. A file is an eight-byte magic header followed by
+// length-delimited RecordFrame frames, gzip-compressed.
+type RecordFrame struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Subject       string                 `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`                                  // article.raw or article.raw.priority
+	MsgId         string                 `protobuf:"bytes,2,opt,name=msg_id,json=msgId,proto3" json:"msg_id,omitempty"`                         // Nats-Msg-Id, so a replay is idempotent
+	ReceivedAtMs  int64                  `protobuf:"varint,3,opt,name=received_at_ms,json=receivedAtMs,proto3" json:"received_at_ms,omitempty"` // unix milliseconds when the writer accepted it
+	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`                                  // serialized RawArticle
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordFrame) Reset() {
+	*x = RecordFrame{}
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordFrame) ProtoMessage() {}
+
+func (x *RecordFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordFrame.ProtoReflect.Descriptor instead.
+func (*RecordFrame) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *RecordFrame) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *RecordFrame) GetMsgId() string {
+	if x != nil {
+		return x.MsgId
+	}
+	return ""
+}
+
+func (x *RecordFrame) GetReceivedAtMs() int64 {
+	if x != nil {
+		return x.ReceivedAtMs
+	}
+	return 0
+}
+
+func (x *RecordFrame) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
 var File_dor_v1_dor_proto protoreflect.FileDescriptor
 
 const file_dor_v1_dor_proto_rawDesc = "" +
@@ -1898,7 +2321,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x03lon\x18\x04 \x01(\x02R\x03lon\x12/\n" +
 	"\tprecision\x18\x05 \x01(\x0e2\x11.dor.v1.PrecisionR\tprecision\x12 \n" +
 	"\x04role\x18\x06 \x01(\x0e2\f.dor.v1.RoleR\x04role\x12\x16\n" +
-	"\x06weight\x18\a \x01(\x02R\x06weight\"\xc5\x01\n" +
+	"\x06weight\x18\a \x01(\x02R\x06weight\"\x83\x02\n" +
 	"\aArticle\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
@@ -1907,7 +2330,10 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x04lede\x18\x05 \x01(\tR\x04lede\x12!\n" +
 	"\fpublished_at\x18\x06 \x01(\x03R\vpublishedAt\x12\x12\n" +
 	"\x04lang\x18\a \x01(\tR\x04lang\x12\x1a\n" +
-	"\bdateline\x18\b \x01(\tR\bdateline\"\x9a\x02\n" +
+	"\bdateline\x18\b \x01(\tR\bdateline\x12&\n" +
+	"\x05hints\x18\t \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
+	"\x05burst\x18\n" +
+	" \x01(\bR\x05burst\"\x9a\x02\n" +
 	"\x05Story\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12,\n" +
@@ -2013,7 +2439,42 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x05focus\x18\x04 \x01(\v2\r.dor.v1.FocusH\x00R\x05focus\x12,\n" +
 	"\bget_text\x18\x05 \x01(\v2\x0f.dor.v1.GetTextH\x00R\agetText\x12\x1f\n" +
 	"\x03ack\x18\x06 \x01(\v2\v.dor.v1.AckH\x00R\x03ackB\x06\n" +
-	"\x04body*\xf8\x01\n" +
+	"\x04body\"\xf1\x02\n" +
+	"\bRawHints\x12\x18\n" +
+	"\alocated\x18\x01 \x01(\bR\alocated\x12\x10\n" +
+	"\x03lat\x18\x02 \x01(\x01R\x03lat\x12\x10\n" +
+	"\x03lon\x18\x03 \x01(\x01R\x03lon\x12/\n" +
+	"\tprecision\x18\x04 \x01(\x0e2\x11.dor.v1.PrecisionR\tprecision\x12\x16\n" +
+	"\x06themes\x18\x05 \x03(\tR\x06themes\x12\x18\n" +
+	"\acountry\x18\x06 \x01(\tR\acountry\x12\x16\n" +
+	"\x06hazard\x18\a \x01(\tR\x06hazard\x12\x1c\n" +
+	"\tmagnitude\x18\b \x01(\x01R\tmagnitude\x12\x1a\n" +
+	"\bseverity\x18\t \x01(\x01R\bseverity\x12\x19\n" +
+	"\bevent_id\x18\n" +
+	" \x01(\tR\aeventId\x12%\n" +
+	"\x0emagnitude_unit\x18\v \x01(\tR\rmagnitudeUnit\x12\x14\n" +
+	"\x05place\x18\f \x01(\tR\x05place\x12\x1a\n" +
+	"\brevision\x18\r \x01(\tR\brevision\"\xb7\x02\n" +
+	"\n" +
+	"RawArticle\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12&\n" +
+	"\x04kind\x18\x03 \x01(\x0e2\x12.dor.v1.SourceKindR\x04kind\x12\x10\n" +
+	"\x03url\x18\x04 \x01(\tR\x03url\x12\x14\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title\x12\x18\n" +
+	"\asummary\x18\x06 \x01(\tR\asummary\x12!\n" +
+	"\fpublished_at\x18\a \x01(\x03R\vpublishedAt\x12\x1d\n" +
+	"\n" +
+	"fetched_at\x18\b \x01(\x03R\tfetchedAt\x12\x12\n" +
+	"\x04lang\x18\t \x01(\tR\x04lang\x12&\n" +
+	"\x05hints\x18\n" +
+	" \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
+	"\x05burst\x18\v \x01(\bR\x05burst\"~\n" +
+	"\vRecordFrame\x12\x18\n" +
+	"\asubject\x18\x01 \x01(\tR\asubject\x12\x15\n" +
+	"\x06msg_id\x18\x02 \x01(\tR\x05msgId\x12$\n" +
+	"\x0ereceived_at_ms\x18\x03 \x01(\x03R\freceivedAtMs\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload*\xf8\x01\n" +
 	"\bCategory\x12\x12\n" +
 	"\x0eCATEGORY_OTHER\x10\x00\x12\x15\n" +
 	"\x11CATEGORY_CONFLICT\x10\x01\x12\x15\n" +
@@ -2051,7 +2512,16 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x11DIRECTION_UNCLEAR\x10\x02*3\n" +
 	"\bJoinKind\x12\x11\n" +
 	"\rJOIN_KIND_NEW\x10\x00\x12\x14\n" +
-	"\x10JOIN_KIND_JOINED\x10\x01B/Z-github.com/ankojh/dor/internal/pb/dorv1;dorv1b\x06proto3"
+	"\x10JOIN_KIND_JOINED\x10\x01*\xb4\x01\n" +
+	"\n" +
+	"SourceKind\x12\x1b\n" +
+	"\x17SOURCE_KIND_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fSOURCE_KIND_RSS\x10\x01\x12\x15\n" +
+	"\x11SOURCE_KIND_GDELT\x10\x02\x12\x14\n" +
+	"\x10SOURCE_KIND_USGS\x10\x03\x12\x15\n" +
+	"\x11SOURCE_KIND_GDACS\x10\x04\x12\x15\n" +
+	"\x11SOURCE_KIND_EONET\x10\x05\x12\x19\n" +
+	"\x15SOURCE_KIND_RELIEFWEB\x10\x06B/Z-github.com/ankojh/dor/internal/pb/dorv1;dorv1b\x06proto3"
 
 var (
 	file_dor_v1_dor_proto_rawDescOnce sync.Once
@@ -2065,8 +2535,8 @@ func file_dor_v1_dor_proto_rawDescGZIP() []byte {
 	return file_dor_v1_dor_proto_rawDescData
 }
 
-var file_dor_v1_dor_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_dor_v1_dor_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_dor_v1_dor_proto_goTypes = []any{
 	(Category)(0),         // 0: dor.v1.Category
 	(Precision)(0),        // 1: dor.v1.Precision
@@ -2074,61 +2544,69 @@ var file_dor_v1_dor_proto_goTypes = []any{
 	(LinkType)(0),         // 3: dor.v1.LinkType
 	(Direction)(0),        // 4: dor.v1.Direction
 	(JoinKind)(0),         // 5: dor.v1.JoinKind
-	(*Location)(nil),      // 6: dor.v1.Location
-	(*Article)(nil),       // 7: dor.v1.Article
-	(*Story)(nil),         // 8: dor.v1.Story
-	(*Link)(nil),          // 9: dor.v1.Link
-	(*LinkKey)(nil),       // 10: dor.v1.LinkKey
-	(*AlertHit)(nil),      // 11: dor.v1.AlertHit
-	(*WireRow)(nil),       // 12: dor.v1.WireRow
-	(*Delta)(nil),         // 13: dor.v1.Delta
-	(*Snapshot)(nil),      // 14: dor.v1.Snapshot
-	(*DeltaBatch)(nil),    // 15: dor.v1.DeltaBatch
-	(*Resync)(nil),        // 16: dor.v1.Resync
-	(*ServerMessage)(nil), // 17: dor.v1.ServerMessage
-	(*Hello)(nil),         // 18: dor.v1.Hello
-	(*SetFilters)(nil),    // 19: dor.v1.SetFilters
-	(*SetPrompts)(nil),    // 20: dor.v1.SetPrompts
-	(*Focus)(nil),         // 21: dor.v1.Focus
-	(*GetText)(nil),       // 22: dor.v1.GetText
-	(*Ack)(nil),           // 23: dor.v1.Ack
-	(*ClientMessage)(nil), // 24: dor.v1.ClientMessage
-	nil,                   // 25: dor.v1.WireRow.PromptScoresEntry
+	(SourceKind)(0),       // 6: dor.v1.SourceKind
+	(*Location)(nil),      // 7: dor.v1.Location
+	(*Article)(nil),       // 8: dor.v1.Article
+	(*Story)(nil),         // 9: dor.v1.Story
+	(*Link)(nil),          // 10: dor.v1.Link
+	(*LinkKey)(nil),       // 11: dor.v1.LinkKey
+	(*AlertHit)(nil),      // 12: dor.v1.AlertHit
+	(*WireRow)(nil),       // 13: dor.v1.WireRow
+	(*Delta)(nil),         // 14: dor.v1.Delta
+	(*Snapshot)(nil),      // 15: dor.v1.Snapshot
+	(*DeltaBatch)(nil),    // 16: dor.v1.DeltaBatch
+	(*Resync)(nil),        // 17: dor.v1.Resync
+	(*ServerMessage)(nil), // 18: dor.v1.ServerMessage
+	(*Hello)(nil),         // 19: dor.v1.Hello
+	(*SetFilters)(nil),    // 20: dor.v1.SetFilters
+	(*SetPrompts)(nil),    // 21: dor.v1.SetPrompts
+	(*Focus)(nil),         // 22: dor.v1.Focus
+	(*GetText)(nil),       // 23: dor.v1.GetText
+	(*Ack)(nil),           // 24: dor.v1.Ack
+	(*ClientMessage)(nil), // 25: dor.v1.ClientMessage
+	(*RawHints)(nil),      // 26: dor.v1.RawHints
+	(*RawArticle)(nil),    // 27: dor.v1.RawArticle
+	(*RecordFrame)(nil),   // 28: dor.v1.RecordFrame
+	nil,                   // 29: dor.v1.WireRow.PromptScoresEntry
 }
 var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 0: dor.v1.Location.precision:type_name -> dor.v1.Precision
 	2,  // 1: dor.v1.Location.role:type_name -> dor.v1.Role
-	0,  // 2: dor.v1.Story.category:type_name -> dor.v1.Category
-	6,  // 3: dor.v1.Story.locations:type_name -> dor.v1.Location
-	3,  // 4: dor.v1.Link.type:type_name -> dor.v1.LinkType
-	4,  // 5: dor.v1.Link.dir:type_name -> dor.v1.Direction
-	0,  // 6: dor.v1.WireRow.category:type_name -> dor.v1.Category
-	5,  // 7: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
-	25, // 8: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
-	8,  // 9: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
-	9,  // 10: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
-	10, // 11: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
-	12, // 12: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
-	11, // 13: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
-	8,  // 14: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
-	9,  // 15: dor.v1.Snapshot.links:type_name -> dor.v1.Link
-	13, // 16: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
-	14, // 17: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
-	15, // 18: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
-	16, // 19: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
-	0,  // 20: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
-	10, // 21: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
-	18, // 22: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
-	19, // 23: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
-	20, // 24: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
-	21, // 25: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
-	22, // 26: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
-	23, // 27: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
-	28, // [28:28] is the sub-list for method output_type
-	28, // [28:28] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	26, // 2: dor.v1.Article.hints:type_name -> dor.v1.RawHints
+	0,  // 3: dor.v1.Story.category:type_name -> dor.v1.Category
+	7,  // 4: dor.v1.Story.locations:type_name -> dor.v1.Location
+	3,  // 5: dor.v1.Link.type:type_name -> dor.v1.LinkType
+	4,  // 6: dor.v1.Link.dir:type_name -> dor.v1.Direction
+	0,  // 7: dor.v1.WireRow.category:type_name -> dor.v1.Category
+	5,  // 8: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
+	29, // 9: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
+	9,  // 10: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
+	10, // 11: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
+	11, // 12: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
+	13, // 13: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
+	12, // 14: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
+	9,  // 15: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
+	10, // 16: dor.v1.Snapshot.links:type_name -> dor.v1.Link
+	14, // 17: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
+	15, // 18: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
+	16, // 19: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
+	17, // 20: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
+	0,  // 21: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
+	11, // 22: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
+	19, // 23: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
+	20, // 24: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
+	21, // 25: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
+	22, // 26: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
+	23, // 27: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
+	24, // 28: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
+	1,  // 29: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
+	6,  // 30: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
+	26, // 31: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_dor_v1_dor_proto_init() }
@@ -2162,8 +2640,8 @@ func file_dor_v1_dor_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dor_v1_dor_proto_rawDesc), len(file_dor_v1_dor_proto_rawDesc)),
-			NumEnums:      6,
-			NumMessages:   20,
+			NumEnums:      7,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

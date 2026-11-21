@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS push_subscriptions;
+DROP TABLE IF EXISTS alert_hits;
+DROP TABLE IF EXISTS alerts;
+DROP TABLE IF EXISTS links;
+DROP TABLE IF EXISTS story_locations;
+DROP TABLE IF EXISTS stories;
+DROP TABLE IF EXISTS article_locations;
+DROP TABLE IF EXISTS articles;
+DROP FUNCTION IF EXISTS ensure_article_partition(date);
+DROP TABLE IF EXISTS sources;

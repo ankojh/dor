@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+    <channel>
+        <title><![CDATA[BBC News]]></title>
+        <description><![CDATA[BBC News - World]]></description>
+        <link>https://www.bbc.co.uk/news/world</link>
+        <image>
+            <url>https://news.bbcimg.co.uk/nol/shared/img/bbc_news_120x60.gif</url>
+            <title>BBC News</title>
+            <link>https://www.bbc.co.uk/news/world</link>
+        </image>
+        <generator>RSS for Node</generator>
+        <lastBuildDate>Sat, 21 Nov 2026 05:27:30 GMT</lastBuildDate>
+        <atom:link href="https://feeds.bbci.co.uk/news/world/rss.xml" rel="self" type="application/rss+xml"/>
+        <copyright><![CDATA[Copyright: (C) British Broadcasting Corporation, see https://www.bbc.co.uk/usingthebbc/terms-of-use/#15metadataandrssfeeds for terms and conditions of reuse.]]></copyright>
+        <language><![CDATA[en-gb]]></language>
+        <ttl>15</ttl>
+        <item>
+            <title><![CDATA[Tech stock sell-off drags markets down as Anthropic shares slide]]></title>
+            <description><![CDATA[Pressures weighed on US markets, with the S&P 500 and the Dow Jones Industrial Average pushed into correction territory.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c6808ym10vzgo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c6808ym10vzgo#0</guid>
+            <pubDate>Fri, 20 Nov 2026 22:42:47 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/03d5/live/7b6fe9b0-e4ed-11f1-8781-bf15c9202663.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[UK to explore even closer ties with EU after agreeing deal, says Burnham]]></title>
+            <description><![CDATA[The UK-EU deal agreed on Friday covers British food exports, emissions trading and a youth experience scheme.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c6jreyqgw4e9o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c6jreyqgw4e9o#0</guid>
+            <pubDate>Fri, 20 Nov 2026 17:49:48 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/4b92/live/7ef50e70-e511-11f1-a094-5fdc692f3e33.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[French police officers sentenced for beating of music producer Michel Zecler]]></title>
+            <description><![CDATA[The court has upheld the 2020 beating of the black music producer as an aggravated circumstance of racism.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/ck9d7e9wvvweo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/ck9d7e9wvvweo#0</guid>
+            <pubDate>Fri, 20 Nov 2026 22:37:09 GMT</pubDate>
+            <media:thumbnail width="240" height="159" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/eced/live/2313a9a0-e533-11f1-a094-5fdc692f3e33.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Man convicted of starting Palisades fire in Los Angeles]]></title>
+            <description><![CDATA[The 30-year-old LA resident was convicted of arson leading to wildfires that killed 12 people and destroyed more than 6,800 buildings.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c64gn0gy8rj3o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c64gn0gy8rj3o#0</guid>
+            <pubDate>Sat, 21 Nov 2026 04:34:00 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/8053/live/b01bb4f0-e556-11f1-ad51-c3505e495cd9.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Zelensky says Putin is a 'killer' after Trump calls Russian leader a friend]]></title>
+            <description><![CDATA[Trump's comments came as Russia launched "biggest attacks this year" against Ukraine.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cxnv4zvmdy0jo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cxnv4zvmdy0jo#0</guid>
+            <pubDate>Sat, 21 Nov 2026 05:15:41 GMT</pubDate>
+            <media:thumbnail width="240" height="160" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/8f48/live/f2f4d6c0-e55c-11f1-99a1-253766e7ad8b.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[In a year of AI solving maths problems, Anthropic may have just solved the biggest]]></title>
+            <description><![CDATA[A mathematician at Anthropic says he used an AI to prove the famed Riemann hypothesis, though verification will take some time. ]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c6pqr2g7w059o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c6pqr2g7w059o#0</guid>
+            <pubDate>Fri, 20 Nov 2026 23:08:57 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/78a0/live/a0688a80-e531-11f1-99b6-a35a62fa4264.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Gérard Depardieu and French author investigated over sexual allegations]]></title>
+            <description><![CDATA[A judicial investigation was launched after a complaint was filed last year over "allegations of a sexual nature".]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c9ly43pj10mvo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c9ly43pj10mvo#0</guid>
+            <pubDate>Fri, 20 Nov 2026 19:45:20 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/e9a6/live/0355fa40-e51b-11f1-99a1-253766e7ad8b.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Mamdani announces plan to close New York's Rikers Island jail by 2032  ]]></title>
+            <description><![CDATA[Plans to shutter the troubled facility date back to 2019, when the city council first voted to close it but delays arose over where to place inmates.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cmjeqv89egylo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cmjeqv89egylo#1</guid>
+            <pubDate>Sat, 21 Nov 2026 00:01:39 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/4622/live/d8e189d0-e52b-11f1-964d-a1d5fe40573e.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Denmark accuses Russia of plotting to assassinate US-Ukrainian rapper]]></title>
+            <description><![CDATA[The Russian embassy in Denmark has denied the allegation, which has led to Russia's defence attaché being expelled.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cmde1lj4yjxno?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cmde1lj4yjxno#1</guid>
+            <pubDate>Fri, 20 Nov 2026 21:57:07 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/9834/live/684cb9a0-e527-11f1-b32f-b1f1a32fbf0e.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Trump threatens ban on US firms building AI data centres overseas]]></title>
+            <description><![CDATA[The US president provided little detail on the potential policy, saying others in his team were hearing about it for the first time.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cmde1lw9y54ko?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cmde1lw9y54ko#1</guid>
+            <pubDate>Fri, 20 Nov 2026 20:54:12 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/5eb0/live/a9cadc20-e529-11f1-99a1-253766e7ad8b.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Indian man sentenced to 19-plus years in plot to assassinate US-based Sikh separatist leader]]></title>
+            <description><![CDATA[Nikhil Gupta pleaded guilty to murder-for-hire, conspiracy to commit murder-for-hire, and conspiracy to commit money laundering in February.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cq702ez8d4lwo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cq702ez8d4lwo#1</guid>
+            <pubDate>Fri, 20 Nov 2026 19:27:49 GMT</pubDate>
+            <media:thumbnail width="240" height="134" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/a37e/live/01b2ac80-e505-11f1-b40b-5f46e8cf687c.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Nearly 600 women killed in South Africa within three months]]></title>
+            <description><![CDATA[Police officials called for "greater efforts to prevent... violence" against women and children.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/c69vwyjp0339o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/c69vwyjp0339o#1</guid>
+            <pubDate>Fri, 20 Nov 2026 15:55:16 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/b54a/live/170dbfd0-e4fa-11f1-a8e4-b1e12a49db15.jpg"/>
+        

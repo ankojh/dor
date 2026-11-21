@@ -1,0 +1,47 @@
+{
+  "time": 1,
+  "count": 2,
+  "data": [
+    {
+      "id": "1234567",
+      "fields": {
+        "title": "Floods displace thousands in northern Nigeria",
+        "url": "https://reliefweb.int/report/nigeria/floods-displace-thousands-northern-nigeria",
+        "date": {
+          "created": "2026-11-20T09:15:00+00:00",
+          "original": "2026-11-19T00:00:00+00:00"
+        },
+        "country": [
+          {
+            "name": "Nigeria",
+            "iso3": "NGA",
+            "location": { "lat": 9.082, "lon": 8.6753 }
+          }
+        ],
+        "primary_country": {
+          "name": "Nigeria",
+          "iso3": "NGA",
+          "location": { "lat": 9.082, "lon": 8.6753 }
+        },
+        "source": [{ "shortname": "OCHA", "name": "UN Office for the Coordination of Humanitarian Affairs" }],
+        "disaster_type": [{ "name": "Flood" }]
+      }
+    },
+    {
+      "id": "7654321",
+      "fields": {
+        "title": "Earthquake response update: shelter and water",
+        "url": "",
+        "date": { "created": "2026-11-20T11:40:00+00:00" },
+        "country": [],
+        "primary_country": {
+          "name": "Nepal",
+          "iso3": "NPL",
+          "location": { "lat": 28.3949, "lon": 84.124 }
+        },
+        "source": [{ "shortname": "IFRC", "name": "International Federation of Red Cross and Red Crescent Societies" }],
+        "disaster_type": [{ "name": "Earthquake" }]
+      }
+    }
+  ]
+}

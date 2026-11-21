@@ -8,7 +8,7 @@ WEB := web
 BIN := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke
+.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke sources-check
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -94,6 +94,9 @@ eval-label: ## Label the eval set interactively (SET=articles|pairs LABELER=huma
 
 llm-smoke: ## Verify Claude prompt caching; skips without ANTHROPIC_API_KEY
 	$(GO) run ./eval/cmd/llm-smoke
+
+sources-check: ## Fetch and verify every source in the seed list (network; JSON on stdout)
+	$(GO) run ./tools/feedcheck -sources deploy/sources/sources.yaml
 
 clean: ## Remove build outputs
 	rm -rf $(BIN) $(WEB)/dist

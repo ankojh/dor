@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,12 +76,14 @@ func (s *Server) handleAlertsList(w http.ResponseWriter, r *http.Request) {
 }
 
 type alertInput struct {
-	Prompt     string   `json:"prompt"`
-	MinSources int      `json:"min_sources"`
-	Region     string   `json:"region"`
-	Strictness float64  `json:"strictness"`
-	Channels   []string `json:"channels"`
-	Enabled    *bool    `json:"enabled"`
+	Prompt        string   `json:"prompt"`
+	MinSources    int      `json:"min_sources"`
+	Region        string   `json:"region"`
+	Strictness    float64  `json:"strictness"`
+	Channels      []string `json:"channels"`
+	Enabled       *bool    `json:"enabled"`
+	DailyDigest   bool     `json:"daily_digest"`
+	DigestHourUTC int      `json:"digest_hour_utc"`
 }
 
 // handleAlertsCreate serves POST /api/alerts.
@@ -97,12 +100,14 @@ func (s *Server) handleAlertsCreate(w http.ResponseWriter, r *http.Request) {
 		enabled = *in.Enabled
 	}
 	created, err := s.cfg.Alerts.Create(r.Context(), alert.Alert{
-		Prompt:     in.Prompt,
-		MinSources: in.MinSources,
-		Region:     in.Region,
-		Strictness: in.Strictness,
-		Channels:   in.Channels,
-		Enabled:    enabled,
+		Prompt:        in.Prompt,
+		DailyDigest:   in.DailyDigest,
+		DigestHourUTC: in.DigestHourUTC,
+		MinSources:    in.MinSources,
+		Region:        in.Region,
+		Strictness:    in.Strictness,
+		Channels:      in.Channels,
+		Enabled:       enabled,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -162,7 +167,7 @@ type backtestInput struct {
 }
 
 // handleAlertsBacktest serves POST /api/alerts/backtest. It is bounded to the
-// last 24 h and 200 stories by the matcher.
+// last 24 h; bounded scans report explicit partial/count metadata.
 func (s *Server) handleAlertsBacktest(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Matcher == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -195,7 +200,17 @@ func (s *Server) handleAlertsHits(w http.ResponseWriter, r *http.Request) {
 	if hits == nil {
 		hits = []alert.Hit{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
+	// Use decimal strings at the HTTP boundary, matching protobuf uint64's
+	// precise representation in the browser without changing durable KV JSON.
+	type hitJSON struct {
+		alert.Hit
+		Generation string `json:"generation"`
+	}
+	encoded := make([]hitJSON, 0, len(hits))
+	for _, hit := range hits {
+		encoded = append(encoded, hitJSON{Hit: hit, Generation: strconv.FormatUint(hit.Generation, 10)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hits": encoded})
 }
 
 // handleAlertsMute serves POST /api/alerts/{id}/mute.

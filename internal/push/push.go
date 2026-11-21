@@ -125,7 +125,10 @@ func NewSender(cfg Config) (*Sender, error) {
 // one transient delivery failed, which lets the notifier's retry/backoff/DLQ
 // path take over. Expired subscriptions (404/410) are removed immediately.
 func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
-	records := s.alerts.PushSubscriptions(ctx)
+	records, err := s.alerts.PushSubscriptions(ctx)
+	if err != nil {
+		return fmt.Errorf("push: load subscriptions: %w", err)
+	}
 	if len(records) == 0 {
 		s.log.Debug("push: no subscriptions", "alert", a.ID)
 		return nil
@@ -137,7 +140,11 @@ func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
 	var errs []error
 	sent := 0
 	for _, record := range records {
-		if s.alerts.PushDelivered(ctx, h.AlertID, h.StoryID, h.Level, record.ID) {
+		delivered, err := s.alerts.PushDelivered(ctx, h, record.ID)
+		if err != nil {
+			return err
+		}
+		if delivered {
 			continue
 		}
 		sub, err := DecryptSubscription(s.key, record.Blob)
@@ -152,14 +159,18 @@ func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
 		if errors.Is(err, errSubscriptionGone) {
 			s.log.Info("push: subscription expired; removed", "id", record.ID)
 			s.alerts.DeletePush(ctx, record.ID)
-			s.alerts.MarkPushDelivered(ctx, h.AlertID, h.StoryID, h.Level, record.ID)
+			if err := s.alerts.MarkPushDelivered(ctx, h, record.ID); err != nil {
+				return err
+			}
 			continue
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("push: subscription %s: %w", record.ID, err))
 			continue
 		}
-		s.alerts.MarkPushDelivered(ctx, h.AlertID, h.StoryID, h.Level, record.ID)
+		if err := s.alerts.MarkPushDelivered(ctx, h, record.ID); err != nil {
+			return err
+		}
 		sent++
 	}
 	if len(errs) > 0 {
@@ -214,15 +225,17 @@ func (s *Sender) sendOne(ctx context.Context, sub Subscription, payload []byte) 
 // notificationPayload is the JSON the service worker receives. Keep this in
 // sync with the frontend push contract.
 type notificationPayload struct {
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	AlertID string `json:"alert_id"`
-	StoryID string `json:"story_id"`
-	Prompt  string `json:"prompt"`
-	Level   string `json:"level"`
-	URL     string `json:"url"`
-	Tag     string `json:"tag"`
-	FiredAt int64  `json:"fired_at"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	AlertID    string `json:"alert_id"`
+	StoryID    string `json:"story_id"`
+	Prompt     string `json:"prompt"`
+	Level      string `json:"level"`
+	URL        string `json:"url"`
+	Tag        string `json:"tag"`
+	FiredAt    int64  `json:"fired_at"`
+	Generation uint64 `json:"generation"`
+	Approx     bool   `json:"approx"`
 }
 
 func buildNotificationPayload(a alert.Alert, h alert.Hit) notificationPayload {
@@ -234,19 +247,24 @@ func buildNotificationPayload(a alert.Alert, h alert.Hit) notificationPayload {
 		title = "Dor alert"
 	}
 	body := strings.TrimSpace(h.Prompt)
+	if h.Approx {
+		body = "Approximate match — " + body
+	}
 	if h.Level == "escalated" {
 		body = "Escalated — " + body
 	}
 	return notificationPayload{
-		Title:   title,
-		Body:    body,
-		AlertID: h.AlertID,
-		StoryID: h.StoryID,
-		Prompt:  h.Prompt,
-		Level:   h.Level,
-		URL:     "/?story=" + url.QueryEscape(h.StoryID) + "&alert=" + url.QueryEscape(h.AlertID),
-		Tag:     "dor-alert:" + h.AlertID + ":" + h.StoryID,
-		FiredAt: h.FiredAt.Unix(),
+		Title:      title,
+		Body:       body,
+		AlertID:    h.AlertID,
+		StoryID:    h.StoryID,
+		Prompt:     h.Prompt,
+		Level:      h.Level,
+		URL:        "/?story=" + url.QueryEscape(h.StoryID) + "&alert=" + url.QueryEscape(h.AlertID),
+		Tag:        "dor-alert:" + h.Identity(),
+		Generation: h.Generation,
+		Approx:     h.Approx,
+		FiredAt:    h.FiredAt.Unix(),
 	}
 }
 

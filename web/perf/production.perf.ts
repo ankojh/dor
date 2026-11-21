@@ -12,6 +12,10 @@ const base = process.env.F31_URL ?? "http://127.0.0.1:5184";
 const out = process.env.F31_OUT ?? "/tmp/dor-f31-evidence";
 const minutes = Number(process.env.F31_MINUTES ?? 60);
 await mkdir(out, { recursive: true });
+const initialPower = execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }).trim();
+if (minutes >= 60 && !initialPower.includes("AC Power")) {
+  throw new Error("The sustained acceptance run requires confirmed AC power.");
+}
 const browser = await chromium.launch({
   channel: "chrome",
   headless: false,
@@ -24,7 +28,8 @@ const browser = await chromium.launch({
 });
 const report: any = {
   startedAt: new Date().toISOString(),
-  power: execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }).trim(),
+  power: initialPower,
+  commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
   hardware: execFileSync("sysctl", ["-n", "hw.model", "machdep.cpu.brand_string", "hw.memsize"], {
     encoding: "utf8",
   }).trim(),
@@ -221,6 +226,10 @@ try {
       continuity: await page.evaluate(() => (window as any).__f31Continuity),
     };
     report.samples.push(sample);
+    if (minutes >= 60 && !sample.power.includes("AC Power")) {
+      stopped = true;
+      report.stopReason = "AC power was lost during the sustained run";
+    }
     if (minute === 2) report.twoMinutes = sample;
     if (minute === 10) {
       await page.screenshot({ path: path.join(out, "focus-ten-minutes.png") });

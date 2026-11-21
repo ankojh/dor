@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
 import { afterShellPaint } from "./globe/load";
+import { createFocusHandler } from "./globe/focus-events";
 import { LruCache } from "./worker/lru";
 import type { StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
@@ -1096,8 +1097,7 @@ export function App() {
       if (disposed) return;
       liveGlobe = new LiveGlobe(mapContainer, {
         onState: setGlobe,
-        onFocus: (details) => {
-          setFocus(details);
+        onFocus: createFocusHandler<FocusDetails>(setFocus, (details) => {
           if (details) {
             pendingInitialStory = null;
             const matching = wireRows().find((item) => item.row.storyId === details.storyId);
@@ -1116,7 +1116,7 @@ export function App() {
             setStoryDetails(null);
             syncHash(null);
           }
-        },
+        }),
         onLinkClick: openLink,
         onView: (nextView) => {
           setView(nextView);

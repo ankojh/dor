@@ -20,7 +20,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file dor/v1/dor.proto.
  */
 export const file_dor_v1_dor: GenFile = /*@__PURE__*/
-  fileDesc("ChBkb3IvdjEvZG9yLnByb3RvEgZkb3IudjEilgEKCExvY2F0aW9uEhAKCHBsYWNlX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSCwoDbGF0GAMgASgCEgsKA2xvbhgEIAEoAhIkCglwcmVjaXNpb24YBSABKA4yES5kb3IudjEuUHJlY2lzaW9uEhoKBHJvbGUYBiABKA4yDC5kb3IudjEuUm9sZRIOCgZ3ZWlnaHQYByABKAIiiAEKB0FydGljbGUSCgoCaWQYASABKAkSEQoJc291cmNlX2lkGAIgASgJEgsKA3VybBgDIAEoCRINCgV0aXRsZRgEIAEoCRIMCgRsZWRlGAUgASgJEhQKDHB1Ymxpc2hlZF9hdBgGIAEoAxIMCgRsYW5nGAcgASgJEhAKCGRhdGVsaW5lGAggASgJIsgBCgVTdG9yeRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIiCghjYXRlZ29yeRgDIAEoDjIQLmRvci52MS5DYXRlZ29yeRIjCglsb2NhdGlvbnMYBCADKAsyEC5kb3IudjEuTG9jYXRpb24SDwoHcHJpbWFyeRgFIAEoDRIUCgxzb3VyY2VfY291bnQYBiABKA0SDAoEaGVhdBgHIAEoAhISCgpmaXJzdF9zZWVuGAggASgDEhIKCnVwZGF0ZWRfYXQYCSABKAMilgEKBExpbmsSCQoBYRgBIAEoCRIJCgFiGAIgASgJEh4KBHR5cGUYAyABKA4yEC5kb3IudjEuTGlua1R5cGUSHgoDZGlyGAQgASgOMhEuZG9yLnYxLkRpcmVjdGlvbhISCgpjb25maWRlbmNlGAUgASgCEhAKCHN0cmVuZ3RoGAYgASgCEhIKCnVwZGF0ZWRfYXQYByABKAMiHwoHTGlua0tleRIJCgFhGAEgASgJEgkKAWIYAiABKAkibgoIQWxlcnRIaXQSEAoIYWxlcnRfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFbGV2ZWwYAyABKAkSEAoIZmlyZWRfYXQYBCABKAMSDQoFdGl0bGUYBSABKAkSDgoGcHJvbXB0GAYgASgJIpwCCgdXaXJlUm93EhIKCmFydGljbGVfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFdGl0bGUYAyABKAkSDgoGc291cmNlGAQgASgJEg0KBXBsYWNlGAUgASgJEiIKCGNhdGVnb3J5GAYgASgOMhAuZG9yLnYxLkNhdGVnb3J5EgoKAmF0GAcgASgDEh4KBGpvaW4YCCABKA4yEC5kb3IudjEuSm9pbktpbmQSOAoNcHJvbXB0X3Njb3JlcxgJIAMoCzIhLmRvci52MS5XaXJlUm93LlByb21wdFNjb3Jlc0VudHJ5GjMKEVByb21wdFNjb3Jlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoAjoCOAEi7AEKBURlbHRhEgsKA3NlcRgBIAEoBBIlCgxzdG9yeV91cHNlcnQYAiABKAsyDS5kb3IudjEuU3RvcnlIABIWCgxzdG9yeV9leHBpcmUYAyABKAlIABIjCgtsaW5rX3Vwc2VydBgEIAEoCzIMLmRvci52MS5MaW5rSAASJgoLbGlua19yZW1vdmUYBSABKAsyDy5kb3IudjEuTGlua0tleUgAEh8KBHdpcmUYBiABKAsyDy5kb3IudjEuV2lyZVJvd0gAEiEKBWFsZXJ0GAcgASgLMhAuZG9yLnYxLkFsZXJ0SGl0SABCBgoEYm9keSJmCghTbmFwc2hvdBILCgNzZXEYASABKAQSHgoHc3RvcmllcxgCIAMoCzINLmRvci52MS5TdG9yeRIbCgVsaW5rcxgDIAMoCzIMLmRvci52MS5MaW5rEhAKCGJ1aWx0X2F0GAQgASgDIisKCkRlbHRhQmF0Y2gSHQoGZGVsdGFzGAEgAygLMg0uZG9yLnYxLkRlbHRhIiUKBlJlc3luYxILCgNzZXEYASABKAQSDgoGcmVhc29uGAIgASgJIoUBCg1TZXJ2ZXJNZXNzYWdlEiQKCHNuYXBzaG90GAEgASgLMhAuZG9yLnYxLlNuYXBzaG90SAASJAoGZGVsdGFzGAIgASgLMhIuZG9yLnYxLkRlbHRhQmF0Y2hIABIgCgZyZXN5bmMYAyABKAsyDi5kb3IudjEuUmVzeW5jSABCBgoEYm9keSIxCgVIZWxsbxIQCghsYXN0X3NlcRgBIAEoBBIWCg5jbGllbnRfdmVyc2lvbhgCIAEoCSJmCgpTZXRGaWx0ZXJzEiQKCmNhdGVnb3JpZXMYASADKA4yEC5kb3IudjEuQ2F0ZWdvcnkSDwoHcmVnaW9ucxgCIAMoCRITCgttaW5fc291cmNlcxgDIAEoDRIMCgRsYW5nGAQgAygJIh0KClNldFByb21wdHMSDwoHcHJvbXB0cxgBIAMoCSIZCgVGb2N1cxIQCghzdG9yeV9pZBgBIAEoCSJACgdHZXRUZXh0EhEKCXN0b3J5X2lkcxgBIAMoCRIiCglsaW5rX2tleXMYAiADKAsyDy5kb3IudjEuTGlua0tleSISCgNBY2sSCwoDc2VxGAEgASgEIu4BCg1DbGllbnRNZXNzYWdlEh4KBWhlbGxvGAEgASgLMg0uZG9yLnYxLkhlbGxvSAASKQoLc2V0X2ZpbHRlcnMYAiABKAsyEi5kb3IudjEuU2V0RmlsdGVyc0gAEikKC3NldF9wcm9tcHRzGAMgASgLMhIuZG9yLnYxLlNldFByb21wdHNIABIeCgVmb2N1cxgEIAEoCzINLmRvci52MS5Gb2N1c0gAEiMKCGdldF90ZXh0GAUgASgLMg8uZG9yLnYxLkdldFRleHRIABIaCgNhY2sYBiABKAsyCy5kb3IudjEuQWNrSABCBgoEYm9keSr4AQoIQ2F0ZWdvcnkSEgoOQ0FURUdPUllfT1RIRVIQABIVChFDQVRFR09SWV9DT05GTElDVBABEhUKEUNBVEVHT1JZX1BPTElUSUNTEAISFAoQQ0FURUdPUllfRUNPTk9NWRADEhEKDUNBVEVHT1JZX1RFQ0gQBBIUChBDQVRFR09SWV9DTElNQVRFEAUSFQoRQ0FURUdPUllfRElTQVNURVIQBhITCg9DQVRFR09SWV9IRUFMVEgQBxIUChBDQVRFR09SWV9TQ0lFTkNFEAgSEwoPQ0FURUdPUllfU1BPUlRTEAkSFAoQQ0FURUdPUllfQ1VMVFVSRRAKKncKCVByZWNpc2lvbhIVChFQUkVDSVNJT05fQ09VTlRSWRAAEhQKEFBSRUNJU0lPTl9SRUdJT04QARISCg5QUkVDSVNJT05fQ0lUWRACEhQKEFBSRUNJU0lPTl9TVFJFRVQQAxITCg9QUkVDSVNJT05fUE9JTlQQBCpeCgRSb2xlEg4KClJPTEVfVkVOVUUQABIPCgtST0xFX09SSUdJThABEg4KClJPTEVfUEFSVFkQAhIRCg1ST0xFX0FGRkVDVEVEEAMSEgoOUk9MRV9NRU5USU9ORUQQBCpQCghMaW5rVHlwZRIUChBMSU5LX1RZUEVfQ0FVU0FMEAASFgoSTElOS19UWVBFX1JFQUNUSU9OEAESFgoSTElOS19UWVBFX1RIRU1BVElDEAIqTgoJRGlyZWN0aW9uEhQKEERJUkVDVElPTl9BX1RPX0IQABIUChBESVJFQ1RJT05fQl9UT19BEAESFQoRRElSRUNUSU9OX1VOQ0xFQVIQAiozCghKb2luS2luZBIRCg1KT0lOX0tJTkRfTkVXEAASFAoQSk9JTl9LSU5EX0pPSU5FRBABQi9aLWdpdGh1Yi5jb20vYW5rb2poL2Rvci9pbnRlcm5hbC9wYi9kb3J2MTtkb3J2MWIGcHJvdG8z");
+  fileDesc("ChBkb3IvdjEvZG9yLnByb3RvEgZkb3IudjEilgEKCExvY2F0aW9uEhAKCHBsYWNlX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSCwoDbGF0GAMgASgCEgsKA2xvbhgEIAEoAhIkCglwcmVjaXNpb24YBSABKA4yES5kb3IudjEuUHJlY2lzaW9uEhoKBHJvbGUYBiABKA4yDC5kb3IudjEuUm9sZRIOCgZ3ZWlnaHQYByABKAIiuAEKB0FydGljbGUSCgoCaWQYASABKAkSEQoJc291cmNlX2lkGAIgASgJEgsKA3VybBgDIAEoCRINCgV0aXRsZRgEIAEoCRIMCgRsZWRlGAUgASgJEhQKDHB1Ymxpc2hlZF9hdBgGIAEoAxIMCgRsYW5nGAcgASgJEhAKCGRhdGVsaW5lGAggASgJEh8KBWhpbnRzGAkgASgLMhAuZG9yLnYxLlJhd0hpbnRzEg0KBWJ1cnN0GAogASgIIsgBCgVTdG9yeRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIiCghjYXRlZ29yeRgDIAEoDjIQLmRvci52MS5DYXRlZ29yeRIjCglsb2NhdGlvbnMYBCADKAsyEC5kb3IudjEuTG9jYXRpb24SDwoHcHJpbWFyeRgFIAEoDRIUCgxzb3VyY2VfY291bnQYBiABKA0SDAoEaGVhdBgHIAEoAhISCgpmaXJzdF9zZWVuGAggASgDEhIKCnVwZGF0ZWRfYXQYCSABKAMilgEKBExpbmsSCQoBYRgBIAEoCRIJCgFiGAIgASgJEh4KBHR5cGUYAyABKA4yEC5kb3IudjEuTGlua1R5cGUSHgoDZGlyGAQgASgOMhEuZG9yLnYxLkRpcmVjdGlvbhISCgpjb25maWRlbmNlGAUgASgCEhAKCHN0cmVuZ3RoGAYgASgCEhIKCnVwZGF0ZWRfYXQYByABKAMiHwoHTGlua0tleRIJCgFhGAEgASgJEgkKAWIYAiABKAkibgoIQWxlcnRIaXQSEAoIYWxlcnRfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFbGV2ZWwYAyABKAkSEAoIZmlyZWRfYXQYBCABKAMSDQoFdGl0bGUYBSABKAkSDgoGcHJvbXB0GAYgASgJIpwCCgdXaXJlUm93EhIKCmFydGljbGVfaWQYASABKAkSEAoIc3RvcnlfaWQYAiABKAkSDQoFdGl0bGUYAyABKAkSDgoGc291cmNlGAQgASgJEg0KBXBsYWNlGAUgASgJEiIKCGNhdGVnb3J5GAYgASgOMhAuZG9yLnYxLkNhdGVnb3J5EgoKAmF0GAcgASgDEh4KBGpvaW4YCCABKA4yEC5kb3IudjEuSm9pbktpbmQSOAoNcHJvbXB0X3Njb3JlcxgJIAMoCzIhLmRvci52MS5XaXJlUm93LlByb21wdFNjb3Jlc0VudHJ5GjMKEVByb21wdFNjb3Jlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoAjoCOAEi7AEKBURlbHRhEgsKA3NlcRgBIAEoBBIlCgxzdG9yeV91cHNlcnQYAiABKAsyDS5kb3IudjEuU3RvcnlIABIWCgxzdG9yeV9leHBpcmUYAyABKAlIABIjCgtsaW5rX3Vwc2VydBgEIAEoCzIMLmRvci52MS5MaW5rSAASJgoLbGlua19yZW1vdmUYBSABKAsyDy5kb3IudjEuTGlua0tleUgAEh8KBHdpcmUYBiABKAsyDy5kb3IudjEuV2lyZVJvd0gAEiEKBWFsZXJ0GAcgASgLMhAuZG9yLnYxLkFsZXJ0SGl0SABCBgoEYm9keSJmCghTbmFwc2hvdBILCgNzZXEYASABKAQSHgoHc3RvcmllcxgCIAMoCzINLmRvci52MS5TdG9yeRIbCgVsaW5rcxgDIAMoCzIMLmRvci52MS5MaW5rEhAKCGJ1aWx0X2F0GAQgASgDIisKCkRlbHRhQmF0Y2gSHQoGZGVsdGFzGAEgAygLMg0uZG9yLnYxLkRlbHRhIiUKBlJlc3luYxILCgNzZXEYASABKAQSDgoGcmVhc29uGAIgASgJIoUBCg1TZXJ2ZXJNZXNzYWdlEiQKCHNuYXBzaG90GAEgASgLMhAuZG9yLnYxLlNuYXBzaG90SAASJAoGZGVsdGFzGAIgASgLMhIuZG9yLnYxLkRlbHRhQmF0Y2hIABIgCgZyZXN5bmMYAyABKAsyDi5kb3IudjEuUmVzeW5jSABCBgoEYm9keSIxCgVIZWxsbxIQCghsYXN0X3NlcRgBIAEoBBIWCg5jbGllbnRfdmVyc2lvbhgCIAEoCSJmCgpTZXRGaWx0ZXJzEiQKCmNhdGVnb3JpZXMYASADKA4yEC5kb3IudjEuQ2F0ZWdvcnkSDwoHcmVnaW9ucxgCIAMoCRITCgttaW5fc291cmNlcxgDIAEoDRIMCgRsYW5nGAQgAygJIh0KClNldFByb21wdHMSDwoHcHJvbXB0cxgBIAMoCSIZCgVGb2N1cxIQCghzdG9yeV9pZBgBIAEoCSJACgdHZXRUZXh0EhEKCXN0b3J5X2lkcxgBIAMoCRIiCglsaW5rX2tleXMYAiADKAsyDy5kb3IudjEuTGlua0tleSISCgNBY2sSCwoDc2VxGAEgASgEIu4BCg1DbGllbnRNZXNzYWdlEh4KBWhlbGxvGAEgASgLMg0uZG9yLnYxLkhlbGxvSAASKQoLc2V0X2ZpbHRlcnMYAiABKAsyEi5kb3IudjEuU2V0RmlsdGVyc0gAEikKC3NldF9wcm9tcHRzGAMgASgLMhIuZG9yLnYxLlNldFByb21wdHNIABIeCgVmb2N1cxgEIAEoCzINLmRvci52MS5Gb2N1c0gAEiMKCGdldF90ZXh0GAUgASgLMg8uZG9yLnYxLkdldFRleHRIABIaCgNhY2sYBiABKAsyCy5kb3IudjEuQWNrSABCBgoEYm9keSL8AQoIUmF3SGludHMSDwoHbG9jYXRlZBgBIAEoCBILCgNsYXQYAiABKAESCwoDbG9uGAMgASgBEiQKCXByZWNpc2lvbhgEIAEoDjIRLmRvci52MS5QcmVjaXNpb24SDgoGdGhlbWVzGAUgAygJEg8KB2NvdW50cnkYBiABKAkSDgoGaGF6YXJkGAcgASgJEhEKCW1hZ25pdHVkZRgIIAEoARIQCghzZXZlcml0eRgJIAEoARIQCghldmVudF9pZBgKIAEoCRIWCg5tYWduaXR1ZGVfdW5pdBgLIAEoCRINCgVwbGFjZRgMIAEoCRIQCghyZXZpc2lvbhgNIAEoCSLiAQoKUmF3QXJ0aWNsZRIKCgJpZBgBIAEoCRIRCglzb3VyY2VfaWQYAiABKAkSIAoEa2luZBgDIAEoDjISLmRvci52MS5Tb3VyY2VLaW5kEgsKA3VybBgEIAEoCRINCgV0aXRsZRgFIAEoCRIPCgdzdW1tYXJ5GAYgASgJEhQKDHB1Ymxpc2hlZF9hdBgHIAEoAxISCgpmZXRjaGVkX2F0GAggASgDEgwKBGxhbmcYCSABKAkSHwoFaGludHMYCiABKAsyEC5kb3IudjEuUmF3SGludHMSDQoFYnVyc3QYCyABKAgiVwoLUmVjb3JkRnJhbWUSDwoHc3ViamVjdBgBIAEoCRIOCgZtc2dfaWQYAiABKAkSFgoOcmVjZWl2ZWRfYXRfbXMYAyABKAMSDwoHcGF5bG9hZBgEIAEoDCr4AQoIQ2F0ZWdvcnkSEgoOQ0FURUdPUllfT1RIRVIQABIVChFDQVRFR09SWV9DT05GTElDVBABEhUKEUNBVEVHT1JZX1BPTElUSUNTEAISFAoQQ0FURUdPUllfRUNPTk9NWRADEhEKDUNBVEVHT1JZX1RFQ0gQBBIUChBDQVRFR09SWV9DTElNQVRFEAUSFQoRQ0FURUdPUllfRElTQVNURVIQBhITCg9DQVRFR09SWV9IRUFMVEgQBxIUChBDQVRFR09SWV9TQ0lFTkNFEAgSEwoPQ0FURUdPUllfU1BPUlRTEAkSFAoQQ0FURUdPUllfQ1VMVFVSRRAKKncKCVByZWNpc2lvbhIVChFQUkVDSVNJT05fQ09VTlRSWRAAEhQKEFBSRUNJU0lPTl9SRUdJT04QARISCg5QUkVDSVNJT05fQ0lUWRACEhQKEFBSRUNJU0lPTl9TVFJFRVQQAxITCg9QUkVDSVNJT05fUE9JTlQQBCpeCgRSb2xlEg4KClJPTEVfVkVOVUUQABIPCgtST0xFX09SSUdJThABEg4KClJPTEVfUEFSVFkQAhIRCg1ST0xFX0FGRkVDVEVEEAMSEgoOUk9MRV9NRU5USU9ORUQQBCpQCghMaW5rVHlwZRIUChBMSU5LX1RZUEVfQ0FVU0FMEAASFgoSTElOS19UWVBFX1JFQUNUSU9OEAESFgoSTElOS19UWVBFX1RIRU1BVElDEAIqTgoJRGlyZWN0aW9uEhQKEERJUkVDVElPTl9BX1RPX0IQABIUChBESVJFQ1RJT05fQl9UT19BEAESFQoRRElSRUNUSU9OX1VOQ0xFQVIQAiozCghKb2luS2luZBIRCg1KT0lOX0tJTkRfTkVXEAASFAoQSk9JTl9LSU5EX0pPSU5FRBABKrQBCgpTb3VyY2VLaW5kEhsKF1NPVVJDRV9LSU5EX1VOU1BFQ0lGSUVEEAASEwoPU09VUkNFX0tJTkRfUlNTEAESFQoRU09VUkNFX0tJTkRfR0RFTFQQAhIUChBTT1VSQ0VfS0lORF9VU0dTEAMSFQoRU09VUkNFX0tJTkRfR0RBQ1MQBBIVChFTT1VSQ0VfS0lORF9FT05FVBAFEhkKFVNPVVJDRV9LSU5EX1JFTElFRldFQhAGQi9aLWdpdGh1Yi5jb20vYW5rb2poL2Rvci9pbnRlcm5hbC9wYi9kb3J2MTtkb3J2MWIGcHJvdG8z");
 
 /**
  * Location is one place attached to an article or story.
@@ -118,6 +118,21 @@ export type Article = Message<"dor.v1.Article"> & {
    * @generated from field: string dateline = 8;
    */
   dateline: string;
+
+  /**
+   * Append-only hints from the raw item. The plotter still decides the place;
+   * these only save it work and feed hazard heat.
+   *
+   * @generated from field: dor.v1.RawHints hints = 9;
+   */
+  hints?: RawHints | undefined;
+
+  /**
+   * GDELT bulk item; the wire collapses bursts
+   *
+   * @generated from field: bool burst = 10;
+   */
+  burst: boolean;
 };
 
 /**
@@ -752,6 +767,234 @@ export const ClientMessageSchema: GenMessage<ClientMessage> = /*@__PURE__*/
   messageDesc(file_dor_v1_dor, 18);
 
 /**
+ * RawHints are the fetcher's untrusted location and severity signals. The
+ * plotter still decides the final place; hints only save it work and feed the
+ * heat boost for hazards.
+ *
+ * @generated from message dor.v1.RawHints
+ */
+export type RawHints = Message<"dor.v1.RawHints"> & {
+  /**
+   * lat/lon are usable
+   *
+   * @generated from field: bool located = 1;
+   */
+  located: boolean;
+
+  /**
+   * @generated from field: double lat = 2;
+   */
+  lat: number;
+
+  /**
+   * @generated from field: double lon = 3;
+   */
+  lon: number;
+
+  /**
+   * @generated from field: dor.v1.Precision precision = 4;
+   */
+  precision: Precision;
+
+  /**
+   * @generated from field: repeated string themes = 5;
+   */
+  themes: string[];
+
+  /**
+   * ISO 3166-1 code when the upstream provides one; empty otherwise
+   *
+   * @generated from field: string country = 6;
+   */
+  country: string;
+
+  /**
+   * earthquake, flood, cyclone, volcano, ...
+   *
+   * @generated from field: string hazard = 7;
+   */
+  hazard: string;
+
+  /**
+   * upstream magnitude, e.g. quake Mw
+   *
+   * @generated from field: double magnitude = 8;
+   */
+  magnitude: number;
+
+  /**
+   * normalised 0..1 where the upstream gives a scale
+   *
+   * @generated from field: double severity = 9;
+   */
+  severity: number;
+
+  /**
+   * upstream id (USGS/GDACS/EONET/GDELT record)
+   *
+   * @generated from field: string event_id = 10;
+   */
+  eventId: string;
+
+  /**
+   * "Mw", "m/s", "knots", "acres", ...
+   *
+   * @generated from field: string magnitude_unit = 11;
+   */
+  magnitudeUnit: string;
+
+  /**
+   * upstream place name, e.g. "Delhi, India"
+   *
+   * @generated from field: string place = 12;
+   */
+  place: string;
+
+  /**
+   * upstream revision (update time, episode+alert level, geometry date)
+   *
+   * @generated from field: string revision = 13;
+   */
+  revision: string;
+};
+
+/**
+ * Describes the message dor.v1.RawHints.
+ * Use `create(RawHintsSchema)` to create a new message.
+ */
+export const RawHintsSchema: GenMessage<RawHints> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 19);
+
+/**
+ * RawArticle is one fetched item before normalization. The fetchers write it
+ * to article.raw; hazards write the same message to article.raw.priority.
+ * Only a short snippet is carried, never the full article text.
+ *
+ * @generated from message dor.v1.RawArticle
+ */
+export type RawArticle = Message<"dor.v1.RawArticle"> & {
+  /**
+   * raw:<sha256(url)>; the normalizer assigns the canonical id later
+   *
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * id from deploy/sources/sources.yaml
+   *
+   * @generated from field: string source_id = 2;
+   */
+  sourceId: string;
+
+  /**
+   * @generated from field: dor.v1.SourceKind kind = 3;
+   */
+  kind: SourceKind;
+
+  /**
+   * @generated from field: string url = 4;
+   */
+  url: string;
+
+  /**
+   * @generated from field: string title = 5;
+   */
+  title: string;
+
+  /**
+   * short snippet, never full text
+   *
+   * @generated from field: string summary = 6;
+   */
+  summary: string;
+
+  /**
+   * unix seconds; 0 when the source does not say
+   *
+   * @generated from field: int64 published_at = 7;
+   */
+  publishedAt: bigint;
+
+  /**
+   * unix seconds
+   *
+   * @generated from field: int64 fetched_at = 8;
+   */
+  fetchedAt: bigint;
+
+  /**
+   * BCP 47 when known
+   *
+   * @generated from field: string lang = 9;
+   */
+  lang: string;
+
+  /**
+   * @generated from field: dor.v1.RawHints hints = 10;
+   */
+  hints?: RawHints | undefined;
+
+  /**
+   * GDELT bulk: the wire collapses bursts by source/time/place
+   *
+   * @generated from field: bool burst = 11;
+   */
+  burst: boolean;
+};
+
+/**
+ * Describes the message dor.v1.RawArticle.
+ * Use `create(RawArticleSchema)` to create a new message.
+ */
+export const RawArticleSchema: GenMessage<RawArticle> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 20);
+
+/**
+ * RecordFrame is one raw pipeline message inside a record-mode file. See
+ * docs/record-format.md. A file is an eight-byte magic header followed by
+ * length-delimited RecordFrame frames, gzip-compressed.
+ *
+ * @generated from message dor.v1.RecordFrame
+ */
+export type RecordFrame = Message<"dor.v1.RecordFrame"> & {
+  /**
+   * article.raw or article.raw.priority
+   *
+   * @generated from field: string subject = 1;
+   */
+  subject: string;
+
+  /**
+   * Nats-Msg-Id, so a replay is idempotent
+   *
+   * @generated from field: string msg_id = 2;
+   */
+  msgId: string;
+
+  /**
+   * unix milliseconds when the writer accepted it
+   *
+   * @generated from field: int64 received_at_ms = 3;
+   */
+  receivedAtMs: bigint;
+
+  /**
+   * serialized RawArticle
+   *
+   * @generated from field: bytes payload = 4;
+   */
+  payload: Uint8Array;
+};
+
+/**
+ * Describes the message dor.v1.RecordFrame.
+ * Use `create(RecordFrameSchema)` to create a new message.
+ */
+export const RecordFrameSchema: GenMessage<RecordFrame> = /*@__PURE__*/
+  messageDesc(file_dor_v1_dor, 21);
+
+/**
  * Category is the topic of an article or story.
  *
  * @generated from enum dor.v1.Category
@@ -977,4 +1220,54 @@ export enum JoinKind {
  */
 export const JoinKindSchema: GenEnum<JoinKind> = /*@__PURE__*/
   enumDesc(file_dor_v1_dor, 5);
+
+/**
+ * SourceKind is the fetch family of a raw article's source. It is how the
+ * normalizer and the wire tell a feed item from a GDELT bulk row or a hazard
+ * alert without consulting the source list.
+ *
+ * @generated from enum dor.v1.SourceKind
+ */
+export enum SourceKind {
+  /**
+   * @generated from enum value: SOURCE_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_RSS = 1;
+   */
+  RSS = 1,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_GDELT = 2;
+   */
+  GDELT = 2,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_USGS = 3;
+   */
+  USGS = 3,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_GDACS = 4;
+   */
+  GDACS = 4,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_EONET = 5;
+   */
+  EONET = 5,
+
+  /**
+   * @generated from enum value: SOURCE_KIND_RELIEFWEB = 6;
+   */
+  RELIEFWEB = 6,
+}
+
+/**
+ * Describes the enum dor.v1.SourceKind.
+ */
+export const SourceKindSchema: GenEnum<SourceKind> = /*@__PURE__*/
+  enumDesc(file_dor_v1_dor, 6);
 

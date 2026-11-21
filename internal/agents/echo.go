@@ -48,16 +48,34 @@ func EchoOutputMsgID(inputID string) string {
 	return "echo:" + hex.EncodeToString(sum[:16])
 }
 
-// Builtins registers every agent compiled into this binary. Real pipeline
-// agents are added here as their tickets land; today only the sample agent
-// exists.
+// Deps are optional runtime dependencies shared by the built-in agents.
+type Deps struct {
+	// ArticleSink is the asynchronous Postgres writer. Nil keeps the pipeline
+	// running without a database; normalize still publishes clean articles.
+	ArticleSink ArticleSink
+}
+
+// Builtins registers every agent with no optional dependencies.
 func Builtins(b *bus.Bus, metrics *Metrics, log *slog.Logger) (*Registry, error) {
+	return BuiltinsWithDeps(b, metrics, log, Deps{})
+}
+
+// BuiltinsWithDeps registers every agent compiled into this binary. Real
+// pipeline agents are added here as their tickets land.
+func BuiltinsWithDeps(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (*Registry, error) {
 	registry := NewRegistry()
 	echo, err := NewEcho(b, metrics, log)
 	if err != nil {
 		return nil, err
 	}
 	if err := registry.Register(echo); err != nil {
+		return nil, err
+	}
+	normalize, err := NewNormalizer(b, metrics, log, NormalizerConfig{Sink: deps.ArticleSink})
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(normalize); err != nil {
 		return nil, err
 	}
 	return registry, nil

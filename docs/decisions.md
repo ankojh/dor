@@ -478,3 +478,35 @@ implemented: a `TYPESAFE_API_KEY` needs an explicit base URL, path and request
 shape (`openrouter-decisions`) and otherwise fails early; the direct
 `/v1/systemone` shape is not guessed. Push CI is mock-only and gets no secrets;
 only manual `workflow_dispatch` runs live.
+
+
+## Normalizer and store (M1·2)
+
+**The durable store is optional at startup.** `cmd/dor` opens
+`DOR_DATABASE_URL` (default `postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable`),
+pings with a short budget, runs the embedded migrations, and starts the batch
+writer. A refused connection or failed migration logs a warning and the app
+continues without durable writes; the normalizer still publishes
+`article.clean`. `--db-url=""` (or `off`) disables the attempt.
+
+**Migrations are embedded SQL pairs.** `migrations/0001_init.{up,down}.sql`
+create `sources`, day-partitioned `articles` (with
+`ensure_article_partition(date)`), `article_locations`, `stories` with
+`vector(384)` and an HNSW cosine index, `story_locations`, `links`, `alerts`,
+`alert_hits` and `push_subscriptions`. `internal/store.Migrate` tracks applied
+versions in `schema_migrations`; `MigrateDown` rolls back newest first.
+
+**Article identity is the SHA-256 of the canonical URL.** `CanonicalURL` strips
+fragments, default ports, `www.`, trailing slashes, `/amp` and tracking
+parameters, and sorts the remaining query. Exact duplicates are keyed
+`norm:exact:<id>` in the 48 h `seen` KV bucket; near duplicates use four 16-bit
+SimHash bands keyed `norm:sim:<band>:<value>:<id>` and a Hamming threshold
+(default 3). Malformed items, exact duplicates and near duplicates are counted
+in `dor_normalizer_dropped_total{reason}` and dropped. Clean articles are
+published with `Nats-Msg-Id=clean:<id>`, and the raw `RawHints` and `burst` flag
+are appended to the proto `Article` for downstream plotters.
+
+**Writes never block a handler.** `store.Writer` has a bounded queue; `Enqueue`
+drops and counts when full. A background goroutine flushes batches of 100 (or
+500 ms) and retries transient Postgres errors. Upserts are idempotent by
+`(article id, created_at)` and `(article_id, place_id, role)`.

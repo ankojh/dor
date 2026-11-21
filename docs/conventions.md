@@ -16,7 +16,8 @@ internal/decide/         decide() interface, jev client, question builders
 internal/llm/            Claude client, prompts, structured outputs
 internal/budget/         model token buckets, daily spend cap, shed order
 internal/geo/            GeoNames, Photon, H3                        (later)
-internal/store/          pgx, migrations, batch writers              (later)
+internal/store/          pgx pool, migrations runner, batch writer
+migrations/              embedded up/down SQL (schema_migrations)
 internal/gateway/        WebSocket gateway, snapshot, resume        (later)
 internal/pb/dorv1/       generated Go protobuf (do not edit)
 proto/dor/v1/            protobuf source
@@ -90,6 +91,8 @@ Every flag has a `DOR_*` fallback. An explicit flag wins.
 | `--max-ack-pending` | `DOR_MAX_ACK_PENDING` | `256` |
 | `--provision` | `DOR_PROVISION` | `false` (embedded mode always provisions) |
 | `--shutdown-timeout` | `DOR_SHUTDOWN_TIMEOUT` | `45s` |
+| `--db-url` | `DOR_DATABASE_URL` | `postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable` (empty/off disables) |
+| `--db-max-conns` | `DOR_DB_MAX_CONNECTIONS` | `10` |
 
 Tracing: W3C `traceparent` travels in NATS headers. The exporter is a noop
 unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, then OTLP/HTTP is used.

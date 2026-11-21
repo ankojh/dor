@@ -19,6 +19,7 @@ import (
 
 	"github.com/ankojh/dor/internal/agents"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/store"
 )
 
 const version = "0.1.0-dev"
@@ -33,6 +34,8 @@ type config struct {
 	maxAckPending   int
 	provision       bool
 	shutdownTimeout time.Duration
+	dbURL           string
+	dbMaxConns      int
 }
 
 func runCommand(args []string) error {
@@ -46,6 +49,8 @@ func runCommand(args []string) error {
 		maxAckPending:   envIntOr("DOR_MAX_ACK_PENDING", bus.DefaultMaxAckPending),
 		provision:       envBoolOr("DOR_PROVISION", false),
 		shutdownTimeout: envDurationOr("DOR_SHUTDOWN_TIMEOUT", 45*time.Second),
+		dbURL:           envOr("DOR_DATABASE_URL", "postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable"),
+		dbMaxConns:      envIntOr("DOR_DB_MAX_CONNECTIONS", 10),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -59,6 +64,8 @@ func runCommand(args []string) error {
 	fs.IntVar(&cfg.maxAckPending, "max-ack-pending", cfg.maxAckPending, "default consumer MaxAckPending")
 	fs.BoolVar(&cfg.provision, "provision", cfg.provision, "provision streams/KV on an external bus; embedded mode always provisions")
 	fs.DurationVar(&cfg.shutdownTimeout, "shutdown-timeout", cfg.shutdownTimeout, "total shutdown budget")
+	fs.StringVar(&cfg.dbURL, "db-url", cfg.dbURL, "Postgres URL; empty or off disables durable writes")
+	fs.IntVar(&cfg.dbMaxConns, "db-max-conns", cfg.dbMaxConns, "Postgres pool size")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -108,7 +115,50 @@ func runCommand(args []string) error {
 	}()
 
 	metrics := agents.NewMetrics()
-	registry, err := agents.Builtins(b, metrics, logger)
+
+	var dbStore *store.Store
+	var dbWriter *store.Writer
+	var articleSink agents.ArticleSink
+	if cfg.dbURL != "" && !strings.EqualFold(cfg.dbURL, "off") {
+		openCtx, openCancel := context.WithTimeout(ctx, 2*time.Second)
+		st, err := store.Open(openCtx, store.Config{URL: cfg.dbURL, MaxConns: int32(cfg.dbMaxConns)})
+		openCancel()
+		if err != nil {
+			logger.Warn("postgres unavailable; durable writes disabled, pipeline continues", "err", err)
+		} else {
+			migrateCtx, migrateCancel := context.WithTimeout(ctx, 20*time.Second)
+			migrateErr := st.Migrate(migrateCtx)
+			migrateCancel()
+			if migrateErr != nil {
+				logger.Warn("postgres migrations failed; durable writes disabled, pipeline continues", "err", migrateErr)
+				st.Close()
+			} else {
+				w, werr := store.NewWriter(st, store.WriterOptions{Logger: logger})
+				if werr != nil {
+					logger.Warn("postgres writer unavailable; durable writes disabled", "err", werr)
+					st.Close()
+				} else {
+					w.Start()
+					dbStore = st
+					dbWriter = w
+					articleSink = w
+					logger.Info("postgres store ready")
+				}
+			}
+		}
+	}
+	if dbWriter != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := dbWriter.Close(closeCtx); err != nil {
+				logger.Warn("store writer close", "err", err)
+			}
+			dbStore.Close()
+		}()
+	}
+
+	registry, err := agents.BuiltinsWithDeps(b, metrics, logger, agents.Deps{ArticleSink: articleSink})
 	if err != nil {
 		return err
 	}
@@ -146,6 +196,7 @@ func runCommand(args []string) error {
 		"nats_url", b.RedactedURL(),
 		"agents", runner.Names(),
 		"admin_addr", cfg.adminAddr,
+		"store", articleSink != nil,
 	)
 
 	exitReason := "signal"

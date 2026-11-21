@@ -20,6 +20,7 @@ import (
 	"github.com/ankojh/dor/internal/agents"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/fetch"
+	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/record"
 
 	"github.com/ankojh/dor/internal/store"
@@ -51,6 +52,9 @@ type config struct {
 
 	dbURL      string
 	dbMaxConns int
+
+	gatewayAddr    string
+	gatewayOrigins string
 }
 
 func runCommand(args []string) error {
@@ -78,6 +82,9 @@ func runCommand(args []string) error {
 
 		dbURL:      envOr("DOR_DATABASE_URL", "postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable"),
 		dbMaxConns: envIntOr("DOR_DB_MAX_CONNECTIONS", 10),
+
+		gatewayAddr:    envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
+		gatewayOrigins: envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -104,6 +111,9 @@ func runCommand(args []string) error {
 
 	fs.StringVar(&cfg.dbURL, "db-url", cfg.dbURL, "Postgres URL; empty or off disables durable writes")
 	fs.IntVar(&cfg.dbMaxConns, "db-max-conns", cfg.dbMaxConns, "Postgres pool size")
+
+	fs.StringVar(&cfg.gatewayAddr, "gateway-addr", cfg.gatewayAddr, "WebSocket gateway listen address; empty disables it")
+	fs.StringVar(&cfg.gatewayOrigins, "gateway-origins", cfg.gatewayOrigins, "comma-separated WebSocket Origin patterns")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -240,6 +250,23 @@ func runCommand(args []string) error {
 		return err
 	}
 
+	var gw *gateway.Server
+	if cfg.gatewayAddr != "" && runsPublisher(cfg.agents) {
+		gw, err = gateway.New(gateway.Config{
+			Addr:    cfg.gatewayAddr,
+			Origins: splitList(cfg.gatewayOrigins),
+			Bus:     b,
+			Logger:  logger,
+		})
+		if err != nil {
+			return err
+		}
+		if err := gw.Start(ctx); err != nil {
+			return err
+		}
+		logger.Info("gateway listening", "addr", gw.Addr(), "origins", cfg.gatewayOrigins)
+	}
+
 	var admin *http.Server
 	adminErr := make(chan error, 1)
 	if cfg.adminAddr != "" {
@@ -287,6 +314,13 @@ func runCommand(args []string) error {
 			logger.Warn("admin shutdown", "err", err)
 		}
 		adminCancel()
+	}
+	if gw != nil {
+		gwCtx, gwCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+		if err := gw.Stop(gwCtx); err != nil {
+			logger.Warn("gateway shutdown", "err", err)
+		}
+		gwCancel()
 	}
 	if err := runner.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("agent shutdown", "err", err)
@@ -384,6 +418,21 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// runsPublisher reports whether this process should serve the gateway. The
+// gateway is a component, not an agent; it runs when the publisher is selected.
+func runsPublisher(selection string) bool {
+	selection = strings.TrimSpace(selection)
+	if selection == "all" {
+		return true
+	}
+	for _, name := range strings.Split(selection, ",") {
+		if strings.TrimSpace(name) == "publisher" {
+			return true
+		}
+	}
+	return false
 }
 
 // splitList parses a comma-separated flag value, dropping empty entries.

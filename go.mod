@@ -6,6 +6,7 @@ tool google.golang.org/protobuf/cmd/protoc-gen-go
 
 require (
 	github.com/anthropics/anthropic-sdk-go/v2 v2.13.0
+	github.com/coder/websocket v1.8.13
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/nats-io/nats-server/v2 v2.15.3
 	github.com/nats-io/nats.go v1.56.0

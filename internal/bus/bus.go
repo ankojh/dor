@@ -56,6 +56,9 @@ const (
 	KVLiveStateTTL       = 48 * time.Hour
 	KVBucketSourceHealth = "source_health"
 	KVSourceHealthTTL    = 7 * 24 * time.Hour
+
+	KVLiveStateSnapshotKey = "snapshot"
+	KVPublisherSeqKey      = "publisher.seq"
 )
 
 // Header names shared by every agent.

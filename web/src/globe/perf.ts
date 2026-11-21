@@ -231,6 +231,14 @@ export class PerfMeter {
     return this.longTasks.filter((task) => task.start >= start);
   }
 
+  destroy(): void {
+    this.observer?.disconnect();
+    this.loafObserver?.disconnect();
+    this.stopOverlayUpdates();
+    this.overlay?.remove();
+    this.overlay = null;
+  }
+
   toggleOverlay(): boolean {
     this.overlayVisible = !this.overlayVisible;
     if (!this.overlay) this.createOverlay();

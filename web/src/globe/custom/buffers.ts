@@ -1,3 +1,5 @@
+import { growArray } from "../arrays";
+import type { StoryPatch, LinkPatch, MatchBytes } from "../../worker/messages";
 import { dotSizeFactor } from "../encoding";
 import { CapacityPool, TEXTURE_WIDTH, texelOf, textureRows } from "../gpu-layout";
 import {
@@ -13,8 +15,6 @@ import {
 import type {
   FakeInit,
   FocusPatch,
-  LinkOp,
-  StoryOp,
   StreamPatch,
   TetherRing,
   TetherSegment,
@@ -76,7 +76,7 @@ type ArcBufferSet = {
   length: WebGLBuffer;
 };
 
-type DotBufferSet = { hi: WebGLBuffer; lo: WebGLBuffer; color: WebGLBuffer };
+type DotBufferSet = { hi: WebGLBuffer; lo: WebGLBuffer; color: WebGLBuffer; index: WebGLBuffer };
 
 /**
  * GPU-side data for the custom layer: one VAO per primitive, three 2D
@@ -90,8 +90,8 @@ export class GlobeGpuData {
   readonly storyTex: WebGLTexture;
   readonly focusTex: WebGLTexture;
   readonly arcFocusTex: WebGLTexture;
-  readonly storyCapacity: number;
-  readonly linkCapacity: number;
+  storyCapacity: number;
+  linkCapacity: number;
   readonly storyPool: CapacityPool;
   readonly linkPool: CapacityPool;
   readonly dotMesh: Mesh;
@@ -103,16 +103,17 @@ export class GlobeGpuData {
   private readonly gl: WebGL2RenderingContext;
   private readonly storyCount: number;
   private readonly linkCount: number;
-  private readonly storyTexWidth: number;
-  private readonly storyTexHeight: number;
-  private readonly linkTexWidth: number;
-  private readonly storyData: Float32Array;
-  private readonly focusData: Float32Array;
-  private readonly arcData: Float32Array;
-  private readonly storyMercX: Float64Array;
-  private readonly storyMercY: Float64Array;
-  private readonly storyActive: Uint8Array;
-  private readonly linkActive: Uint8Array;
+  private storyTexWidth: number;
+  private storyTexHeight: number;
+  private linkTexWidth: number;
+  private storyData: Float32Array;
+  private focusData: Float32Array;
+  private arcData: Float32Array;
+  private storyMercX: Float64Array;
+  private storyMercY: Float64Array;
+  private storyActive: Uint8Array;
+  private linkActive: Uint8Array;
+  private linkDimmed: Uint8Array;
   private readonly arcSegments: number;
   private arcBuffers!: ArcBufferSet;
   private dotBuffers!: DotBufferSet;
@@ -151,11 +152,7 @@ export class GlobeGpuData {
     this.gl = gl;
     this.storyCount = init.storyCount;
     this.linkCount = init.linkCount;
-    this.storyCapacity = Math.max(
-      2048,
-      this.storyCount + 1024,
-      init.storyCapacity ?? 0,
-    );
+    this.storyCapacity = Math.max(2048, this.storyCount + 1024, init.storyCapacity ?? 0);
     this.linkCapacity = Math.max(1024, this.linkCount + 512, init.linkCapacity ?? 0);
     this.arcSegments = init.arcSegments;
     this.storyPool = new CapacityPool(this.storyCapacity, this.storyCount);
@@ -167,6 +164,7 @@ export class GlobeGpuData {
     this.storyActive = new Uint8Array(this.storyCapacity);
     this.storyActive.fill(1, 0, this.storyCount);
     this.linkActive = new Uint8Array(this.linkCapacity);
+    this.linkDimmed = new Uint8Array(this.linkCapacity);
     this.linkActive.fill(1, 0, this.linkCount);
     for (let i = 0; i < this.storyCount; i++) {
       const [x, y] = lngLatToMercator(stories.lng[i]!, stories.lat[i]!);
@@ -273,6 +271,122 @@ export class GlobeGpuData {
     this.ringMesh = this.createRingMesh(this.ringBuffers);
   }
 
+  storyAnimation(index: number) {
+    return {
+      state: this.focusData[index * 4],
+      prev: this.focusData[index * 4 + 1],
+      at: this.focusData[index * 4 + 2],
+      dimmed: this.focusData[index * 4 + 3],
+    };
+  }
+
+  /** Grow storage while preserving buffers, focus transitions and ripple slots. */
+  ensureCapacity(stories: number, links: number): void {
+    const gl = this.gl;
+    const extendBuffer = (buffer: WebGLBuffer, bytes: number): void => {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, buffer);
+      const old = gl.getBufferParameter(gl.COPY_READ_BUFFER, gl.BUFFER_SIZE) as number;
+      if (bytes <= old) return;
+      const scratch = gl.createBuffer();
+      if (!scratch) throw new Error("buffer growth failed");
+      gl.bindBuffer(gl.COPY_WRITE_BUFFER, scratch);
+      gl.bufferData(gl.COPY_WRITE_BUFFER, old, gl.STREAM_COPY);
+      gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, old);
+      gl.bindBuffer(gl.COPY_READ_BUFFER, scratch);
+      gl.bindBuffer(gl.COPY_WRITE_BUFFER, buffer);
+      gl.bufferData(gl.COPY_WRITE_BUFFER, bytes, gl.DYNAMIC_DRAW);
+      gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, old);
+      gl.deleteBuffer(scratch);
+    };
+    const texture = (target: WebGLTexture, capacity: number, data: Float32Array): number => {
+      const width = Math.min(TEXTURE_WIDTH, capacity),
+        height = textureRows(capacity, width);
+      const padded = new Float32Array(width * height * 4);
+      padded.set(data);
+      gl.bindTexture(gl.TEXTURE_2D, target);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, padded);
+      return width;
+    };
+    if (stories > this.storyCapacity) {
+      this.storyData = growArray(this.storyData, stories * 4);
+      this.focusData = growArray(this.focusData, stories * 4);
+      this.storyMercX = growArray(this.storyMercX, stories);
+      this.storyMercY = growArray(this.storyMercY, stories);
+      this.storyActive = growArray(this.storyActive, stories);
+      this.storyPool.grow(stories);
+      for (const key of ["hi", "lo"] as const) extendBuffer(this.dotBuffers[key], stories * 2 * 4);
+      extendBuffer(this.dotBuffers.color, stories * 4);
+      extendBuffer(this.dotBuffers.index, stories * 4);
+      const indices = Float32Array.from(
+        { length: stories - this.storyCapacity },
+        (_, i) => i + this.storyCapacity,
+      );
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.dotBuffers.index);
+      gl.bufferSubData(gl.ARRAY_BUFFER, this.storyCapacity * 4, indices);
+      this.storyTexWidth = texture(this.storyTex, stories, this.storyData);
+      texture(this.focusTex, stories, this.focusData);
+      this.storyCapacity = stories;
+      this.dotMesh.instanceCount = stories;
+    }
+    if (links > this.linkCapacity) {
+      this.arcData = growArray(this.arcData, links * 4);
+      this.linkActive = growArray(this.linkActive, links);
+      this.linkDimmed = growArray(this.linkDimmed, links);
+      this.linkPool.grow(links);
+      for (const [key, buffer] of Object.entries(this.arcBuffers))
+        extendBuffer(
+          buffer,
+          links *
+            this.arcSegments *
+            4 *
+            (["startHi", "startLo", "endHi", "endLo"].includes(key) ? 2 : 1),
+        );
+      this.linkTexWidth = texture(this.arcFocusTex, links, this.arcData);
+      this.linkCapacity = links;
+      this.arcMesh.instanceCount = links * this.arcSegments;
+    }
+    gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+    gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
+  }
+
+  private uploadArcRange(index: number, arcs: NonNullable<LinkPatch["arcs"]>): void {
+    const gl = this.gl;
+    for (const [key, source] of Object.entries(arcs)) {
+      const buffer = this.arcBuffers[key as keyof ArcBufferSet];
+      const data = source instanceof Float32Array ? source : Float32Array.from(source);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, index * data.byteLength, data);
+    }
+  }
+
+  updateMatches(stories: MatchBytes, links: MatchBytes): void {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.focusTex);
+    for (let i = 0; i < stories.indices.length; i++) {
+      const index = stories.indices[i]!;
+      this.focusData[index * 4 + 3] = stories.dimmed[i]!;
+      this.uploadFocusTexel(
+        index,
+        this.focusData[index * 4]!,
+        this.focusData[index * 4 + 1]!,
+        this.focusData[index * 4 + 2]!,
+      );
+    }
+    for (let i = 0; i < links.indices.length; i++) {
+      const index = links.indices[i]!;
+      this.linkDimmed[index] = links.dimmed[i]!;
+      const strength = Math.abs(this.arcData[index * 4 + 3]!) * (links.dimmed[i] ? -1 : 1);
+      this.arcData[index * 4 + 3] = strength;
+      this.uploadArcTexel(
+        index,
+        this.arcData[index * 4]!,
+        this.arcData[index * 4 + 1]!,
+        this.arcData[index * 4 + 2]!,
+        strength,
+      );
+    }
+  }
+
   /** Free every buffer, VAO and texture. Called on remove and before re-init. */
   dispose(): void {
     const gl = this.gl;
@@ -319,11 +433,13 @@ export class GlobeGpuData {
       for (let i = 0; i < patch.linkIndex.length; i++) {
         const index = patch.linkIndex[i]!;
         if (index >= this.linkCapacity || this.linkActive[index] === 0) continue;
-        this.arcData[index * 4 + 3] = patch.strength[i]!;
+        this.arcData[index * 4 + 3] = this.linkDimmed[index]
+          ? -patch.strength[i]!
+          : patch.strength[i]!;
         linkPixel[0] = this.arcData[index * 4]!;
         linkPixel[1] = this.arcData[index * 4 + 1]!;
         linkPixel[2] = this.arcData[index * 4 + 2]!;
-        linkPixel[3] = patch.strength[i]!;
+        linkPixel[3] = this.arcData[index * 4 + 3]!;
         const texel = texelOf(index, this.linkTexWidth);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, texel.x, texel.y, 1, 1, gl.RGBA, gl.FLOAT, linkPixel);
       }
@@ -339,15 +455,19 @@ export class GlobeGpuData {
    * position/color buffers and both textures are written, and an empty slot
    * is hidden by the dot/pick shader (`story.x <= 0`).
    */
-  applyStoryOp(op: StoryOp): void {
+  applyStoryOp(op: StoryPatch): void {
     if (op.index < 0 || op.index >= this.storyCapacity) return;
     const index = op.index;
     if (op.op === "add") {
+      const wasActive = this.storyActive[index] !== 0 && !op.reset;
       if (this.storyActive[index] === 0) {
         if (!this.storyPool.claim(index)) return;
         this.storyActive[index] = 1;
       }
-      const [mercX, mercY] = lngLatToMercator(op.lng, op.lat);
+      const [mercX, mercY] =
+        op.mercHi && op.mercLo
+          ? [op.mercHi[0]! + op.mercLo[0]!, op.mercHi[1]! + op.mercLo[1]!]
+          : lngLatToMercator(op.lng, op.lat);
       this.storyMercX[index] = mercX;
       this.storyMercY[index] = mercY;
       const [hiX, loX] = splitMercator(mercX);
@@ -364,13 +484,16 @@ export class GlobeGpuData {
       this.storyData[index * 4 + 1] = op.heat;
       this.storyData[index * 4 + 2] = op.updatedAt;
       this.storyData[index * 4 + 3] = 0;
-      this.focusData[index * 4] = 0;
-      this.focusData[index * 4 + 1] = 0;
-      this.focusData[index * 4 + 2] = 0;
+      if (!wasActive) this.focusData.fill(0, index * 4, index * 4 + 4);
       gl.bindTexture(gl.TEXTURE_2D, this.storyTex);
       this.uploadStoryTexel(index, size, op.heat, op.updatedAt);
       gl.bindTexture(gl.TEXTURE_2D, this.focusTex);
-      this.uploadFocusTexel(index, 0, 0, 0);
+      this.uploadFocusTexel(
+        index,
+        this.focusData[index * 4]!,
+        this.focusData[index * 4 + 1]!,
+        this.focusData[index * 4 + 2]!,
+      );
     } else {
       this.storyActive[index] = 0;
       this.storyPool.free(index);
@@ -396,20 +519,29 @@ export class GlobeGpuData {
    * its texture texel; a removed link is zero-strength (hidden by the arc
    * shader) and its slot is returned to the pool.
    */
-  applyLinkOp(op: LinkOp): void {
+  applyLinkOp(op: LinkPatch): void {
     if (op.index < 0 || op.index >= this.linkCapacity) return;
     const index = op.index;
     if (op.op === "add") {
+      if (op.reset) {
+        this.arcData.fill(0, index * 4, index * 4 + 4);
+        this.linkDimmed[index] = 0;
+      }
       if (this.linkActive[index] === 0) {
         if (!this.linkPool.claim(index)) return;
         this.linkActive[index] = 1;
       }
-      this.arcData[index * 4] = 0;
-      this.arcData[index * 4 + 1] = 0;
-      this.arcData[index * 4 + 2] = 0;
-      this.arcData[index * 4 + 3] = op.strength;
-      this.writeArcLink(index, op.a, op.b, op.type);
-      this.uploadArcTexel(index, this.arcData[index * 4]!, 0, 0, op.strength);
+      const strength = this.linkDimmed[index] ? -op.strength : op.strength;
+      this.arcData[index * 4 + 3] = strength;
+      if (op.arcs) this.uploadArcRange(index, op.arcs);
+      else if (op.reset === undefined || op.reset) this.writeArcLink(index, op.a, op.b, op.type);
+      this.uploadArcTexel(
+        index,
+        this.arcData[index * 4]!,
+        this.arcData[index * 4 + 1]!,
+        this.arcData[index * 4 + 2]!,
+        strength,
+      );
     } else {
       this.linkActive[index] = 0;
       this.linkPool.free(index);
@@ -427,7 +559,7 @@ export class GlobeGpuData {
     pixel[0] = size;
     pixel[1] = heat;
     pixel[2] = updatedAt;
-    pixel[3] = 0;
+    pixel[3] = this.focusData[index * 4 + 3]!;
     this.gl.texSubImage2D(
       this.gl.TEXTURE_2D,
       0,
@@ -447,7 +579,7 @@ export class GlobeGpuData {
     pixel[0] = state;
     pixel[1] = prev;
     pixel[2] = at;
-    pixel[3] = 0;
+    pixel[3] = this.focusData[index * 4 + 3]!;
     this.gl.texSubImage2D(
       this.gl.TEXTURE_2D,
       0,
@@ -461,7 +593,13 @@ export class GlobeGpuData {
     );
   }
 
-  private uploadArcTexel(index: number, state: number, prev: number, at: number, strength: number): void {
+  private uploadArcTexel(
+    index: number,
+    state: number,
+    prev: number,
+    at: number,
+    strength: number,
+  ): void {
     const texel = texelOf(index, this.linkTexWidth);
     const pixel = this.arcPixel;
     pixel[0] = state;
@@ -570,7 +708,7 @@ export class GlobeGpuData {
       pixel[0] = change.state;
       pixel[1] = change.prev;
       pixel[2] = change.at;
-      pixel[3] = 0;
+      pixel[3] = this.focusData[i * 4 + 3]!;
       const texel = texelOf(i, this.storyTexWidth);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, texel.x, texel.y, 1, 1, gl.RGBA, gl.FLOAT, pixel);
     }
@@ -697,7 +835,7 @@ export class GlobeGpuData {
     for (let i = 0; i < this.storyCapacity; i++) index[i] = i;
     const indexBuffer = this.createBuffer(index, gl.STATIC_DRAW);
     const color = this.createBuffer(colorData, gl.STATIC_DRAW);
-    this.dotBuffers = { hi, lo, color };
+    this.dotBuffers = { hi, lo, color, index: indexBuffer };
     this.attrib(hi, 0, 2, gl.FLOAT, false, 0, 0, 1);
     this.attrib(lo, 1, 2, gl.FLOAT, false, 0, 0, 1);
     this.attrib(indexBuffer, 2, 1, gl.FLOAT, false, 0, 0, 1);

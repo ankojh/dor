@@ -1,7 +1,7 @@
 # Globe
 
 MapLibre GL JS v5 globe, our WebGL layers, the shared data worker, gestures
-and focus switching. Built in the M0·2 spike; M2/M3 reuse these modules.
+and focus switching. Built in the M0·2 spike and reused by the production runtime.
 
 ```
 config.ts            provider config (VITE_TILES_URL / VITE_GLYPHS_URL /
@@ -22,5 +22,9 @@ deck/renderer.ts     deck.gl core path (dots + arcs, binary attributes)
 spike.ts             the /spike.html bootstrap and HUD
 ```
 
-The data worker is `../worker/fake/` (fake stream, state, adjacency, focus
-bytes). The spike page is `web/spike.html`; the main app entry is untouched.
+The production worker is `../worker/index.ts` with authoritative state in
+`../worker/state.ts`. `runtime.ts` consumes full init messages and incremental
+held patches; `load.ts` stages its import after shell paint. See the worker
+README for the production protocol and performance harness. `fake/`, `spike.ts`
+and `deck/` remain development references; the production build excludes the
+spike/deck entry points.

@@ -151,6 +151,7 @@ void main() {
   float prev = focus.y;
   float fade = clamp((uTime - focus.z) / DOR_FOCUS_FADE, 0.0, 1.0);
   float alpha = mix(dorFocusOpacity(prev), dorFocusOpacity(state), fade);
+  alpha *= focus.w > 0.5 ? 0.12 : 1.0;
 
   float radius = (DOR_DOT_BASE + DOR_DOT_SCALE * story.x) *
     mix(0.64, 1.28, smoothstep(1.2, 8.0, uZoom));
@@ -272,9 +273,9 @@ void main() {
   float state = focus.x;
   float prev = focus.y;
   float at = focus.z;
-  float strength = focus.w;
+  float strength = abs(focus.w);
   float fade = clamp((uTime - at) / DOR_FOCUS_FADE, 0.0, 1.0);
-  float alpha = mix(dorFocusOpacity(prev), dorFocusOpacity(state), fade);
+  float alpha = mix(dorFocusOpacity(prev), dorFocusOpacity(state), fade) * (focus.w < 0.0 ? 0.12 : 1.0);
 
   float second = step(2.5, state);
   float ambient = 1.0 - step(0.5, state);

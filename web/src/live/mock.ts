@@ -3,7 +3,7 @@
  * the real app only reads the gateway worker.
  */
 import type { Delta, Link, Story, WireRow } from "../gen/dor/v1/dor_pb";
-import type { WorkerMessage } from "../worker/messages";
+import type { FeedMessage } from "../worker/messages";
 
 const CITIES: Array<{ name: string; lon: number; lat: number; category: number }> = [
   { name: "Rotterdam", lon: 4.4777, lat: 51.9244, category: 3 },
@@ -93,7 +93,7 @@ function buildLinks(): Link[] {
   return links;
 }
 
-export function startMock(onMessage: (message: WorkerMessage) => void): { stop(): void } {
+export function startMock(onMessage: (message: FeedMessage) => void): { stop(): void } {
   const stories = buildStories();
   const links = buildLinks();
   let seq = 1;

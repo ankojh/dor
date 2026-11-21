@@ -5,24 +5,24 @@
  * real dor.v1 snapshot/delta messages. The fake stream is never imported here.
  */
 import { Map as MapLibreMap, ScaleControl, type GeoJSONSource } from "maplibre-gl";
-import type { Delta, Link, Story, WireRow } from "../gen/dor/v1/dor_pb";
+import type { WorkerInit, WorkerPatch } from "../worker/messages";
+import { growArray } from "./arrays";
+import { PatchHold } from "./gestures";
+import { PerfMeter, type PerfSnapshot } from "./perf";
 import { CameraController, type CameraTarget } from "./camera";
 import { loadGlobeConfig } from "./config";
 import { CustomGlobeLayer } from "./custom/layer";
 import { FocusMirror } from "./focus-mirror";
 import { StoryLabels, type AmbientLabel } from "./labels";
 import {
-  buildLiveGlobe,
   buildLiveTethers,
-  linkKey,
-  storyLocation,
   type LiveGlobeData,
   type LiveStory,
+  type StorySummary,
 } from "./live-data";
 import { greatCirclePoint } from "./mercator";
-import { RippleRingBuffer, type RippleSlotState } from "./ripples";
 import { buildLabelsOnlyStyle } from "./style/dor-labels";
-import type { HudFocus, StreamPatch } from "../worker/fake/protocol";
+import type { HudFocus } from "../worker/fake/protocol";
 
 const DEFAULT_VIEW: CameraTarget = { center: [6, 22], zoom: 1.55, bearing: 0, pitch: 0 };
 const LINK_LABEL_SOURCE = "dor-link-labels";
@@ -64,7 +64,7 @@ export type EdgeMarker = {
 
 export type FocusDetails = {
   storyId: string;
-  story: Story;
+  story: StorySummary;
   hud: HudFocus;
   live: LiveStory;
   threadStoryIds: string[];
@@ -72,17 +72,6 @@ export type FocusDetails = {
 };
 
 export type GlobeView = { center: [number, number]; zoom: number };
-
-export type StoryFilter = {
-  categories: Set<number>;
-  regions: string[];
-  sources: string[];
-  minSources: number;
-  lat: number;
-  lon: number;
-  radiusKm: number;
-  promptStoryIds: Set<string>;
-};
 
 export type GlobeState = {
   ready: boolean;
@@ -95,6 +84,11 @@ export type GlobeState = {
   secondDegree: boolean;
   quality: number;
   tileFailed: boolean;
+  perf?: PerfSnapshot;
+  initCount?: number;
+  patchCount?: number;
+  rippleCount?: number;
+  focusLatencyMs?: number;
 };
 
 type RuntimeOptions = {
@@ -110,22 +104,6 @@ type AggregateFeature = {
   properties: { count: number; color: string };
 };
 
-function emptyPatch(ripples: StreamPatch["ripples"]): StreamPatch {
-  return {
-    type: "stream",
-    now: Date.now(),
-    storyIndex: new Uint16Array(),
-    sources: new Uint16Array(),
-    heat: new Float32Array(),
-    updatedAt: new Float32Array(),
-    linkIndex: new Uint16Array(),
-    strength: new Float32Array(),
-    width: new Float32Array(),
-    linkColor: new Uint8Array(),
-    ripples,
-  };
-}
-
 function linkColor(type: number): string {
   return type === 0 ? "#ffc25c" : type === 1 ? "#ff6fd8" : "#5ef2ff";
 }
@@ -137,16 +115,28 @@ export class LiveGlobe {
   private readonly camera: CameraController;
   private readonly labels: StoryLabels;
   private readonly options: RuntimeOptions;
-  private readonly ripples = new RippleRingBuffer();
+  readonly perf = new PerfMeter();
+  private readonly patches = new PatchHold<WorkerPatch[]>((older, newer) => older.concat(newer));
+  private initCount = 0;
+  private patchCount = 0;
+  private rippleCount = 0;
+  private focusLatencyMs = 0;
+  private focusStartedAt: number | null = null;
+  private lastPerfAt = 0;
+  private queuedPatches = 0;
+  private maxQueuedPatches = 0;
+  private patchTimes: number[] = [];
+  private annotationsDirty = false;
+  private lastAnnotationAt = Number.NEGATIVE_INFINITY;
+  private activeStoryCount = 0;
+  private activeLinkCount = 0;
 
-  private stories = new Map<string, Story>();
-  private links = new Map<string, Link>();
   private data: LiveGlobeData | null = null;
   private mirror: FocusMirror | null = null;
   private focusId: string | null = null;
   private focused: FocusDetails | null = null;
   private ready = false;
-  private pending: { stories: Story[]; links: Link[] } | null = null;
+  private pending: WorkerInit | null = null;
   private lastPick: number | null = null;
   private lastPickAt = 0;
   private lastPickPoint: { x: number; y: number } | null = null;
@@ -160,7 +150,6 @@ export class LiveGlobe {
   private quality = 0;
   private floor = 0.6;
   private tileFailed = false;
-  private storyFilter: StoryFilter | null = null;
 
   private frameSamples: number[] = [];
   private lastFrameAt = 0;
@@ -171,6 +160,9 @@ export class LiveGlobe {
 
   constructor(container: HTMLElement, options: RuntimeOptions = {}) {
     this.options = options;
+    if (new URLSearchParams(location.search).has("diagnostics")) {
+      (window as unknown as { __dorLive?: LiveGlobe }).__dorLive = this;
+    }
     const config = loadGlobeConfig();
     this.map = new MapLibreMap({
       container,
@@ -193,14 +185,17 @@ export class LiveGlobe {
     this.map.on("error", (event) => {
       const message = (event as { error?: Error }).error?.message ?? "";
       if (message && !message.includes("Failed to fetch")) console.warn(`map: ${message}`);
-      if (
-        !this.tileFailed &&
-        /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)
-      ) {
+      if (!this.tileFailed && /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)) {
         this.tileFailed = true;
         this.map.getContainer().classList.add("tile-failed");
         void this.addFallbackCities();
         this.emit();
+      }
+    });
+    this.map.on("render", () => {
+      if (this.focusStartedAt !== null) {
+        this.focusLatencyMs = performance.now() - this.focusStartedAt;
+        this.focusStartedAt = null;
       }
     });
     this.installInteractions();
@@ -226,11 +221,16 @@ export class LiveGlobe {
     this.labels.add();
     this.addAnnotations();
     this.ready = true;
-    this.map.on("moveend", () => this.onMoveEnd());
+    this.map.on("movestart", () => this.patches.setGestureActive(true));
+    this.map.on("moveend", () => {
+      this.patches.setGestureActive(false);
+      this.applyPendingPatches();
+      this.onMoveEnd();
+    });
     if (this.pending) {
       const pending = this.pending;
       this.pending = null;
-      this.rebuild(pending.stories, pending.links, false);
+      this.setInit(pending, false);
     }
     this.emit();
   }
@@ -248,19 +248,7 @@ export class LiveGlobe {
           source: AREA_SOURCE,
           maxzoom: 12,
           paint: {
-            "circle-radius": [
-              "interpolate",
-              ["linear"],
-              ["zoom"],
-              0,
-              12,
-              4,
-              18,
-              8,
-              26,
-              14,
-              36,
-            ],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 0, 12, 4, 18, 8, 26, 14, 36],
             "circle-color": ["get", "color"],
             "circle-opacity": 0.07,
             "circle-stroke-color": ["get", "color"],
@@ -396,7 +384,13 @@ export class LiveGlobe {
     };
     this.map.on("mousedown", remember);
     this.map.on("touchstart", remember);
-    for (const eventName of ["mousedown", "touchstart", "wheel", "dragstart", "zoomstart"] as const) {
+    for (const eventName of [
+      "mousedown",
+      "touchstart",
+      "wheel",
+      "dragstart",
+      "zoomstart",
+    ] as const) {
       this.map.on(eventName, () => {
         this.lastInteractionAt = Date.now();
       });
@@ -416,10 +410,7 @@ export class LiveGlobe {
         this.lastPick !== null &&
         this.lastPickPoint !== null &&
         now - this.lastPickAt < 1000 &&
-        Math.hypot(
-          this.lastPickPoint.x - event.point.x,
-          this.lastPickPoint.y - event.point.y,
-        ) < 8;
+        Math.hypot(this.lastPickPoint.x - event.point.x, this.lastPickPoint.y - event.point.y) < 8;
       const arc = this.findArcAt(event.point.x, event.point.y);
       if (arc !== null) {
         const info = this.linkInfo(arc);
@@ -442,6 +433,10 @@ export class LiveGlobe {
   };
 
   private onMoveEnd(): void {
+    if (this.annotationsDirty) {
+      this.updateAreas();
+      this.annotationsDirty = false;
+    }
     if (!this.focused) this.setAmbientLabels();
     this.updateAggregates();
     this.updateEdgeMarkers();
@@ -450,87 +445,176 @@ export class LiveGlobe {
     this.emit();
   }
 
-  setSnapshot(stories: Story[], links: Link[]): void {
-    this.stories = new Map(stories.map((story) => [story.id, story]));
-    this.links = new Map(links.map((link) => [linkKey(link.a, link.b), link]));
+  /** Full uploads occur only on worker init (snapshot/resync), never a delta. */
+  setInit(message: WorkerInit, resetQueue = true): void {
+    if (resetQueue) {
+      this.patches.flush();
+      this.queuedPatches = 0;
+    }
     if (!this.ready) {
-      this.pending = { stories: [...this.stories.values()], links: [...this.links.values()] };
+      this.pending = message;
       return;
     }
-    this.rebuild([...this.stories.values()], [...this.links.values()], true);
-  }
-
-  /** Wire-only batches stay on the hot path; structural changes rebuild once. */
-  applyDeltas(deltas: Delta[]): void {
-    let structural = false;
-    const wire: WireRow[] = [];
-    for (const delta of deltas) {
-      switch (delta.body.case) {
-        case "wire":
-          wire.push(delta.body.value);
-          break;
-        case "storyUpsert":
-          this.stories.set(delta.body.value.id, delta.body.value);
-          structural = true;
-          break;
-        case "storyExpire": {
-          const expired = delta.body.value;
-          this.stories.delete(expired);
-          for (const [key, link] of this.links) {
-            if (link.a === expired || link.b === expired) this.links.delete(key);
-          }
-          structural = true;
-          break;
-        }
-        case "linkUpsert":
-          this.links.set(linkKey(delta.body.value.a, delta.body.value.b), delta.body.value);
-          structural = true;
-          break;
-        case "linkRemove":
-          this.links.delete(linkKey(delta.body.value.a, delta.body.value.b));
-          structural = true;
-          break;
-        default:
-          break;
-      }
-    }
-    if (structural) this.rebuild([...this.stories.values()], [...this.links.values()], false);
-    if (wire.length > 0) this.spawnRipples(wire);
-  }
-
-  private rebuild(stories: Story[], links: Link[], flyToFocus: boolean): void {
-    const visible = this.storyFilter ? stories.filter((story) => this.matchesStory(story)) : stories;
-    const visibleIds = new Set(visible.map((story) => story.id));
-    const visibleLinks = links.filter(
-      (link) => visibleIds.has(link.a) && visibleIds.has(link.b),
-    );
-    const data = buildLiveGlobe(visible, visibleLinks);
-    this.data = data;
-    this.layer.setInit(data.init);
+    const { init, summaries } = message;
+    this.data = {
+      init,
+      stories: summaries,
+      storyById: new Map(summaries.filter(Boolean).map((entry) => [entry.story.id, entry.index])),
+      linkByKey: new Map(),
+      topStoryIds: [],
+    };
+    this.activeStoryCount = summaries.filter(Boolean).length;
+    this.activeLinkCount = init.linkCount;
+    this.updateTop(init.topStories);
+    this.layer.setInit(init);
+    this.initCount++;
     this.layer.setStrengthFloor(this.floor);
     this.layer.setLinesVisible(this.linesVisible);
     this.layer.setTethersVisible(this.tethersVisible);
     this.layer.setHeatVisible(this.heatVisible);
     this.layer.setQuality(this.quality);
-    this.mirror = new FocusMirror(data.init);
+    this.mirror = new FocusMirror(init);
     this.setAmbientLabels();
     this.updateAreas();
     this.updateAggregates();
     this.updateEdgeMarkers();
     this.updateDistanceRings();
-    const focusId = this.focusId;
-    if (focusId) {
-      const index = data.storyById.get(focusId);
-      if (index !== undefined) this.applyFocus(index, flyToFocus);
-      else {
-        this.focusId = null;
-        this.focused = null;
-        this.clearLinkLabels();
-        this.options.onFocus?.(null);
-      }
+    if (this.focusId) {
+      const index = this.data.storyById.get(this.focusId);
+      if (index !== undefined) this.applyFocus(index, false);
+      else this.clearFocus();
     }
     this.emit();
     this.map.triggerRepaint();
+  }
+
+  queuePatch(patch: WorkerPatch): void {
+    this.patches.push([patch]);
+    this.queuedPatches++;
+    this.maxQueuedPatches = Math.max(this.maxQueuedPatches, this.queuedPatches);
+  }
+  private updateTop(indices: Uint16Array): void {
+    if (!this.data) return;
+    this.data.init.topStories = indices;
+    this.data.topStoryIds = Array.from(indices, (i) => this.data!.stories[i]?.story.id).filter(
+      (id): id is string => Boolean(id),
+    );
+  }
+  private applyPendingPatches(): void {
+    if (!this.ready || !this.data || !this.mirror) return;
+    const patches = this.patches.take(performance.now());
+    if (!patches) return;
+    this.queuedPatches = 0;
+    const patchStarted = performance.now();
+    const data = this.data,
+      mirror = this.mirror;
+    let focusDirty = false;
+    for (const patch of patches) {
+      this.layer.ensureCapacity(patch.storyCapacity, patch.linkCapacity);
+      mirror.ensureCapacity(patch.storyCapacity, patch.linkCapacity);
+      const links = data.init.links;
+      for (const key of Object.keys(links) as Array<keyof typeof links>) {
+        const value = links[key];
+        if (value)
+          (links as unknown as Record<string, typeof value>)[key] = growArray(
+            value,
+            patch.linkCapacity * (key === "color" ? 4 : 1),
+          );
+      }
+      data.init.storyCapacity = patch.storyCapacity;
+      data.init.linkCapacity = patch.linkCapacity;
+      if (patch.stories.length) this.annotationsDirty = true;
+      for (const op of patch.stories) {
+        const previous = data.stories[op.index];
+        if (previous && previous.story.id !== op.summary?.story.id)
+          data.storyById.delete(previous.story.id);
+        if (op.op === "add" && op.summary) {
+          data.stories[op.index] = op.summary;
+          data.storyById.set(op.summary.story.id, op.index);
+        } else delete data.stories[op.index];
+        if (op.reset) mirror.applyStoryDelta(op.index, op, false, true);
+        this.layer.applyStoryOp(op);
+        mirror.applyStoryDelta(op.index, op, op.op === "add", true);
+        mirror.applyStoryMetadata(op);
+      }
+      for (const entry of patch.summaries) {
+        data.stories[entry.index] = entry;
+        data.storyById.set(entry.story.id, entry.index);
+      }
+      for (const op of patch.links) {
+        if (op.reset)
+          mirror.applyLinkDelta(op.index, op.a, op.b, false, op.type, op.strength, true);
+        this.layer.applyLinkOp(op);
+        mirror.applyLinkDelta(op.index, op.a, op.b, op.op === "add", op.type, op.strength, true);
+        mirror.applyLinkMetadata(op);
+        links.a[op.index] = op.a;
+        links.b[op.index] = op.b;
+        links.type[op.index] = op.type;
+        links.strength[op.index] = op.op === "add" ? op.strength : 0;
+        if (links.direction) links.direction[op.index] = op.direction ?? 0;
+        if (links.confidence) links.confidence[op.index] = op.confidence ?? 0;
+        if (links.distanceKm) links.distanceKm[op.index] = op.distanceKm ?? 0;
+        if (links.unverified) links.unverified[op.index] = op.unverified ? 1 : 0;
+        data.init.linkCount = Math.max(data.init.linkCount, op.index + 1);
+      }
+      if (patch.adjacency) mirror.applyAdjacency(patch.adjacency);
+      mirror.applyStream(patch.stream);
+      this.layer.stream(patch.stream);
+      this.layer.updateMatches(patch.storyStates, patch.linkStates);
+      this.rippleCount += patch.stream.ripples.length;
+      this.patchCount++;
+      this.activeStoryCount = patch.storyCount;
+      this.activeLinkCount = patch.linkCount;
+      this.updateTop(patch.topStories);
+      focusDirty ||=
+        patch.stories.length > 0 || patch.summaries.length > 0 || patch.links.length > 0;
+    }
+    if (this.focusId && focusDirty) {
+      const index = data.storyById.get(this.focusId);
+      if (index === undefined) this.clearFocus();
+      else this.applyFocus(index, false);
+    }
+    this.refreshAnnotations();
+    this.patchTimes.push(performance.now() - patchStarted);
+    if (this.patchTimes.length > 600) this.patchTimes.shift();
+    this.emit();
+    this.map.triggerRepaint();
+  }
+
+  private refreshAnnotations(): void {
+    if (
+      !this.annotationsDirty ||
+      this.patches.isGestureActive() ||
+      performance.now() - this.lastAnnotationAt < 1000
+    )
+      return;
+    this.annotationsDirty = false;
+    this.lastAnnotationAt = performance.now();
+    if (!this.focused) this.setAmbientLabels();
+    this.updateAreas();
+    this.updateAggregates();
+    this.updateEdgeMarkers();
+  }
+
+  get diagnostics() {
+    const sorted = [...this.patchTimes].sort((a, b) => a - b);
+    const index = this.focusId ? this.data?.storyById.get(this.focusId) : undefined;
+    return {
+      epochMs: this.data?.init.epochMs,
+      initCount: this.initCount,
+      patchCount: this.patchCount,
+      rippleCount: this.rippleCount,
+      queuedPatches: this.queuedPatches,
+      maxQueuedPatches: this.maxQueuedPatches,
+      patchMs: {
+        p95: sorted[Math.floor(sorted.length * 0.95)] ?? 0,
+        max: sorted.at(-1) ?? 0,
+        mean: sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length),
+      },
+      focusLatencyMs: this.focusLatencyMs,
+      focusedStoryId: this.focusId,
+      focusState: index === undefined ? null : this.layer.storyAnimation(index),
+    };
   }
 
   focusStoryId(storyId: string): void {
@@ -544,6 +628,7 @@ export class LiveGlobe {
     if (index === undefined) return;
     this.focusId = storyId;
     this.lastInteractionAt = Date.now();
+    this.focusStartedAt = performance.now();
     this.applyFocus(index, true);
   }
 
@@ -606,7 +691,9 @@ export class LiveGlobe {
   private async addFallbackCities(): Promise<void> {
     if (this.map.getSource("dor-fallback-cities")) return;
     try {
-      const apiBase = ((import.meta.env as Record<string, string | undefined>).VITE_API_URL || "").replace(/\/$/, "");
+      const apiBase = (
+        (import.meta.env as Record<string, string | undefined>).VITE_API_URL || ""
+      ).replace(/\/$/, "");
       const response = await fetch(`${apiBase}/api/places?limit=20`);
       if (!response.ok) return;
       const payload = (await response.json()) as {
@@ -661,30 +748,6 @@ export class LiveGlobe {
     this.labels.setAmbient(points);
   }
 
-  private spawnRipples(rows: WireRow[]): void {
-    const data = this.data;
-    if (!data) return;
-    const nowSec = (Date.now() - data.init.epochMs) / 1000;
-    const updates: StreamPatch["ripples"] = [];
-    for (const row of rows) {
-      if (!row.storyId) continue;
-      const story = this.stories.get(row.storyId);
-      if (!story || story.locations.length === 0) continue;
-      if (this.storyFilter && !this.matchesStory(story)) continue;
-      const location = story.locations[story.primary] ?? story.locations[0]!;
-      const slots = this.ripples.spawn({
-        lng: location.lon,
-        lat: location.lat,
-        category: story.category,
-        spawnAt: nowSec,
-        intensity: 0.5,
-        storyIndex: data.storyById.get(row.storyId) ?? -1,
-      });
-      for (const slot of slots) updates.push(toRippleUpdate(slot, story.category));
-    }
-    if (updates.length > 0) this.layer.stream(emptyPatch(updates));
-  }
-
   private updateLinkLabels(): void {
     if (!this.ready || !this.focused) {
       this.clearLinkLabels();
@@ -716,7 +779,11 @@ export class LiveGlobe {
       })
       .filter((feature): feature is NonNullable<typeof feature> => feature !== null);
     source.setData({ type: "FeatureCollection", features });
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", this.labelsVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      this.labelsVisible ? "visible" : "none",
+    );
   }
 
   private clearLinkLabels(): void {
@@ -826,8 +893,12 @@ export class LiveGlobe {
       return;
     }
     const cell = zoom < 2 ? 18 : 8;
-    const buckets = new Map<string, { count: number; lng: number; lat: number; category: number }>();
+    const buckets = new Map<
+      string,
+      { count: number; lng: number; lat: number; category: number }
+    >();
     for (const entry of this.data.stories) {
+      if (!entry) continue;
       const key = `${Math.floor(entry.lng / cell)}:${Math.floor(entry.lat / cell)}`;
       const bucket = buckets.get(key) ?? { count: 0, lng: 0, lat: 0, category: entry.category };
       bucket.count++;
@@ -852,7 +923,8 @@ export class LiveGlobe {
       for (let i = 0; i <= 6; i++) {
         const angle = (i / 6) * Math.PI * 2;
         ring.push([
-          centerLng + (radius * Math.cos(angle)) / Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)),
+          centerLng +
+            (radius * Math.cos(angle)) / Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)),
           centerLat + radius * Math.sin(angle),
         ]);
       }
@@ -903,6 +975,7 @@ export class LiveGlobe {
     ];
     const counts = new Map<string, number>();
     for (const entry of this.data.stories) {
+      if (!entry) continue;
       const point = this.map.project([entry.lng, entry.lat]);
       const canvas = this.map.getCanvas();
       const visible =
@@ -934,6 +1007,13 @@ export class LiveGlobe {
   private sampleFrame = (time: number): void => {
     if (this.destroyed) return;
     this.frameHandle = requestAnimationFrame(this.sampleFrame);
+    this.perf.frame(time);
+    this.applyPendingPatches();
+    this.refreshAnnotations();
+    if (time - this.lastPerfAt > 1000) {
+      this.lastPerfAt = time;
+      this.emit();
+    }
     if (document.visibilityState !== "visible") return;
     if (this.lastFrameAt > 0) {
       const delta = time - this.lastFrameAt;
@@ -960,9 +1040,15 @@ export class LiveGlobe {
   };
 
   // ---- Public controls -------------------------------------------------
-  zoomIn(): void { this.map.zoomIn(); }
-  zoomOut(): void { this.map.zoomOut(); }
-  resetView(): void { this.camera.flyTo(DEFAULT_VIEW); }
+  zoomIn(): void {
+    this.map.zoomIn();
+  }
+  zoomOut(): void {
+    this.map.zoomOut();
+  }
+  resetView(): void {
+    this.camera.flyTo(DEFAULT_VIEW);
+  }
 
   flyTo(center: [number, number], zoom: number): void {
     this.camera.flyTo({ center, zoom, bearing: 0, pitch: 0 });
@@ -983,7 +1069,11 @@ export class LiveGlobe {
     if (!this.ready) return;
     if (!visible) this.clearLinkLabels();
     else this.updateLinkLabels();
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", visible && this.labelsVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      visible && this.labelsVisible ? "visible" : "none",
+    );
   }
 
   setTethersVisible(visible: boolean): void {
@@ -1004,7 +1094,11 @@ export class LiveGlobe {
     this.labelsVisible = visible;
     this.labels.setVisible(visible);
     if (!this.ready) return;
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", visible && this.linesVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      visible && this.linesVisible ? "visible" : "none",
+    );
   }
 
   setStrengthFloor(floor: number): void {
@@ -1012,36 +1106,13 @@ export class LiveGlobe {
     this.layer.setStrengthFloor(this.floor);
   }
 
-  setStoryFilter(filter: StoryFilter | null): void {
-    this.storyFilter = filter;
-    if (!this.ready) return;
-    this.rebuild([...this.stories.values()], [...this.links.values()], false);
+  get isReady(): boolean {
+    return this.ready;
   }
 
-  private matchesStory(story: Story): boolean {
-    const filter = this.storyFilter;
-    if (!filter) return true;
-    if (filter.categories.size > 0 && !filter.categories.has(story.category)) return false;
-    if (story.sourceCount < filter.minSources) return false;
-    if (filter.promptStoryIds.size > 0 && !filter.promptStoryIds.has(story.id)) return false;
-    if (filter.regions.length > 0) {
-      const haystack = story.locations.map((location) => location.name.toLowerCase());
-      const matches = filter.regions.some((region) =>
-        haystack.some((name) => name.includes(region)),
-      );
-      if (!matches) return false;
-    }
-    if (filter.radiusKm > 0) {
-      const location = storyLocation(story);
-      if (!location) return false;
-      if (haversineKm(filter.lat, filter.lon, location.lat, location.lng) > filter.radiusKm) {
-        return false;
-      }
-    }
-    return true;
+  get focus(): FocusDetails | null {
+    return this.focused;
   }
-
-  get focus(): FocusDetails | null { return this.focused; }
 
   get view(): GlobeView {
     const center = this.map.getCenter();
@@ -1103,8 +1174,8 @@ export class LiveGlobe {
   get state(): GlobeState {
     return {
       ready: this.ready,
-      storyCount: this.data?.init.storyCount ?? 0,
-      linkCount: this.data?.init.linkCount ?? 0,
+      storyCount: this.activeStoryCount,
+      linkCount: this.activeLinkCount,
       focused: this.focused,
       topStoryIds: this.data?.topStoryIds ?? [],
       topStories: this.data
@@ -1120,6 +1191,11 @@ export class LiveGlobe {
       secondDegree: this.secondDegree,
       quality: this.quality,
       tileFailed: this.tileFailed,
+      perf: this.perf.snapshot(),
+      initCount: this.initCount,
+      patchCount: this.patchCount,
+      rippleCount: this.rippleCount,
+      focusLatencyMs: this.focusLatencyMs,
     };
   }
 
@@ -1132,6 +1208,7 @@ export class LiveGlobe {
     if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
     if (this.idleHandle !== null) clearInterval(this.idleHandle);
     window.removeEventListener("keydown", this.onKeyDown);
+    this.perf.destroy();
     this.map.remove();
   }
 }
@@ -1164,8 +1241,7 @@ function destinationPoint(
   const lat1 = (lat * Math.PI) / 180;
   const lon1 = (lon * Math.PI) / 180;
   const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(angular) +
-      Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing),
+    Math.sin(lat1) * Math.cos(angular) + Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing),
   );
   const lon2 =
     lon1 +
@@ -1184,24 +1260,4 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
   return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
-}
-
-function toRippleUpdate(slot: RippleSlotState, category: number): StreamPatch["ripples"][number] {
-  const toRad = Math.PI / 180;
-  const x = (slot.lng + 180) / 360;
-  const clamped = Math.max(-85.05112878, Math.min(85.05112878, slot.lat));
-  const y = 0.5 - Math.log((1 + Math.sin(clamped * toRad)) / (1 - Math.sin(clamped * toRad))) / (4 * Math.PI);
-  const hiX = Math.round(x * 8192) / 8192;
-  const hiY = Math.round(y * 8192) / 8192;
-  return {
-    slot: slot.slot,
-    lng: slot.lng,
-    lat: slot.lat,
-    mercHi: [hiX, hiY],
-    mercLo: [x - hiX, y - hiY],
-    category,
-    spawnAt: slot.spawnAt,
-    intensity: slot.intensity,
-    storyIndex: slot.storyIndex,
-  };
 }

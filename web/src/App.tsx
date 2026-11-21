@@ -1,16 +1,21 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import type { Category, Story, WireRow } from "./gen/dor/v1/dor_pb";
-import { JoinKind, Precision, Role } from "./gen/dor/v1/dor_pb";
+import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
+import { afterShellPaint } from "./globe/load";
+import { LruCache } from "./worker/lru";
+import type { StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
 import { mergeWireRow } from "./live/wire";
 import {
-  LiveGlobe,
-  type FocusDetails,
-  type GlobeState,
-  type LinkInfo,
-  type StoryFilter,
-} from "./globe/runtime";
+  AlertInbox,
+  approximateLabel,
+  historyIdentity,
+  toHistory,
+  type AlertToast,
+  type AlertHitRecord,
+  type IncomingAlert,
+} from "./live/alerts";
+import type { LiveGlobe, FocusDetails, GlobeState, LinkInfo } from "./globe/runtime";
 import type {
   ConnectionState,
   SourceHealth,
@@ -74,7 +79,7 @@ function sourceName(source: string): string {
 }
 
 function joinText(row: WireRow): string {
-  if (row.join === JoinKind.JOINED) {
+  if (row.join === 1) {
     return row.storyId ? `↳ joined story ${row.storyId.slice(0, 10)}` : "↳ joined a story";
   }
   if (row.storyId) return "↳ new story";
@@ -105,32 +110,34 @@ function relativeTime(unixSeconds: number, nowMs: number): string {
 
 function precisionLabel(precision: Precision): string {
   switch (precision) {
-    case Precision.COUNTRY:
+    case 0:
       return "COUNTRY";
-    case Precision.REGION:
+    case 1:
       return "REGION";
-    case Precision.CITY:
+    case 2:
       return "CITY";
-    case Precision.STREET:
+    case 3:
       return "STREET";
-    case Precision.POINT:
+    case 4:
       return "POINT";
   }
+  return "UNKNOWN";
 }
 
 function roleLabel(role: Role): string {
   switch (role) {
-    case Role.VENUE:
+    case 0:
       return "Venue";
-    case Role.ORIGIN:
+    case 1:
       return "Origin";
-    case Role.PARTY:
+    case 2:
       return "Party";
-    case Role.AFFECTED:
+    case 3:
       return "Affected";
-    case Role.MENTIONED:
+    case 4:
       return "Mentioned";
   }
+  return "Mentioned";
 }
 
 function directionLabel(link: LinkInfo): string {
@@ -205,25 +212,6 @@ type AlertRecord = {
   updated_at?: string;
 };
 
-type AlertToast = {
-  alertId: string;
-  storyId: string;
-  level: string;
-  title: string;
-  prompt: string;
-  firedAt: number;
-};
-
-type AlertHitRecord = {
-  alert_id: string;
-  story_id: string;
-  level: string;
-  fired_at: number;
-  title: string;
-  prompt: string;
-  source_count?: number;
-};
-
 type BacktestResult = {
   would_fire: number;
   stories: Array<{ story_id: string; title: string; source_count: number; score: number }>;
@@ -252,7 +240,11 @@ export function App() {
   let searchInput!: HTMLInputElement;
   let liveGlobe: LiveGlobe | null = null;
   let worker: Worker | null = null;
-  let mockStop: (() => void) | null = null;
+  let disposed = false;
+  const loadAbort = new AbortController();
+  let workerFrameHandle: number | null = null;
+  let workerFrameReady = true;
+  let workerBounds: unknown = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let freshTimer: ReturnType<typeof setTimeout> | null = null;
   let clockTimer: ReturnType<typeof setInterval> | null = null;
@@ -331,20 +323,24 @@ export function App() {
   const [cmdPlaces, setCmdPlaces] = createSignal<
     Array<{ id: string; name: string; lat: number; lon: number; country: string }>
   >([]);
-  const [nearMe, setNearMe] = createSignal<Array<{ storyId: string; title: string; km: number }>>([]);
-  const [nearMeState, setNearMeState] = createSignal<"idle" | "loading" | "ready" | "denied">("idle");
+  const [nearMe, setNearMe] = createSignal<Array<{ storyId: string; title: string; km: number }>>(
+    [],
+  );
+  const [nearMeState, setNearMeState] = createSignal<"idle" | "loading" | "ready" | "denied">(
+    "idle",
+  );
   const pendingWire: WireItem[] = [];
+  const alertInbox = new AlertInbox();
   const seen = new Set<string>();
-  const briefCache = new Map<string, StoryText>();
-  const detailsCache = new Map<string, StoryDetails>();
-  const whyCache = new Map<string, LinkWhy>();
-  const prefetched = new Set<string>();
+  const briefCache = new LruCache<string, StoryText>();
+  const detailsCache = new LruCache<string, StoryDetails>();
+  const whyCache = new LruCache<string, LinkWhy>();
+  const prefetched = new LruCache<string, true>();
   const initialHash = new URLSearchParams(location.hash.slice(1));
   const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let touchStartY = 0;
-  let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
   const paused = createMemo(() => pausedByHover() || scrollTop() > 6);
@@ -366,15 +362,6 @@ export function App() {
 
   const isApproxMatch = (row: WireRow): boolean =>
     prompts().some((prompt) => row.approxPrompts.includes(prompt));
-
-  const promptStoryIds = createMemo(() => {
-    const ids = new Set<string>();
-    if (prompts().length === 0) return ids;
-    for (const item of wireRows()) {
-      if (item.row.storyId && activeScore(item.row) >= 0.5) ids.add(item.row.storyId);
-    }
-    return ids;
-  });
 
   const visibleWireRows = createMemo(() => {
     let rows = wireRows();
@@ -429,29 +416,6 @@ export function App() {
     }
     return rows;
   });
-
-  const buildStoryFilter = (): StoryFilter | null => {
-    const active = filters();
-    const hasFilters =
-      active.categories.length > 0 ||
-      active.regions.length > 0 ||
-      active.minSources > 0 ||
-      active.radiusKm > 0 ||
-      active.lat !== 0 ||
-      active.lon !== 0 ||
-      prompts().length > 0;
-    if (!hasFilters) return null;
-    return {
-      categories: new Set(active.categories),
-      regions: active.regions,
-      sources: active.sources,
-      minSources: active.minSources,
-      lat: active.lat,
-      lon: active.lon,
-      radiusKm: active.radiusKm,
-      promptStoryIds: promptStoryIds(),
-    };
-  };
 
   const searchResults = createMemo(() => {
     globe();
@@ -529,7 +493,7 @@ export function App() {
     const rows = wireRows();
     if (rows.length === 0) return new Array(36).fill(0);
     const end = now();
-    const binMs = 24 * 60 * 60 * 1000 / 36;
+    const binMs = (24 * 60 * 60 * 1000) / 36;
     const bins = new Array(36).fill(0);
     for (const item of rows) {
       const at = Number(item.row.at) * 1000 || item.receivedAt;
@@ -556,18 +520,6 @@ export function App() {
     return events;
   });
 
-  createEffect(() => {
-    filters();
-    prompts();
-    promptStoryIds();
-    if (!liveGlobe) return;
-    if (filterTimer !== null) clearTimeout(filterTimer);
-    filterTimer = setTimeout(() => {
-      filterTimer = null;
-      liveGlobe?.setStoryFilter(buildStoryFilter());
-    }, 180);
-  });
-
   const enqueueWire = (rows: WireRow[]): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
@@ -589,6 +541,10 @@ export function App() {
       }
       seen.add(key);
       pendingWire.push({ row, key, receivedAt: Date.now() });
+      if (pendingWire.length > 1000) {
+        const removed = pendingWire.shift();
+        if (removed) seen.delete(removed.key);
+      }
       added++;
     }
     if (updates.length > 0) {
@@ -612,7 +568,12 @@ export function App() {
   const flushWire = (): void => {
     if (paused() || pendingWire.length === 0) return;
     const batch = pendingWire.splice(0);
-    setWireRows((previous) => [...batch.reverse(), ...previous].slice(0, 1000));
+    setWireRows((previous) => {
+      const all = [...batch.reverse(), ...previous];
+      const kept = all.slice(0, 1000);
+      for (const item of all.slice(1000)) seen.delete(item.key);
+      return kept;
+    });
     const fresh = new Set(batch.map((item) => item.key));
     setFreshKeys(new Set<string>(fresh));
     if (freshTimer !== null) clearTimeout(freshTimer);
@@ -654,14 +615,12 @@ export function App() {
     const next = { ...filters(), ...patch };
     setFilters(next);
     worker?.postMessage({ type: "filters", filters: next });
-    liveGlobe?.setStoryFilter(buildStoryFilter());
   };
 
   const updatePrompts = (next: string[]): void => {
     const unique = [...new Set(next.map((prompt) => prompt.trim()).filter(Boolean))];
     setPrompts(unique);
     worker?.postMessage({ type: "prompts", prompts: unique });
-    liveGlobe?.setStoryFilter(buildStoryFilter());
   };
 
   const addPrompt = (): void => {
@@ -708,11 +667,8 @@ export function App() {
     setNearMeState("loading");
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const nearby = liveGlobe?.nearbyStories(
-          position.coords.latitude,
-          position.coords.longitude,
-          12,
-        ) ?? [];
+        const nearby =
+          liveGlobe?.nearbyStories(position.coords.latitude, position.coords.longitude, 12) ?? [];
         setNearMe(
           nearby.map(({ entry, km }) => ({
             storyId: entry.story.id,
@@ -740,12 +696,19 @@ export function App() {
     if (storyId) params.set("story", storyId);
     if (liveGlobe) {
       const view = liveGlobe.view;
-      params.set("view", `${view.center[0].toFixed(3)},${view.center[1].toFixed(3)},${view.zoom.toFixed(2)}`);
+      params.set(
+        "view",
+        `${view.center[0].toFixed(3)},${view.center[1].toFixed(3)},${view.zoom.toFixed(2)}`,
+      );
     }
     if (threadOnly()) params.set("f", "thread");
     else if (globe().secondDegree) params.set("f", "second");
     const next = params.toString();
-    history.replaceState(null, "", `${location.pathname}${location.search}${next ? `#${next}` : ""}`);
+    history.replaceState(
+      null,
+      "",
+      `${location.pathname}${location.search}${next ? `#${next}` : ""}`,
+    );
   };
 
   const scheduleHash = (): void => {
@@ -923,34 +886,31 @@ export function App() {
   };
 
   const dismissToast = (toast: AlertToast): void => {
-    setAlertToasts((previous) =>
-      previous.filter((item) => !(item.alertId === toast.alertId && item.storyId === toast.storyId)),
-    );
+    setAlertToasts((previous) => alertInbox.dismiss(previous, toast));
   };
 
-  const handleAlertHit = (hit: {
-    alertId: string;
-    storyId: string;
-    level: string;
-    title: string;
-    prompt: string;
-    firedAt: bigint;
-  }): void => {
+  const handleAlertHit = (hit: IncomingAlert): void => {
     const alert = alertList().find((item) => item.id === hit.alertId);
     if (alert && !alert.channels.includes("inapp")) return;
-    const toast: AlertToast = {
-      alertId: hit.alertId,
-      storyId: hit.storyId,
-      level: hit.level,
-      title: hit.title,
-      prompt: hit.prompt,
-      firedAt: Number(hit.firedAt),
-    };
-    setAlertToasts((previous) =>
-      previous.some((item) => item.alertId === toast.alertId && item.storyId === toast.storyId)
-        ? previous
-        : [toast, ...previous].slice(0, 4),
-    );
+    setAlertToasts((previous) => {
+      const next = alertInbox.push(previous, hit);
+      if (next !== previous) {
+        const record = toHistory(next[0]!);
+        setAlertHits((history) => {
+          const existing = history[record.alert_id];
+          if (!existing) return history;
+          const key = historyIdentity(record);
+          return {
+            ...history,
+            [record.alert_id]: [
+              record,
+              ...existing.filter((item) => historyIdentity(item) !== key),
+            ].slice(0, 100),
+          };
+        });
+      }
+      return next;
+    });
   };
 
   const muteAlertStory = async (toast: AlertToast): Promise<void> => {
@@ -976,13 +936,21 @@ export function App() {
         "/api/push/key",
       );
       if (!key.available || !key.public_key) {
-        setPushState({ loading: false, available: false, reason: key.reason || "Push is not configured" });
+        setPushState({
+          loading: false,
+          available: false,
+          reason: key.reason || "Push is not configured",
+        });
         return;
       }
       const registration = await navigator.serviceWorker.register("/sw.js");
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
-        setPushState({ loading: false, available: false, reason: "Notification permission denied" });
+        setPushState({
+          loading: false,
+          available: false,
+          reason: "Notification permission denied",
+        });
         return;
       }
       const normalized = key.public_key.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
@@ -1004,7 +972,7 @@ export function App() {
   };
 
   const loadLinkWhy = async (link: LinkInfo): Promise<void> => {
-    const key = `${link.aId} ${link.bId}`;
+    const key = `${link.aId}\u0000${link.bId}`;
     const cached = whyCache.get(key);
     if (cached) {
       setLinkWhy(cached);
@@ -1015,7 +983,11 @@ export function App() {
       const response = await fetch(
         `${API_BASE}/api/text?link_a=${encodeURIComponent(link.aId)}&link_b=${encodeURIComponent(link.bId)}`,
       );
-      const payload = (await response.json()) as { available?: boolean; why?: string; error?: string };
+      const payload = (await response.json()) as {
+        available?: boolean;
+        why?: string;
+        error?: string;
+      };
       const next: LinkWhy = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.why),
@@ -1039,7 +1011,7 @@ export function App() {
 
   const prefetchStory = (storyId: string): void => {
     if (!storyId || prefetched.has(storyId)) return;
-    prefetched.add(storyId);
+    prefetched.set(storyId, true);
     worker?.postMessage({ type: "focus", storyId });
   };
 
@@ -1070,38 +1042,25 @@ export function App() {
       case "status":
         applyStatus(message);
         break;
-      case "snapshot":
+      case "init":
         seen.clear();
         pendingWire.length = 0;
         setWireRows([]);
         setPendingNew(0);
         setSelectedArticle(null);
         setLastSeq(message.seq);
-        liveGlobe?.setSnapshot(message.stories, message.links);
-        if (message.recentWire?.length) enqueueWire(message.recentWire);
+        liveGlobe?.setInit(message);
+        if (message.recentWire.length) enqueueWire(message.recentWire);
         break;
-      case "deltas":
+      case "patch":
+        workerBounds = message.bounds;
         setLastSeq(message.seq);
-        liveGlobe?.applyDeltas(message.deltas);
-        for (const delta of message.deltas) {
-          if (delta.body.case === "alert") {
-            const hit = delta.body.value;
-            handleAlertHit({
-              alertId: hit.alertId,
-              storyId: hit.storyId,
-              level: hit.level,
-              title: hit.title,
-              prompt: hit.prompt,
-              firedAt: hit.firedAt,
-            });
-          }
-        }
-        enqueueWire(
-          message.deltas
-            .filter((delta) => delta.body.case === "wire")
-            .map((delta) => (delta.body.case === "wire" ? delta.body.value : null))
-            .filter((row): row is WireRow => row !== null),
-        );
+        liveGlobe?.queuePatch(message);
+        for (const hit of message.alerts) handleAlertHit(hit);
+        enqueueWire(message.wire);
+        break;
+      case "frameDone":
+        workerFrameReady = true;
         break;
       case "resync":
         seen.clear();
@@ -1114,50 +1073,70 @@ export function App() {
   };
 
   onMount(() => {
-    liveGlobe = new LiveGlobe(mapContainer, {
-      onState: setGlobe,
-      onFocus: (details) => {
-        setFocus(details);
-        if (details) {
-          pendingInitialStory = null;
-          const matching = wireRows().find((item) => item.row.storyId === details.storyId);
-          setSelectedArticle(matching?.key ?? null);
-          setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
-          setStoryDetails(detailsCache.get(details.storyId) ?? null);
-          void loadStoryText(details.storyId);
-          void loadStoryDetails(details.storyId);
-          worker?.postMessage({ type: "focus", storyId: details.storyId });
-          syncHash(details.storyId);
-        } else {
-          setSelectedArticle(null);
-          setThreadOnly(false);
-          setSelectedLink(null);
-          setStoryText(null);
-          setStoryDetails(null);
-          syncHash(null);
-        }
-      },
-      onLinkClick: openLink,
-      onView: (nextView) => {
-        setView(nextView);
-        scheduleHash();
-      },
-    });
-    liveGlobe.setStrengthFloor(layerFloor());
-    const viewParam = initialHash.get("view")?.split(",").map(Number);
-    if (viewParam && viewParam.length === 3 && viewParam.every((value) => Number.isFinite(value))) {
-      liveGlobe.setView([viewParam[0]!, viewParam[1]!], viewParam[2]!);
+    if (initialQuery.has("diagnostics")) {
+      (window as unknown as { __dorApp?: unknown }).__dorApp = {
+        get bounds() {
+          return {
+            seen: seen.size,
+            visible: wireRows().length,
+            pending: pendingWire.length,
+            brief: briefCache.size,
+            details: detailsCache.size,
+            why: whyCache.size,
+            prefetched: prefetched.size,
+            worker: workerBounds,
+          };
+        },
+      };
     }
-    if (initialQuery.get("alert")) setAlertsOpen(true);
-    if (initialHash.get("f") === "thread") setThreadOnly(true);
-    if (initialHash.get("f") === "second") liveGlobe.setSecondDegree(true);
-    if (pendingInitialStory) liveGlobe.focusStoryId(pendingInitialStory);
-
-    if (new URLSearchParams(location.search).get("mock") === "1") {
-      void import("./live/mock").then(({ startMock }) => {
-        mockStop = startMock(handleMessage).stop;
+    void (async () => {
+      await afterShellPaint(loadAbort.signal);
+      if (disposed) return;
+      const { LiveGlobe } = await import("./globe/runtime");
+      if (disposed) return;
+      liveGlobe = new LiveGlobe(mapContainer, {
+        onState: setGlobe,
+        onFocus: (details) => {
+          setFocus(details);
+          if (details) {
+            pendingInitialStory = null;
+            const matching = wireRows().find((item) => item.row.storyId === details.storyId);
+            setSelectedArticle(matching?.key ?? null);
+            setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
+            setStoryDetails(detailsCache.get(details.storyId) ?? null);
+            void loadStoryText(details.storyId);
+            void loadStoryDetails(details.storyId);
+            worker?.postMessage({ type: "focus", storyId: details.storyId });
+            syncHash(details.storyId);
+          } else {
+            setSelectedArticle(null);
+            setThreadOnly(false);
+            setSelectedLink(null);
+            setStoryText(null);
+            setStoryDetails(null);
+            syncHash(null);
+          }
+        },
+        onLinkClick: openLink,
+        onView: (nextView) => {
+          setView(nextView);
+          scheduleHash();
+        },
       });
-    } else {
+      liveGlobe.setStrengthFloor(layerFloor());
+      const viewParam = initialHash.get("view")?.split(",").map(Number);
+      if (
+        viewParam &&
+        viewParam.length === 3 &&
+        viewParam.every((value) => Number.isFinite(value))
+      ) {
+        liveGlobe.setView([viewParam[0]!, viewParam[1]!], viewParam[2]!);
+      }
+      if (initialQuery.get("alert")) setAlertsOpen(true);
+      if (initialHash.get("f") === "thread") setThreadOnly(true);
+      if (initialHash.get("f") === "second") liveGlobe.setSecondDegree(true);
+      if (pendingInitialStory) liveGlobe.focusStoryId(pendingInitialStory);
+
       worker = new Worker(new URL("./worker/index.ts", import.meta.url), {
         type: "module",
         name: "dor-data-worker",
@@ -1167,7 +1146,32 @@ export function App() {
         setConnection("offline");
         console.error(`data worker: ${event.message}`);
       };
-    }
+      worker.postMessage({
+        type: "start",
+        mode:
+          initialQuery.get("perf") === "1"
+            ? "perf"
+            : initialQuery.get("mock") === "1"
+              ? "mock"
+              : "live",
+      });
+      worker.postMessage({ type: "filters", filters: filters() });
+      worker.postMessage({ type: "prompts", prompts: prompts() });
+      const frame = (): void => {
+        if (disposed) return;
+        if (workerFrameReady && liveGlobe?.isReady) {
+          workerFrameReady = false;
+          worker?.postMessage({ type: "frame" });
+        }
+        workerFrameHandle = requestAnimationFrame(frame);
+      };
+      workerFrameHandle = requestAnimationFrame(frame);
+    })().catch((error) => {
+      if (!disposed) {
+        setConnection("offline");
+        console.error(error);
+      }
+    });
 
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
     void loadAlerts();
@@ -1201,22 +1205,24 @@ export function App() {
     window.addEventListener("keydown", onKey);
     onCleanup(() => {
       window.removeEventListener("keydown", onKey);
+      disposed = true;
+      loadAbort.abort();
+      if (workerFrameHandle !== null) cancelAnimationFrame(workerFrameHandle);
       worker?.terminate();
       worker = null;
-      mockStop?.();
-      mockStop = null;
       liveGlobe?.destroy();
       liveGlobe = null;
       if (clockTimer !== null) clearInterval(clockTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
-      if (filterTimer !== null) clearTimeout(filterTimer);
     });
   });
 
   const moveSelection = (delta: number): void => {
     const rows = displayRows()
-      .filter((row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article")
+      .filter(
+        (row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article",
+      )
       .map((row) => row.item);
     if (rows.length === 0) return;
     const current = rows.findIndex((item) => item.key === selectedArticle());
@@ -1238,7 +1244,7 @@ export function App() {
     setSelectedArticle(null);
   };
 
-  const focusTopStory = (story: Story): void => {
+  const focusTopStory = (story: StorySummary): void => {
     liveGlobe?.focusStoryId(story.id);
   };
 
@@ -1391,7 +1397,11 @@ export function App() {
         <div class="right">
           <Show when={connection() !== "online"}>
             <span class="reconnect" title={health().detail}>
-              {connection() === "connecting" ? "CONNECTING" : connection() === "reconnecting" ? "RECONNECTING" : "OFFLINE"}
+              {connection() === "connecting"
+                ? "CONNECTING"
+                : connection() === "reconnecting"
+                  ? "RECONNECTING"
+                  : "OFFLINE"}
               {reconnectIn() !== null ? ` · ${Math.ceil(reconnectIn()! / 1000)}s` : ""}
             </span>
           </Show>
@@ -1434,7 +1444,13 @@ export function App() {
                   if (tab === "alerts") void loadAlerts();
                 }}
               >
-                {tab === "wire" ? "Wire" : tab === "threads" ? "Threads" : tab === "near" ? "Near me" : "Alerts"}
+                {tab === "wire"
+                  ? "Wire"
+                  : tab === "threads"
+                    ? "Threads"
+                    : tab === "near"
+                      ? "Near me"
+                      : "Alerts"}
               </button>
             )}
           </For>
@@ -1449,10 +1465,7 @@ export function App() {
               {rate() > 0 ? `${rate()} / min` : "— / min"}
             </span>
             <div class="seg" role="group" aria-label="Stream granularity">
-              <button
-                aria-pressed={!storiesOnly()}
-                onClick={() => setStoriesOnly(false)}
-              >
+              <button aria-pressed={!storiesOnly()} onClick={() => setStoriesOnly(false)}>
                 Every article
               </button>
               <button
@@ -1477,7 +1490,11 @@ export function App() {
             <div class="filter-drawer glass">
               <div class="filter-row">
                 <span class="cap">Category</span>
-                <span>{filters().categories.length === 0 ? "All" : `${filters().categories.length} active`}</span>
+                <span>
+                  {filters().categories.length === 0
+                    ? "All"
+                    : `${filters().categories.length} active`}
+                </span>
               </div>
               <label class="filter-field">
                 <span>Sources</span>
@@ -1587,7 +1604,9 @@ export function App() {
               </div>
               <div class="filter-actions">
                 <span class="cap">
-                  {filterPlace() ? `${filterPlace()!.name} · ${filters().radiusKm} km` : "No radius centre"}
+                  {filterPlace()
+                    ? `${filterPlace()!.name} · ${filters().radiusKm} km`
+                    : "No radius centre"}
                 </span>
                 <button
                   class="text-btn"
@@ -1640,7 +1659,9 @@ export function App() {
             </div>
           </Show>
           <label class="prompt">
-            <span class="spark" aria-hidden="true">✦</span>
+            <span class="spark" aria-hidden="true">
+              ✦
+            </span>
             <input
               type="text"
               value={promptInput()}
@@ -1702,7 +1723,9 @@ export function App() {
             when={displayRows().length > 0}
             fallback={
               <div class="wire-empty">
-                <span class="cap">{connection() === "online" ? "Listening" : "Gateway unavailable"}</span>
+                <span class="cap">
+                  {connection() === "online" ? "Listening" : "Gateway unavailable"}
+                </span>
                 <p>
                   {connection() === "online"
                     ? "Waiting for the first article. The wire fills as sources publish."
@@ -1722,7 +1745,8 @@ export function App() {
                     <div
                       class={`wr ${
                         display()?.kind === "article" &&
-                        selectedArticle() === (display() as { kind: "article"; item: WireItem }).item.key
+                        selectedArticle() ===
+                          (display() as { kind: "article"; item: WireItem }).item.key
                           ? "sel"
                           : ""
                       } ${
@@ -1732,14 +1756,17 @@ export function App() {
                           : ""
                       } ${
                         display()?.kind === "article" && focus()
-                          ? threadIds().has((display() as { kind: "article"; item: WireItem }).item.row.storyId)
+                          ? threadIds().has(
+                              (display() as { kind: "article"; item: WireItem }).item.row.storyId,
+                            )
                             ? "thread"
                             : "dim"
                           : ""
                       } ${
                         display()?.kind === "article" &&
                         prompts().length > 0 &&
-                        activeScore((display() as { kind: "article"; item: WireItem }).item.row) < 0.5
+                        activeScore((display() as { kind: "article"; item: WireItem }).item.row) <
+                          0.5
                           ? "dim"
                           : ""
                       }`}
@@ -1761,8 +1788,15 @@ export function App() {
                               if (item?.kind === "burst") expandBatch(item.key);
                             }}
                           >
-                            + {display()?.kind === "burst" ? (display() as { count: number }).count : 0} more from the{" "}
-                            {display()?.kind === "burst" ? (display() as { source: string }).source : "batch"} batch
+                            +{" "}
+                            {display()?.kind === "burst"
+                              ? (display() as { count: number }).count
+                              : 0}{" "}
+                            more from the{" "}
+                            {display()?.kind === "burst"
+                              ? (display() as { source: string }).source
+                              : "batch"}{" "}
+                            batch
                             {" · "}
                             <span class="expand">expand</span>
                           </button>
@@ -1794,7 +1828,12 @@ export function App() {
                               <span class="pl">
                                 {row.place || "—"}
                                 <Show when={prompts().length > 0 && activeScore(row) > 0}>
-                                  <span class="match-score" title={isApproxMatch(row) ? "Approximate match" : "Prompt match"}>
+                                  <span
+                                    class="match-score"
+                                    title={
+                                      isApproxMatch(row) ? "Approximate match" : "Prompt match"
+                                    }
+                                  >
                                     {isApproxMatch(row) ? "≈" : "·"} {activeScore(row).toFixed(2)}
                                   </span>
                                 </Show>
@@ -1881,12 +1920,14 @@ export function App() {
         <div class="hud-corners" />
         <div class="zoom-rail glass">
           <For
-            each={[
-              ["GLOBE", 1.55],
-              ["REGION", 6],
-              ["CITY", 11],
-              ["STREET", 15],
-            ] as const}
+            each={
+              [
+                ["GLOBE", 1.55],
+                ["REGION", 6],
+                ["CITY", 11],
+                ["STREET", 15],
+              ] as const
+            }
           >
             {([label, zoom]) => (
               <button
@@ -1904,7 +1945,9 @@ export function App() {
         </div>
         <div class="tl">
           <span class="cap">
-            {focus() ? `Focused · ${focus()!.hud.story.place.toUpperCase()}` : "Ambient · no selection"}
+            {focus()
+              ? `Focused · ${focus()!.hud.story.place.toUpperCase()}`
+              : "Ambient · no selection"}
           </span>
           <Show when={focus()}>
             <button class="back" onClick={clearFocus}>
@@ -2043,13 +2086,17 @@ export function App() {
         </Show>
         <Show when={globe().storyCount === 0}>
           <div class="stage-empty glass">
-            <span class="cap">{connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}</span>
+            <span class="cap">
+              {connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}
+            </span>
             <h3>Articles first. Stories next.</h3>
             <p>
-              The wire is live now. The globe fills when the classifier publishes its first
-              located stories.
+              The wire is live now. The globe fills when the classifier publishes its first located
+              stories.
             </p>
-            <span class="mono">{wireRows().length} wire rows · {storyCount()} stories</span>
+            <span class="mono">
+              {wireRows().length} wire rows · {storyCount()} stories
+            </span>
           </div>
         </Show>
         <div class="bl glass">
@@ -2111,7 +2158,10 @@ export function App() {
           {(link) => (
             <div class="arc-popover glass">
               <div class="arc-popover-head">
-                <span class="cap" style={`color:${link().type === 0 ? "#ffc25c" : link().type === 1 ? "#ff6fd8" : "#5ef2ff"}`}>
+                <span
+                  class="cap"
+                  style={`color:${link().type === 0 ? "#ffc25c" : link().type === 1 ? "#ff6fd8" : "#5ef2ff"}`}
+                >
                   {typeName(link().type)} · {directionLabel(link())}
                 </span>
                 <button class="text-btn" onClick={() => setSelectedLink(null)}>
@@ -2121,9 +2171,15 @@ export function App() {
               <h3>{link().aTitle}</h3>
               <h4>→ {link().bTitle}</h4>
               <div class="facts">
-                <span><b>{link().strength.toFixed(2)}</b> strength</span>
-                <span><b>{link().confidence.toFixed(2)}</b> confidence</span>
-                <span><b>{link().distanceKm.toFixed(0)}</b> km</span>
+                <span>
+                  <b>{link().strength.toFixed(2)}</b> strength
+                </span>
+                <span>
+                  <b>{link().confidence.toFixed(2)}</b> confidence
+                </span>
+                <span>
+                  <b>{link().distanceKm.toFixed(0)}</b> km
+                </span>
                 <Show when={link().unverified}>
                   <span class="unverified">unverified</span>
                 </Show>
@@ -2146,6 +2202,15 @@ export function App() {
         </Show>
         <Show when={perfOverlay()}>
           <div class="perf-chip mono">
+            FPS {globe().perf?.fps.toFixed(1) ?? "—"} · P95{" "}
+            {globe().perf?.frameMs.p95.toFixed(1) ?? "—"} ms
+            <br />
+            LONG TASKS {globe().perf?.longTasks ?? 0} · JS/FRAME{" "}
+            {globe().perf?.jsMs.mean.toFixed(2) ?? "—"} ms
+            <br />
+            FOCUS {globe().focusLatencyMs?.toFixed(1) ?? "—"} ms · INIT {globe().initCount ?? 0} ·
+            PATCH {globe().patchCount ?? 0}
+            <br />
             QUALITY {globe().quality} · DPR ≤ 2 · {globe().storyCount} stories
           </div>
         </Show>
@@ -2187,7 +2252,8 @@ export function App() {
                         <div class="foot">
                           <span>{story.place}</span>
                           <span>
-                            strongest {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
+                            strongest{" "}
+                            {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
                           </span>
                         </div>
                       </button>
@@ -2212,22 +2278,18 @@ export function App() {
                 <h1>{details().story.title}</h1>
                 <div class="facts">
                   <span>
-                    first seen{" "}
-                    <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
+                    first seen <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
                   </span>
                   <span>
                     <b>{details().hud.story.sources}</b> sources
                   </span>
                   <span>
-                    updated{" "}
-                    <b>{relativeTime(Number(details().story.updatedAt), now())}</b>
+                    updated <b>{relativeTime(Number(details().story.updatedAt), now())}</b>
                   </span>
                 </div>
               </div>
               <div class="sec">
-                <span class="agentk">
-                  AGENT BRIEF · from {details().hud.story.sources} sources
-                </span>
+                <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
                 <Show
                   when={storyText()?.available}
                   fallback={
@@ -2269,8 +2331,8 @@ export function App() {
                     <div class="tierh">
                       <span class="cap">Sources</span>
                       <span class="cap">
-                        {detailsData().sources.length} feeds ·{" "}
-                        {detailsData().articles.length} recent
+                        {detailsData().sources.length} feeds · {detailsData().articles.length}{" "}
+                        recent
                       </span>
                     </div>
                     <Show
@@ -2338,7 +2400,8 @@ export function App() {
                               }}
                             >
                               <span class="k">
-                                {typeName(link.type)} {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {typeName(link.type)}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
                                 {link.unverified ? "unverified · " : ""}
                                 {link.place.toUpperCase()}
                               </span>
@@ -2421,7 +2484,9 @@ export function App() {
                       if (info) openLink(info);
                     }}
                   >
-                    <span>{typeName(link.type)} · {link.place}</span>
+                    <span>
+                      {typeName(link.type)} · {link.place}
+                    </span>
                     <b>{link.strength.toFixed(2)}</b>
                   </button>
                 )}
@@ -2455,7 +2520,9 @@ export function App() {
                   type="number"
                   min="0"
                   value={alertDraftMinSources()}
-                  onInput={(event) => setAlertDraftMinSources(Number(event.currentTarget.value) || 0)}
+                  onInput={(event) =>
+                    setAlertDraftMinSources(Number(event.currentTarget.value) || 0)
+                  }
                 />
               </label>
               <label class="filter-field">
@@ -2468,7 +2535,9 @@ export function App() {
               </label>
             </div>
             <label class="alert-strict">
-              <span>Strictness <b>{alertDraftStrictness().toFixed(2)}</b></span>
+              <span>
+                Strictness <b>{alertDraftStrictness().toFixed(2)}</b>
+              </span>
               <input
                 type="range"
                 min="0.5"
@@ -2531,10 +2600,7 @@ export function App() {
             </Show>
           </div>
           <div class="alert-list">
-            <Show
-              when={alertList().length > 0}
-              fallback={<span class="cap">No alerts yet</span>}
-            >
+            <Show when={alertList().length > 0} fallback={<span class="cap">No alerts yet</span>}>
               <For each={alertList()}>
                 {(alert) => (
                   <div class="alert-item">
@@ -2564,6 +2630,7 @@ export function App() {
                             <button onClick={() => liveGlobe?.focusStoryId(hit.story_id)}>
                               {hit.level === "escalated" ? "↑ " : ""}
                               {hit.title}
+                              {approximateLabel(hit.approx)}
                             </button>
                           )}
                         </For>
@@ -2602,6 +2669,7 @@ export function App() {
               <div class="alert-toast glass">
                 <span class="cap">
                   {toast.level === "escalated" ? "Escalated" : "Alert"} · {toast.prompt}
+                  {approximateLabel(toast.approx)}
                 </span>
                 <b>{toast.title}</b>
                 <div class="toast-actions">
@@ -2633,13 +2701,17 @@ export function App() {
           fallback={
             <>
               <div class="tlrow">
-                <span class="cap" style="width:78px">Last 24h</span>
+                <span class="cap" style="width:78px">
+                  Last 24h
+                </span>
                 <div class="bars">
                   <For each={timelineBars()}>{(height) => <i style={`height:${height}%`} />}</For>
                   <span class="win" />
                   <span class="now" />
                 </div>
-                <button class="chip" aria-pressed="true">● Live</button>
+                <button class="chip" aria-pressed="true">
+                  ● Live
+                </button>
               </div>
               <div class="ticks">
                 <span>−24h</span>
@@ -2652,7 +2724,9 @@ export function App() {
           }
         >
           <div class="tlrow">
-            <span class="cap" style="width:78px">This thread</span>
+            <span class="cap" style="width:78px">
+              This thread
+            </span>
             <div class="track">
               <For each={focusTimeline()}>
                 {(event) => (

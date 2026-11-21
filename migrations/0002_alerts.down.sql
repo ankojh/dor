@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS alert_mutes;
+ALTER TABLE alert_hits DROP COLUMN IF EXISTS title;
+ALTER TABLE alert_hits DROP COLUMN IF EXISTS source_count;
+ALTER TABLE alerts DROP COLUMN IF EXISTS ntfy_topic;
+ALTER TABLE alerts DROP COLUMN IF EXISTS updated_at;

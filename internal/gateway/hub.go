@@ -34,6 +34,7 @@ type hub struct {
 	clients map[*client]struct{}
 	ring    []*dorv1.Delta
 	seq     uint64
+	stories map[string]*dorv1.Story
 
 	snapMu    sync.Mutex
 	snapBytes []byte
@@ -43,7 +44,12 @@ type hub struct {
 }
 
 func newHub(b *bus.Bus, log *slog.Logger) *hub {
-	return &hub{bus: b, log: log, clients: make(map[*client]struct{})}
+	return &hub{
+		bus:     b,
+		log:     log,
+		clients: make(map[*client]struct{}),
+		stories: make(map[string]*dorv1.Story),
+	}
 }
 
 func (h *hub) addClient(c *client) {
@@ -108,9 +114,17 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 		h.log.Warn("gateway: marshal delta message", "err", err)
 		return
 	}
+	hasWire := false
+	for _, d := range batch.Deltas {
+		if d.GetWire() != nil {
+			hasWire = true
+			break
+		}
+	}
 
 	var slow []*client
 	h.mu.Lock()
+	h.observeBatchLocked(batch)
 	for _, d := range batch.Deltas {
 		h.ring = append(h.ring, d)
 		if d.Seq > h.seq {
@@ -125,13 +139,50 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 		if !c.ready {
 			continue
 		}
-		if !c.enqueue(data) {
+		payload := data
+		if hasWire {
+			if f := c.filterState(); f.active() {
+				filtered := filterDeltaBatch(batch, f, h.stories)
+				if filtered == nil {
+					continue
+				}
+				private, err := proto.MarshalOptions{Deterministic: true}.Marshal(
+					&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: filtered}})
+				if err != nil {
+					continue
+				}
+				payload = private
+			}
+		}
+		if !c.enqueue(payload) {
 			slow = append(slow, c)
 		}
 	}
 	h.mu.Unlock()
 	for _, c := range slow {
 		c.kick("slow client")
+	}
+}
+
+// observeBatchLocked tracks the live story set so min_sources and region
+// filters work on wire rows whose story arrived in an earlier batch.
+func (h *hub) observeBatchLocked(batch *dorv1.DeltaBatch) {
+	for _, d := range batch.Deltas {
+		switch body := d.Body.(type) {
+		case *dorv1.Delta_StoryUpsert:
+			h.observeStoryLocked(body.StoryUpsert)
+		case *dorv1.Delta_StoryExpire:
+			delete(h.stories, body.StoryExpire)
+		}
+	}
+}
+
+func (h *hub) observeStoryLocked(story *dorv1.Story) {
+	if story == nil || story.Id == "" {
+		return
+	}
+	if cur := h.stories[story.Id]; cur == nil || cur.UpdatedAt <= story.UpdatedAt {
+		h.stories[story.Id] = story
 	}
 }
 
@@ -142,6 +193,9 @@ func (h *hub) resume(c *client, lastSeq uint64) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	for _, story := range snap.Stories {
+		h.observeStoryLocked(story)
+	}
 
 	replay := func(from uint64) {
 		deltas, ok := h.sinceLocked(from)
@@ -153,9 +207,14 @@ func (h *hub) resume(c *client, lastSeq uint64) {
 			if end > len(deltas) {
 				end = len(deltas)
 			}
-			msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{
-				Deltas: &dorv1.DeltaBatch{Deltas: deltas[start:end]},
-			}}
+			chunk := &dorv1.DeltaBatch{Deltas: deltas[start:end]}
+			if f := c.filterState(); f.active() {
+				chunk = filterDeltaBatch(chunk, f, h.stories)
+				if chunk == nil {
+					continue
+				}
+			}
+			msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: chunk}}
 			data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 			if err != nil {
 				continue
@@ -167,7 +226,16 @@ func (h *hub) resume(c *client, lastSeq uint64) {
 		}
 	}
 	sendSnapshot := func() {
-		if !c.enqueue(snapBytes) {
+		payload := snapBytes
+		if f := c.filterState(); f.active() {
+			if filtered := filterSnapshot(snap, f, h.stories); filtered != nil {
+				msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: filtered}}
+				if data, err := (proto.MarshalOptions{Deterministic: true}).Marshal(msg); err == nil {
+					payload = data
+				}
+			}
+		}
+		if !c.enqueue(payload) {
 			c.kick("slow client for snapshot")
 			return
 		}

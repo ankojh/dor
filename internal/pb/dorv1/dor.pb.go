@@ -1010,16 +1010,24 @@ func (x *AlertHit) GetPrompt() string {
 
 // WireRow is one row in the live wire.
 type WireRow struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ArticleId     string                 `protobuf:"bytes,1,opt,name=article_id,json=articleId,proto3" json:"article_id,omitempty"`
-	StoryId       string                 `protobuf:"bytes,2,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
-	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
-	Source        string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
-	Place         string                 `protobuf:"bytes,5,opt,name=place,proto3" json:"place,omitempty"`
-	Category      Category               `protobuf:"varint,6,opt,name=category,proto3,enum=dor.v1.Category" json:"category,omitempty"`
-	At            int64                  `protobuf:"varint,7,opt,name=at,proto3" json:"at,omitempty"` // unix seconds
-	Join          JoinKind               `protobuf:"varint,8,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
-	PromptScores  map[string]float32     `protobuf:"bytes,9,rep,name=prompt_scores,json=promptScores,proto3" json:"prompt_scores,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed32,2,opt,name=value"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ArticleId    string                 `protobuf:"bytes,1,opt,name=article_id,json=articleId,proto3" json:"article_id,omitempty"`
+	StoryId      string                 `protobuf:"bytes,2,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
+	Title        string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	Source       string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
+	Place        string                 `protobuf:"bytes,5,opt,name=place,proto3" json:"place,omitempty"`
+	Category     Category               `protobuf:"varint,6,opt,name=category,proto3,enum=dor.v1.Category" json:"category,omitempty"`
+	At           int64                  `protobuf:"varint,7,opt,name=at,proto3" json:"at,omitempty"` // unix seconds
+	Join         JoinKind               `protobuf:"varint,8,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
+	PromptScores map[string]float32     `protobuf:"bytes,9,rep,name=prompt_scores,json=promptScores,proto3" json:"prompt_scores,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed32,2,opt,name=value"`
+	// Append-only filter fields. Empty/zero means unknown.
+	Country string  `protobuf:"bytes,10,opt,name=country,proto3" json:"country,omitempty"` // ISO 3166-1 alpha-2 when the source supplies one
+	Lang    string  `protobuf:"bytes,11,opt,name=lang,proto3" json:"lang,omitempty"`
+	Lat     float64 `protobuf:"fixed64,12,opt,name=lat,proto3" json:"lat,omitempty"`
+	Lon     float64 `protobuf:"fixed64,13,opt,name=lon,proto3" json:"lon,omitempty"`
+	Located bool    `protobuf:"varint,14,opt,name=located,proto3" json:"located,omitempty"`
+	// Prompts scored without a jev answer (embedding/lexical only).
+	ApproxPrompts []string `protobuf:"bytes,15,rep,name=approx_prompts,json=approxPrompts,proto3" json:"approx_prompts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1113,6 +1121,48 @@ func (x *WireRow) GetJoin() JoinKind {
 func (x *WireRow) GetPromptScores() map[string]float32 {
 	if x != nil {
 		return x.PromptScores
+	}
+	return nil
+}
+
+func (x *WireRow) GetCountry() string {
+	if x != nil {
+		return x.Country
+	}
+	return ""
+}
+
+func (x *WireRow) GetLang() string {
+	if x != nil {
+		return x.Lang
+	}
+	return ""
+}
+
+func (x *WireRow) GetLat() float64 {
+	if x != nil {
+		return x.Lat
+	}
+	return 0
+}
+
+func (x *WireRow) GetLon() float64 {
+	if x != nil {
+		return x.Lon
+	}
+	return 0
+}
+
+func (x *WireRow) GetLocated() bool {
+	if x != nil {
+		return x.Located
+	}
+	return false
+}
+
+func (x *WireRow) GetApproxPrompts() []string {
+	if x != nil {
+		return x.ApproxPrompts
 	}
 	return nil
 }
@@ -1604,11 +1654,16 @@ func (x *Hello) GetClientVersion() string {
 
 // SetFilters replaces the client's wire filters.
 type SetFilters struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Categories    []Category             `protobuf:"varint,1,rep,packed,name=categories,proto3,enum=dor.v1.Category" json:"categories,omitempty"`
-	Regions       []string               `protobuf:"bytes,2,rep,name=regions,proto3" json:"regions,omitempty"`
-	MinSources    uint32                 `protobuf:"varint,3,opt,name=min_sources,json=minSources,proto3" json:"min_sources,omitempty"`
-	Lang          []string               `protobuf:"bytes,4,rep,name=lang,proto3" json:"lang,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Categories []Category             `protobuf:"varint,1,rep,packed,name=categories,proto3,enum=dor.v1.Category" json:"categories,omitempty"`
+	Regions    []string               `protobuf:"bytes,2,rep,name=regions,proto3" json:"regions,omitempty"`
+	MinSources uint32                 `protobuf:"varint,3,opt,name=min_sources,json=minSources,proto3" json:"min_sources,omitempty"`
+	Lang       []string               `protobuf:"bytes,4,rep,name=lang,proto3" json:"lang,omitempty"`
+	// Append-only server-side wire filters. Empty/zero means no constraint.
+	Sources       []string `protobuf:"bytes,5,rep,name=sources,proto3" json:"sources,omitempty"`
+	Lat           float64  `protobuf:"fixed64,6,opt,name=lat,proto3" json:"lat,omitempty"`
+	Lon           float64  `protobuf:"fixed64,7,opt,name=lon,proto3" json:"lon,omitempty"`
+	RadiusKm      float64  `protobuf:"fixed64,8,opt,name=radius_km,json=radiusKm,proto3" json:"radius_km,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1669,6 +1724,34 @@ func (x *SetFilters) GetLang() []string {
 		return x.Lang
 	}
 	return nil
+}
+
+func (x *SetFilters) GetSources() []string {
+	if x != nil {
+		return x.Sources
+	}
+	return nil
+}
+
+func (x *SetFilters) GetLat() float64 {
+	if x != nil {
+		return x.Lat
+	}
+	return 0
+}
+
+func (x *SetFilters) GetLon() float64 {
+	if x != nil {
+		return x.Lon
+	}
+	return 0
+}
+
+func (x *SetFilters) GetRadiusKm() float64 {
+	if x != nil {
+		return x.RadiusKm
+	}
+	return 0
 }
 
 // SetPrompts replaces the client's prompts. The server backfills 1 h.
@@ -2276,6 +2359,76 @@ func (x *RawArticle) GetBurst() bool {
 	return false
 }
 
+// MatchScore carries prompt-filter scores for one article. The matcher writes
+// it to match.score; the publisher folds the scores into the wire row.
+type MatchScore struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ArticleId     string                 `protobuf:"bytes,1,opt,name=article_id,json=articleId,proto3" json:"article_id,omitempty"`
+	Scores        map[string]float32     `protobuf:"bytes,2,rep,name=scores,proto3" json:"scores,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed32,2,opt,name=value"`
+	Approx        []string               `protobuf:"bytes,3,rep,name=approx,proto3" json:"approx,omitempty"`
+	UpdatedAt     int64                  `protobuf:"varint,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MatchScore) Reset() {
+	*x = MatchScore{}
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MatchScore) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatchScore) ProtoMessage() {}
+
+func (x *MatchScore) ProtoReflect() protoreflect.Message {
+	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatchScore.ProtoReflect.Descriptor instead.
+func (*MatchScore) Descriptor() ([]byte, []int) {
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *MatchScore) GetArticleId() string {
+	if x != nil {
+		return x.ArticleId
+	}
+	return ""
+}
+
+func (x *MatchScore) GetScores() map[string]float32 {
+	if x != nil {
+		return x.Scores
+	}
+	return nil
+}
+
+func (x *MatchScore) GetApprox() []string {
+	if x != nil {
+		return x.Approx
+	}
+	return nil
+}
+
+func (x *MatchScore) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
 // RecordFrame is one raw pipeline message inside a record-mode file. See
 // docs/record-format.md. A file is an eight-byte magic header followed by
 // length-delimited RecordFrame frames, gzip-compressed.
@@ -2291,7 +2444,7 @@ type RecordFrame struct {
 
 func (x *RecordFrame) Reset() {
 	*x = RecordFrame{}
-	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	mi := &file_dor_v1_dor_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2303,7 +2456,7 @@ func (x *RecordFrame) String() string {
 func (*RecordFrame) ProtoMessage() {}
 
 func (x *RecordFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_dor_v1_dor_proto_msgTypes[21]
+	mi := &file_dor_v1_dor_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2316,7 +2469,7 @@ func (x *RecordFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordFrame.ProtoReflect.Descriptor instead.
 func (*RecordFrame) Descriptor() ([]byte, []int) {
-	return file_dor_v1_dor_proto_rawDescGZIP(), []int{21}
+	return file_dor_v1_dor_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RecordFrame) GetSubject() string {
@@ -2409,7 +2562,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x05level\x18\x03 \x01(\tR\x05level\x12\x19\n" +
 	"\bfired_at\x18\x04 \x01(\x03R\afiredAt\x12\x14\n" +
 	"\x05title\x18\x05 \x01(\tR\x05title\x12\x16\n" +
-	"\x06prompt\x18\x06 \x01(\tR\x06prompt\"\xf4\x02\n" +
+	"\x06prompt\x18\x06 \x01(\tR\x06prompt\"\x87\x04\n" +
 	"\aWireRow\x12\x1d\n" +
 	"\n" +
 	"article_id\x18\x01 \x01(\tR\tarticleId\x12\x19\n" +
@@ -2420,7 +2573,14 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\bcategory\x18\x06 \x01(\x0e2\x10.dor.v1.CategoryR\bcategory\x12\x0e\n" +
 	"\x02at\x18\a \x01(\x03R\x02at\x12$\n" +
 	"\x04join\x18\b \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\x12F\n" +
-	"\rprompt_scores\x18\t \x03(\v2!.dor.v1.WireRow.PromptScoresEntryR\fpromptScores\x1a?\n" +
+	"\rprompt_scores\x18\t \x03(\v2!.dor.v1.WireRow.PromptScoresEntryR\fpromptScores\x12\x18\n" +
+	"\acountry\x18\n" +
+	" \x01(\tR\acountry\x12\x12\n" +
+	"\x04lang\x18\v \x01(\tR\x04lang\x12\x10\n" +
+	"\x03lat\x18\f \x01(\x01R\x03lat\x12\x10\n" +
+	"\x03lon\x18\r \x01(\x01R\x03lon\x12\x18\n" +
+	"\alocated\x18\x0e \x01(\bR\alocated\x12%\n" +
+	"\x0eapprox_prompts\x18\x0f \x03(\tR\rapproxPrompts\x1a?\n" +
 	"\x11PromptScoresEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x02R\x05value:\x028\x01\"\xb0\x02\n" +
@@ -2455,7 +2615,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x04body\"I\n" +
 	"\x05Hello\x12\x19\n" +
 	"\blast_seq\x18\x01 \x01(\x04R\alastSeq\x12%\n" +
-	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion\"\x8d\x01\n" +
+	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion\"\xe8\x01\n" +
 	"\n" +
 	"SetFilters\x120\n" +
 	"\n" +
@@ -2464,7 +2624,11 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\aregions\x18\x02 \x03(\tR\aregions\x12\x1f\n" +
 	"\vmin_sources\x18\x03 \x01(\rR\n" +
 	"minSources\x12\x12\n" +
-	"\x04lang\x18\x04 \x03(\tR\x04lang\"&\n" +
+	"\x04lang\x18\x04 \x03(\tR\x04lang\x12\x18\n" +
+	"\asources\x18\x05 \x03(\tR\asources\x12\x10\n" +
+	"\x03lat\x18\x06 \x01(\x01R\x03lat\x12\x10\n" +
+	"\x03lon\x18\a \x01(\x01R\x03lon\x12\x1b\n" +
+	"\tradius_km\x18\b \x01(\x01R\bradiusKm\"&\n" +
 	"\n" +
 	"SetPrompts\x12\x18\n" +
 	"\aprompts\x18\x01 \x03(\tR\aprompts\"\"\n" +
@@ -2514,7 +2678,18 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x04lang\x18\t \x01(\tR\x04lang\x12&\n" +
 	"\x05hints\x18\n" +
 	" \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
-	"\x05burst\x18\v \x01(\bR\x05burst\"~\n" +
+	"\x05burst\x18\v \x01(\bR\x05burst\"\xd5\x01\n" +
+	"\n" +
+	"MatchScore\x12\x1d\n" +
+	"\n" +
+	"article_id\x18\x01 \x01(\tR\tarticleId\x126\n" +
+	"\x06scores\x18\x02 \x03(\v2\x1e.dor.v1.MatchScore.ScoresEntryR\x06scores\x12\x16\n" +
+	"\x06approx\x18\x03 \x03(\tR\x06approx\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x04 \x01(\x03R\tupdatedAt\x1a9\n" +
+	"\vScoresEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x02R\x05value:\x028\x01\"~\n" +
 	"\vRecordFrame\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x15\n" +
 	"\x06msg_id\x18\x02 \x01(\tR\x05msgId\x12$\n" +
@@ -2581,7 +2756,7 @@ func file_dor_v1_dor_proto_rawDescGZIP() []byte {
 }
 
 var file_dor_v1_dor_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_dor_v1_dor_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_dor_v1_dor_proto_goTypes = []any{
 	(Category)(0),         // 0: dor.v1.Category
 	(Precision)(0),        // 1: dor.v1.Precision
@@ -2611,8 +2786,10 @@ var file_dor_v1_dor_proto_goTypes = []any{
 	(*ClientMessage)(nil), // 25: dor.v1.ClientMessage
 	(*RawHints)(nil),      // 26: dor.v1.RawHints
 	(*RawArticle)(nil),    // 27: dor.v1.RawArticle
-	(*RecordFrame)(nil),   // 28: dor.v1.RecordFrame
-	nil,                   // 29: dor.v1.WireRow.PromptScoresEntry
+	(*MatchScore)(nil),    // 28: dor.v1.MatchScore
+	(*RecordFrame)(nil),   // 29: dor.v1.RecordFrame
+	nil,                   // 30: dor.v1.WireRow.PromptScoresEntry
+	nil,                   // 31: dor.v1.MatchScore.ScoresEntry
 }
 var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 0: dor.v1.Location.precision:type_name -> dor.v1.Precision
@@ -2625,7 +2802,7 @@ var file_dor_v1_dor_proto_depIdxs = []int32{
 	4,  // 7: dor.v1.Link.dir:type_name -> dor.v1.Direction
 	0,  // 8: dor.v1.WireRow.category:type_name -> dor.v1.Category
 	5,  // 9: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
-	29, // 10: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
+	30, // 10: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
 	9,  // 11: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
 	10, // 12: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
 	11, // 13: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
@@ -2649,11 +2826,12 @@ var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 31: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
 	6,  // 32: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
 	26, // 33: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
-	34, // [34:34] is the sub-list for method output_type
-	34, // [34:34] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	31, // 34: dor.v1.MatchScore.scores:type_name -> dor.v1.MatchScore.ScoresEntry
+	35, // [35:35] is the sub-list for method output_type
+	35, // [35:35] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_dor_v1_dor_proto_init() }
@@ -2688,7 +2866,7 @@ func file_dor_v1_dor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dor_v1_dor_proto_rawDesc), len(file_dor_v1_dor_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

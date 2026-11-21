@@ -40,10 +40,19 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 		FilterSubjects: []string{
 			bus.SubjectArticleClean,
 			bus.SubjectArticlePlaced,
+			bus.SubjectMatchScore,
 		},
 		MaxAckPending: 512,
 		AckWait:       30 * time.Second,
 		Handle: func(ctx context.Context, msg *Message, out *Emitter) error {
+			if msg.Subject == bus.SubjectMatchScore {
+				var score dorv1.MatchScore
+				if err := proto.Unmarshal(msg.Data, &score); err != nil {
+					return Terminal(fmt.Errorf("publisher: match score: %w", err))
+				}
+				core.onMatchScore(&score)
+				return nil
+			}
 			var article dorv1.Article
 			if err := proto.Unmarshal(msg.Data, &article); err != nil {
 				if msg.Subject == bus.SubjectArticleClean {
@@ -91,11 +100,31 @@ func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error)
 		return nil, err
 	}
 
+	alertBase, err := NewBase(b, metrics, log, Spec{
+		Name:          "publisher-alert",
+		Durable:       "publisher-alert",
+		FilterSubject: bus.SubjectMatchAlert,
+		MaxAckPending: 128,
+		AckWait:       30 * time.Second,
+		Handle: func(ctx context.Context, msg *Message, out *Emitter) error {
+			var hit dorv1.AlertHit
+			if err := proto.Unmarshal(msg.Data, &hit); err != nil {
+				return Terminal(fmt.Errorf("publisher: alert hit: %w", err))
+			}
+			core.onAlert(&hit)
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &publisherAgent{
 		name:   PublisherAgentName,
 		core:   core,
 		enrich: enrich,
 		story:  story,
+		alert:  alertBase,
 	}, nil
 }
 
@@ -106,6 +135,7 @@ type publisherAgent struct {
 	core   *publisherCore
 	enrich Agent
 	story  Agent
+	alert  Agent
 
 	started atomic.Bool
 	stopped atomic.Bool
@@ -140,6 +170,14 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 	}
 	if err := p.story.Start(ctx); err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = p.enrich.Stop(stopCtx)
+		stopCancel()
+		cancel()
+		return err
+	}
+	if err := p.alert.Start(ctx); err != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = p.story.Stop(stopCtx)
 		_ = p.enrich.Stop(stopCtx)
 		stopCancel()
 		cancel()
@@ -189,6 +227,9 @@ func (p *publisherAgent) Stop(ctx context.Context) error {
 	p.core.writeSnapshot(context.Background())
 
 	var errs []error
+	if err := p.alert.Stop(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if err := p.story.Stop(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -218,11 +259,16 @@ func (p *publisherAgent) LastError() error {
 	if err := p.enrich.(HealthReporter).LastError(); err != nil {
 		return err
 	}
-	return p.story.(HealthReporter).LastError()
+	if err := p.story.(HealthReporter).LastError(); err != nil {
+		return err
+	}
+	return p.alert.(HealthReporter).LastError()
 }
 
 func (p *publisherAgent) TerminalCount() int64 {
-	return p.enrich.(HealthReporter).TerminalCount() + p.story.(HealthReporter).TerminalCount()
+	return p.enrich.(HealthReporter).TerminalCount() +
+		p.story.(HealthReporter).TerminalCount() +
+		p.alert.(HealthReporter).TerminalCount()
 }
 
 // publisherCore owns the delta sequence, per-entity coalescing, the in-memory
@@ -235,24 +281,27 @@ type publisherCore struct {
 	flushMu sync.Mutex // serialises flush (and seq assignment)
 	mu      sync.Mutex // guards pending and live state
 
-	seq      uint64
-	pending  map[string]*dorv1.Delta
-	order    []string
-	stories  map[string]*dorv1.Story
-	links    map[string]*dorv1.Link
-	wire     []*dorv1.WireRow
-	changed  bool
-	lastSnap time.Time
+	seq       uint64
+	pending   map[string]*dorv1.Delta
+	order     []string
+	stories   map[string]*dorv1.Story
+	links     map[string]*dorv1.Link
+	wire      []*dorv1.WireRow
+	wireRows  map[string]*dorv1.WireRow
+	wireOrder []string
+	changed   bool
+	lastSnap  time.Time
 }
 
 func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
 	return &publisherCore{
-		bus:     b,
-		log:     log,
-		now:     time.Now,
-		pending: make(map[string]*dorv1.Delta),
-		stories: make(map[string]*dorv1.Story),
-		links:   make(map[string]*dorv1.Link),
+		bus:      b,
+		log:      log,
+		now:      time.Now,
+		pending:  make(map[string]*dorv1.Delta),
+		stories:  make(map[string]*dorv1.Story),
+		links:    make(map[string]*dorv1.Link),
+		wireRows: make(map[string]*dorv1.WireRow),
 	}
 }
 
@@ -308,13 +357,6 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 		join = a.Join
 	}
 	category := dorv1.Category_CATEGORY_OTHER
-	c.mu.Lock()
-	if a.StoryId != "" {
-		if story, ok := c.stories[a.StoryId]; ok && story != nil {
-			category = story.Category
-		}
-	}
-	c.mu.Unlock()
 	wire := &dorv1.WireRow{
 		ArticleId:    a.Id,
 		StoryId:      a.StoryId,
@@ -324,8 +366,40 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 		Category:     category,
 		At:           a.PublishedAt,
 		Join:         join,
+		Lang:         a.Lang,
 		PromptScores: nil,
 	}
+	if hints := a.Hints; hints != nil {
+		wire.Country = hints.Country
+		wire.Lat = hints.Lat
+		wire.Lon = hints.Lon
+		wire.Located = hints.Located
+	}
+	c.mu.Lock()
+	// A placement update rebuilds story/category in place. Keep prompt scores
+	// already computed for this article; they are prompt-keyed and portable.
+	if prev, ok := c.wireRows[a.Id]; ok && prev != nil {
+		wire.PromptScores = prev.PromptScores
+		wire.ApproxPrompts = prev.ApproxPrompts
+	}
+	if a.StoryId != "" {
+		if story, ok := c.stories[a.StoryId]; ok && story != nil {
+			wire.Category = story.Category
+			if !wire.Located && len(story.Locations) > 0 {
+				idx := int(story.Primary)
+				if idx < 0 || idx >= len(story.Locations) {
+					idx = 0
+				}
+				loc := story.Locations[idx]
+				if loc.Lat != 0 || loc.Lon != 0 {
+					wire.Lat = float64(loc.Lat)
+					wire.Lon = float64(loc.Lon)
+					wire.Located = true
+				}
+			}
+		}
+	}
+	c.mu.Unlock()
 	c.mu.Lock()
 	for i, row := range c.wire {
 		if row.ArticleId == wire.ArticleId {
@@ -337,6 +411,15 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	if len(c.wire) > publisherWireHistory {
 		c.wire = append([]*dorv1.WireRow(nil), c.wire[len(c.wire)-publisherWireHistory:]...)
 	}
+	if _, ok := c.wireRows[wire.ArticleId]; !ok {
+		c.wireOrder = append(c.wireOrder, wire.ArticleId)
+	}
+	c.wireRows[wire.ArticleId] = wire
+	for len(c.wireOrder) > 1500 {
+		old := c.wireOrder[0]
+		c.wireOrder = c.wireOrder[1:]
+		delete(c.wireRows, old)
+	}
 	c.mu.Unlock()
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})
 }
@@ -346,6 +429,35 @@ func (c *publisherCore) onStory(s *dorv1.Story) {
 		return
 	}
 	c.enqueue("story:"+s.Id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: s}})
+}
+
+// onMatchScore folds matcher scores into the latest wire row. The publisher
+// emits a new delta with a new sequence; the browser upserts by article id.
+func (c *publisherCore) onMatchScore(score *dorv1.MatchScore) {
+	if score == nil || score.ArticleId == "" {
+		return
+	}
+	c.mu.Lock()
+	row, ok := c.wireRows[score.ArticleId]
+	if ok {
+		row = proto.Clone(row).(*dorv1.WireRow)
+		row.PromptScores = score.Scores
+		row.ApproxPrompts = score.Approx
+		c.wireRows[score.ArticleId] = row
+	}
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	c.enqueue("wire:"+row.ArticleId, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: row}})
+}
+
+func (c *publisherCore) onAlert(hit *dorv1.AlertHit) {
+	if hit == nil || hit.AlertId == "" {
+		return
+	}
+	key := "alert:" + hit.AlertId + ":" + hit.StoryId + ":" + hit.Level
+	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_Alert{Alert: hit}})
 }
 
 func (c *publisherCore) onLink(l *dorv1.Link) {

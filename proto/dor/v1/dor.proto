@@ -151,6 +151,14 @@ message WireRow {
   int64 at = 7; // unix seconds
   JoinKind join = 8;
   map<string, float> prompt_scores = 9;
+  // Append-only filter fields. Empty/zero means unknown.
+  string country = 10; // ISO 3166-1 alpha-2 when the source supplies one
+  string lang = 11;
+  double lat = 12;
+  double lon = 13;
+  bool located = 14;
+  // Prompts scored without a jev answer (embedding/lexical only).
+  repeated string approx_prompts = 15;
 }
 
 // Delta is one numbered change pushed to browsers.
@@ -210,6 +218,11 @@ message SetFilters {
   repeated string regions = 2;
   uint32 min_sources = 3;
   repeated string lang = 4;
+  // Append-only server-side wire filters. Empty/zero means no constraint.
+  repeated string sources = 5;
+  double lat = 6;
+  double lon = 7;
+  double radius_km = 8;
 }
 
 // SetPrompts replaces the client's prompts. The server backfills 1 h.
@@ -292,6 +305,15 @@ message RawArticle {
   string lang = 9;        // BCP 47 when known
   RawHints hints = 10;
   bool burst = 11;        // GDELT bulk: the wire collapses bursts by source/time/place
+}
+
+// MatchScore carries prompt-filter scores for one article. The matcher writes
+// it to match.score; the publisher folds the scores into the wire row.
+message MatchScore {
+  string article_id = 1;
+  map<string, float> scores = 2;
+  repeated string approx = 3;
+  int64 updated_at = 4;
 }
 
 // RecordFrame is one raw pipeline message inside a record-mode file. See

@@ -17,10 +17,13 @@ const (
 	SubjectArticlePlace       = "article.place"
 	SubjectArticleClass       = "article.class"
 	SubjectArticleVec         = "article.vec"
-	SubjectLinkChanged        = "link.changed"
-	SubjectArticlePlaced      = "article.placed"
-	SubjectMatchAlert         = "match.alert"
-	SubjectDeltaOut           = "delta.out"
+	// SubjectMatchScore carries prompt-filter scores from the matcher to the
+	// publisher, which folds them into the wire row.
+	SubjectMatchScore    = "match.score"
+	SubjectLinkChanged   = "link.changed"
+	SubjectArticlePlaced = "article.placed"
+	SubjectMatchAlert    = "match.alert"
+	SubjectDeltaOut      = "delta.out"
 
 	// SubjectStoryChangedPrefix is followed by the shard number.
 	SubjectStoryChangedPrefix = "story.changed."

@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -33,12 +34,24 @@ const DefaultAddr = "127.0.0.1:8080"
 // client (no Origin header) is always accepted.
 var DefaultOrigins = []string{"localhost:*", "127.0.0.1:*"}
 
+// TextService is the brief/why surface the gateway serves. *textsvc.Service
+// satisfies it; nil disables /api/text with a 503.
+type TextService interface {
+	Story(ctx context.Context, id string) (live.StoryText, bool)
+	GenerateStory(ctx context.Context, id string) (live.StoryText, bool)
+	Link(ctx context.Context, a, b string) (live.LinkText, bool)
+	GenerateLink(ctx context.Context, a, b string) (live.LinkText, bool)
+	PrefetchStory(id string)
+	PrefetchLink(a, b string)
+}
+
 // Config configures one gateway process.
 type Config struct {
 	Addr    string
 	Origins []string
 	Bus     *bus.Bus
 	Logger  *slog.Logger
+	Text    TextService
 }
 
 // Server is one gateway replica.
@@ -76,6 +89,7 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -207,9 +221,48 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(64 << 10)
-	c := newClient(s.hub, conn, s.log)
+	c := newClient(s.hub, s.cfg.Text, conn, s.log)
 	s.hub.addClient(c)
 	c.run(r.Context())
+}
+
+// handleText serves story briefs and link explanations. Text never travels in
+// deltas; this endpoint is the only text transport.
+func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	if s.cfg.Text == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "text service unavailable"})
+		return
+	}
+	q := r.URL.Query()
+	if id := strings.TrimSpace(q.Get("story_id")); id != "" {
+		text, ok := s.cfg.Text.GenerateStory(ctx, id)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "story", "id": id, "available": false, "error": "unknown story"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(text)
+		return
+	}
+	a := strings.TrimSpace(q.Get("link_a"))
+	b := strings.TrimSpace(q.Get("link_b"))
+	if a != "" && b != "" {
+		text, ok := s.cfg.Text.GenerateLink(ctx, a, b)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "link", "a": a, "b": b, "available": false, "error": "unknown link"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(text)
+		return
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "story_id or link_a+link_b is required"})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

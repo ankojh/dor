@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ankojh/dor/config"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/textsvc"
 )
 
 // EchoDurable is the durable consumer name of the sample echo agent.
@@ -52,6 +54,18 @@ func EchoOutputMsgID(inputID string) string {
 // always registered; --agents selects what runs.
 type Deps struct {
 	ArticleSink ArticleSink
+	// Decider is the jev client. Nil means similarity-only (unverified) links.
+	Decider RelateDecider
+	// Text is the brief/why service. Nil gets a fallback-only instance.
+	Text *textsvc.Service
+	// Thresholds tunes the relation gate. Zero uses the plan defaults.
+	Thresholds config.Thresholds
+	// RelationShards and RelationShard partition story shards across replicas.
+	// Shard -1 runs every shard in one process.
+	RelationShards   int
+	RelationShard    int
+	RelationDebounce time.Duration
+	EditorDebounce   time.Duration
 }
 
 func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config) (*Registry, error) {
@@ -99,6 +113,39 @@ func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *sl
 		return nil, err
 	}
 	if err := registry.Register(publisher); err != nil {
+		return nil, err
+	}
+
+	thresholds := deps.Thresholds
+	if thresholds.Relate.Accept == 0 {
+		thresholds = config.DefaultThresholds()
+	}
+	relation, err := NewRelationJudge(b, metrics, log, RelationConfig{
+		Decider:    deps.Decider,
+		Thresholds: thresholds,
+		Shards:     deps.RelationShards,
+		Shard:      deps.RelationShard,
+		Debounce:   deps.RelationDebounce,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(relation); err != nil {
+		return nil, err
+	}
+
+	text := deps.Text
+	if text == nil {
+		text = textsvc.New(b, log, nil)
+	}
+	editor, err := NewEditor(b, metrics, log, EditorConfig{
+		Text:     text,
+		Debounce: deps.EditorDebounce,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(editor); err != nil {
 		return nil, err
 	}
 	return registry, nil

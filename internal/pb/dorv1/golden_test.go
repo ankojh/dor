@@ -65,6 +65,7 @@ func goldenLink() *Link {
 		Confidence: 0.875,
 		Strength:   0.625,
 		UpdatedAt:  1_700_000_200,
+		Unverified: true,
 	}
 }
 
@@ -119,6 +120,8 @@ func goldenArticle() *Article {
 		PublishedAt: 1_700_000_000,
 		Lang:        "en",
 		Dateline:    "PARIS, Nov 20",
+		StoryId:     "story-1",
+		Join:        JoinKind_JOIN_KIND_JOINED,
 	}
 }
 
@@ -163,10 +166,11 @@ func goldenRecordFrame() *RecordFrame {
 
 func goldenSnapshot() *Snapshot {
 	return &Snapshot{
-		Seq:     42,
-		Stories: []*Story{goldenStory()},
-		Links:   []*Link{goldenLink()},
-		BuiltAt: 1_700_000_400,
+		Seq:        42,
+		Stories:    []*Story{goldenStory()},
+		Links:      []*Link{goldenLink()},
+		BuiltAt:    1_700_000_400,
+		RecentWire: []*WireRow{goldenWireRow()},
 	}
 }
 

@@ -534,8 +534,11 @@ type Article struct {
 	Dateline    string                 `protobuf:"bytes,8,opt,name=dateline,proto3" json:"dateline,omitempty"`
 	// Append-only hints from the raw item. The plotter still decides the place;
 	// these only save it work and feed hazard heat.
-	Hints         *RawHints `protobuf:"bytes,9,opt,name=hints,proto3" json:"hints,omitempty"`
-	Burst         bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
+	Hints *RawHints `protobuf:"bytes,9,opt,name=hints,proto3" json:"hints,omitempty"`
+	Burst bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
+	// Set on article.placed: the story the clusterer assigned and how it joined.
+	StoryId       string   `protobuf:"bytes,11,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
+	Join          JoinKind `protobuf:"varint,12,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -638,6 +641,20 @@ func (x *Article) GetBurst() bool {
 		return x.Burst
 	}
 	return false
+}
+
+func (x *Article) GetStoryId() string {
+	if x != nil {
+		return x.StoryId
+	}
+	return ""
+}
+
+func (x *Article) GetJoin() JoinKind {
+	if x != nil {
+		return x.Join
+	}
+	return JoinKind_JOIN_KIND_NEW
 }
 
 // Story is a cluster of articles about one event.
@@ -752,14 +769,17 @@ func (x *Story) GetUpdatedAt() int64 {
 
 // Link is a typed relationship between two stories, with a < b.
 type Link struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	A             string                 `protobuf:"bytes,1,opt,name=a,proto3" json:"a,omitempty"`
-	B             string                 `protobuf:"bytes,2,opt,name=b,proto3" json:"b,omitempty"`
-	Type          LinkType               `protobuf:"varint,3,opt,name=type,proto3,enum=dor.v1.LinkType" json:"type,omitempty"`
-	Dir           Direction              `protobuf:"varint,4,opt,name=dir,proto3,enum=dor.v1.Direction" json:"dir,omitempty"`
-	Confidence    float32                `protobuf:"fixed32,5,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	Strength      float32                `protobuf:"fixed32,6,opt,name=strength,proto3" json:"strength,omitempty"`
-	UpdatedAt     int64                  `protobuf:"varint,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	A          string                 `protobuf:"bytes,1,opt,name=a,proto3" json:"a,omitempty"`
+	B          string                 `protobuf:"bytes,2,opt,name=b,proto3" json:"b,omitempty"`
+	Type       LinkType               `protobuf:"varint,3,opt,name=type,proto3,enum=dor.v1.LinkType" json:"type,omitempty"`
+	Dir        Direction              `protobuf:"varint,4,opt,name=dir,proto3,enum=dor.v1.Direction" json:"dir,omitempty"`
+	Confidence float32                `protobuf:"fixed32,5,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Strength   float32                `protobuf:"fixed32,6,opt,name=strength,proto3" json:"strength,omitempty"`
+	UpdatedAt  int64                  `protobuf:"varint,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	// Unverified is set on similarity-only thematic links emitted when the
+	// relation judge has no model answer. The browser labels these.
+	Unverified    bool `protobuf:"varint,8,opt,name=unverified,proto3" json:"unverified,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -841,6 +861,13 @@ func (x *Link) GetUpdatedAt() int64 {
 		return x.UpdatedAt
 	}
 	return 0
+}
+
+func (x *Link) GetUnverified() bool {
+	if x != nil {
+		return x.Unverified
+	}
+	return false
 }
 
 // LinkKey identifies a link without its mutable scores.
@@ -1247,11 +1274,15 @@ func (*Delta_Alert) isDelta_Body() {}
 
 // Snapshot is the full live state a client starts from.
 type Snapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	Stories       []*Story               `protobuf:"bytes,2,rep,name=stories,proto3" json:"stories,omitempty"`
-	Links         []*Link                `protobuf:"bytes,3,rep,name=links,proto3" json:"links,omitempty"`
-	BuiltAt       int64                  `protobuf:"varint,4,opt,name=built_at,json=builtAt,proto3" json:"built_at,omitempty"` // unix seconds
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Seq     uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Stories []*Story               `protobuf:"bytes,2,rep,name=stories,proto3" json:"stories,omitempty"`
+	Links   []*Link                `protobuf:"bytes,3,rep,name=links,proto3" json:"links,omitempty"`
+	BuiltAt int64                  `protobuf:"varint,4,opt,name=built_at,json=builtAt,proto3" json:"built_at,omitempty"` // unix seconds
+	// Recent wire rows for a first connection or reload, newest last. These are
+	// not deltas and carry no sequence: they let the wire show real articles
+	// immediately without replaying old deltas as new ones.
+	RecentWire    []*WireRow `protobuf:"bytes,5,rep,name=recent_wire,json=recentWire,proto3" json:"recent_wire,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1312,6 +1343,13 @@ func (x *Snapshot) GetBuiltAt() int64 {
 		return x.BuiltAt
 	}
 	return 0
+}
+
+func (x *Snapshot) GetRecentWire() []*WireRow {
+	if x != nil {
+		return x.RecentWire
+	}
+	return nil
 }
 
 // DeltaBatch carries deltas from a snapshot seq onwards.
@@ -2321,7 +2359,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x03lon\x18\x04 \x01(\x02R\x03lon\x12/\n" +
 	"\tprecision\x18\x05 \x01(\x0e2\x11.dor.v1.PrecisionR\tprecision\x12 \n" +
 	"\x04role\x18\x06 \x01(\x0e2\f.dor.v1.RoleR\x04role\x12\x16\n" +
-	"\x06weight\x18\a \x01(\x02R\x06weight\"\x83\x02\n" +
+	"\x06weight\x18\a \x01(\x02R\x06weight\"\xc4\x02\n" +
 	"\aArticle\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
@@ -2333,7 +2371,9 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\bdateline\x18\b \x01(\tR\bdateline\x12&\n" +
 	"\x05hints\x18\t \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
 	"\x05burst\x18\n" +
-	" \x01(\bR\x05burst\"\x9a\x02\n" +
+	" \x01(\bR\x05burst\x12\x19\n" +
+	"\bstory_id\x18\v \x01(\tR\astoryId\x12$\n" +
+	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\x9a\x02\n" +
 	"\x05Story\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12,\n" +
@@ -2345,7 +2385,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\n" +
 	"first_seen\x18\b \x01(\x03R\tfirstSeen\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\t \x01(\x03R\tupdatedAt\"\xc8\x01\n" +
+	"updated_at\x18\t \x01(\x03R\tupdatedAt\"\xe8\x01\n" +
 	"\x04Link\x12\f\n" +
 	"\x01a\x18\x01 \x01(\tR\x01a\x12\f\n" +
 	"\x01b\x18\x02 \x01(\tR\x01b\x12$\n" +
@@ -2356,7 +2396,10 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"confidence\x12\x1a\n" +
 	"\bstrength\x18\x06 \x01(\x02R\bstrength\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\a \x01(\x03R\tupdatedAt\"%\n" +
+	"updated_at\x18\a \x01(\x03R\tupdatedAt\x12\x1e\n" +
+	"\n" +
+	"unverified\x18\b \x01(\bR\n" +
+	"unverified\"%\n" +
 	"\aLinkKey\x12\f\n" +
 	"\x01a\x18\x01 \x01(\tR\x01a\x12\f\n" +
 	"\x01b\x18\x02 \x01(\tR\x01b\"\x9f\x01\n" +
@@ -2391,12 +2434,14 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"linkRemove\x12%\n" +
 	"\x04wire\x18\x06 \x01(\v2\x0f.dor.v1.WireRowH\x00R\x04wire\x12(\n" +
 	"\x05alert\x18\a \x01(\v2\x10.dor.v1.AlertHitH\x00R\x05alertB\x06\n" +
-	"\x04body\"\x84\x01\n" +
+	"\x04body\"\xb6\x01\n" +
 	"\bSnapshot\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12'\n" +
 	"\astories\x18\x02 \x03(\v2\r.dor.v1.StoryR\astories\x12\"\n" +
 	"\x05links\x18\x03 \x03(\v2\f.dor.v1.LinkR\x05links\x12\x19\n" +
-	"\bbuilt_at\x18\x04 \x01(\x03R\abuiltAt\"3\n" +
+	"\bbuilt_at\x18\x04 \x01(\x03R\abuiltAt\x120\n" +
+	"\vrecent_wire\x18\x05 \x03(\v2\x0f.dor.v1.WireRowR\n" +
+	"recentWire\"3\n" +
 	"\n" +
 	"DeltaBatch\x12%\n" +
 	"\x06deltas\x18\x01 \x03(\v2\r.dor.v1.DeltaR\x06deltas\"2\n" +
@@ -2573,40 +2618,42 @@ var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 0: dor.v1.Location.precision:type_name -> dor.v1.Precision
 	2,  // 1: dor.v1.Location.role:type_name -> dor.v1.Role
 	26, // 2: dor.v1.Article.hints:type_name -> dor.v1.RawHints
-	0,  // 3: dor.v1.Story.category:type_name -> dor.v1.Category
-	7,  // 4: dor.v1.Story.locations:type_name -> dor.v1.Location
-	3,  // 5: dor.v1.Link.type:type_name -> dor.v1.LinkType
-	4,  // 6: dor.v1.Link.dir:type_name -> dor.v1.Direction
-	0,  // 7: dor.v1.WireRow.category:type_name -> dor.v1.Category
-	5,  // 8: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
-	29, // 9: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
-	9,  // 10: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
-	10, // 11: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
-	11, // 12: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
-	13, // 13: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
-	12, // 14: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
-	9,  // 15: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
-	10, // 16: dor.v1.Snapshot.links:type_name -> dor.v1.Link
-	14, // 17: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
-	15, // 18: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
-	16, // 19: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
-	17, // 20: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
-	0,  // 21: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
-	11, // 22: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
-	19, // 23: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
-	20, // 24: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
-	21, // 25: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
-	22, // 26: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
-	23, // 27: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
-	24, // 28: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
-	1,  // 29: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
-	6,  // 30: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
-	26, // 31: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	5,  // 3: dor.v1.Article.join:type_name -> dor.v1.JoinKind
+	0,  // 4: dor.v1.Story.category:type_name -> dor.v1.Category
+	7,  // 5: dor.v1.Story.locations:type_name -> dor.v1.Location
+	3,  // 6: dor.v1.Link.type:type_name -> dor.v1.LinkType
+	4,  // 7: dor.v1.Link.dir:type_name -> dor.v1.Direction
+	0,  // 8: dor.v1.WireRow.category:type_name -> dor.v1.Category
+	5,  // 9: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
+	29, // 10: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
+	9,  // 11: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
+	10, // 12: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
+	11, // 13: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
+	13, // 14: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
+	12, // 15: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
+	9,  // 16: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
+	10, // 17: dor.v1.Snapshot.links:type_name -> dor.v1.Link
+	13, // 18: dor.v1.Snapshot.recent_wire:type_name -> dor.v1.WireRow
+	14, // 19: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
+	15, // 20: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
+	16, // 21: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
+	17, // 22: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
+	0,  // 23: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
+	11, // 24: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
+	19, // 25: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
+	20, // 26: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
+	21, // 27: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
+	22, // 28: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
+	23, // 29: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
+	24, // 30: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
+	1,  // 31: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
+	6,  // 32: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
+	26, // 33: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
+	34, // [34:34] is the sub-list for method output_type
+	34, // [34:34] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_dor_v1_dor_proto_init() }

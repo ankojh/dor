@@ -30,6 +30,7 @@ const (
 // the hub, and a slow writer is disconnected rather than buffered forever.
 type client struct {
 	hub  *hub
+	text TextService
 	conn *websocket.Conn
 	log  *slog.Logger
 
@@ -47,9 +48,10 @@ type client struct {
 	prompts    *dorv1.SetPrompts
 }
 
-func newClient(h *hub, conn *websocket.Conn, log *slog.Logger) *client {
+func newClient(h *hub, text TextService, conn *websocket.Conn, log *slog.Logger) *client {
 	return &client{
 		hub:        h,
+		text:       text,
 		conn:       conn,
 		log:        log,
 		send:       make(chan []byte, clientQueue),
@@ -136,10 +138,21 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 			c.mu.Lock()
 			c.focus = body.Focus.StoryId
 			c.mu.Unlock()
+			if c.text != nil {
+				c.text.PrefetchStory(body.Focus.StoryId)
+			}
 		}
 	case *dorv1.ClientMessage_GetText:
-		// Text arrives with the M3 editor; the transport accepts the message
-		// now so the browser contract is stable.
+		if body.GetText != nil && c.text != nil {
+			for _, id := range body.GetText.StoryIds {
+				c.text.PrefetchStory(id)
+			}
+			for _, key := range body.GetText.LinkKeys {
+				if key != nil {
+					c.text.PrefetchLink(key.A, key.B)
+				}
+			}
+		}
 	}
 }
 

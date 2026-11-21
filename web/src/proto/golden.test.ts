@@ -87,6 +87,7 @@ function expectLink(link: Link): void {
   expect(link.confidence).toBe(0.875);
   expect(link.strength).toBe(0.625);
   expect(link.updatedAt).toBe(1_700_000_200n);
+  expect(link.unverified).toBe(true);
 }
 
 function expectLinkKey(key: LinkKey): void {
@@ -131,6 +132,8 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
     expect(article.publishedAt).toBe(1_700_000_000n);
     expect(article.lang).toBe("en");
     expect(article.dateline).toBe("PARIS, Nov 20");
+    expect(article.storyId).toBe("story-1");
+    expect(article.join).toBe(JoinKind.JOINED);
   });
 
   it("Story, including every location field", () => {
@@ -244,6 +247,10 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
     expect(snapshot.builtAt).toBe(1_700_000_400n);
     expect(snapshot.stories).toHaveLength(1);
     expect(snapshot.links).toHaveLength(1);
+    expect(snapshot.recentWire).toHaveLength(1);
+    const recent = snapshot.recentWire[0];
+    if (!recent) throw new Error("missing recent wire row");
+    expectWireRow(recent);
     const story = snapshot.stories[0];
     const link = snapshot.links[0];
     if (!story || !link) throw new Error("missing snapshot entities");

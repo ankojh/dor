@@ -291,3 +291,44 @@ healthy.
   backoff, cooperative-handler shutdown cancellation, retry-wait lag, component
   URL redaction, throughput, ordered Terminal unblocking, and same-durable crash
   dedupe.
+
+## Globe renderer (M0·2, 2026-11-20; fixup 1)
+
+**Custom WebGL layer on the MapLibre GL JS v5 globe.** The first decision note
+gave a false cause: deck.gl 9.4.1's `ArcLayer`/`LineLayer` **do** render on the
+globe. deck's `_GlobeView` defaults to back-face culling, and
+`parameters: {cullMode: 'none'}` makes arcs and lines render (reviewer repro;
+verified by this tree's `?renderer=deck` page). The decision does not rely on
+that failure.
+
+We choose the custom layer because:
+
+- **(a)** focus is exactly the plan's model: per-instance focus texels plus a
+  200 ms shader fade, written synchronously by a main-thread CSR mirror in
+  O(degree), so keys and clicks land in one frame;
+- **(b)** street-zoom precision is verified and ours (on-screen max
+  ~2 × 10⁻⁵ px at z 15–17; frozen frames pixel-identical);
+- **(c)** all encodings are in one shader set (one arc buffer with strength,
+  dashes, pulses, glow; GPU ripple ring buffer; tethers; brackets), with no
+  fragile shader injection into another layer;
+- **(d)** deck + luma (~220 KB gzip) stay off the app path against the 150 KB
+  initial-JS budget; the deck page is a lazily imported dev-only comparison;
+- **(e)** no interleaved depth z-fighting with MapLibre's globe.
+
+**Costs:** we own GPU picking, resource lifecycle and about 1.5k lines of
+GLSL/TS; there is no WebGPU path; swapping renderers later is a rewrite. deck
+is dev-only (`@deck.gl/*` in devDependencies, dynamic import only for
+`?renderer=deck`). No deck performance comparison is claimed: the earlier table
+measured a full-rebuild integration and was not like-for-like.
+
+**Focus and picking.** The worker ships its CSR adjacency; `FocusMirror` keeps
+a lit set on the main thread, resets every old lit index that is not in the new
+thread, and writes the new focus bytes synchronously. Stale/dropped worker
+patches cannot leave ghost focus. Clicks use a per-frame GPU id pass and a
+one-pixel readback (occlusion-correct; no CPU loop over stories). MapLibre
+`flyTo` owns flights (interruptible, gesture-cancelled); Esc returns to ambient
+without moving the camera. Reusable GPU data uses 2D textures (width ≤ 2048),
+pre-allocated capacity, a free-list, sub-range writes, and full disposal.
+
+Full method, numbers, screenshots and caveats:
+[docs/globe-spike.md](globe-spike.md).

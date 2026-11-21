@@ -1,0 +1,1823 @@
+[
+  {
+    "scenario": "custom-globe",
+    "profile": "1x",
+    "cpuThrottle": 1,
+    "dpr": 1,
+    "refreshHz": 120,
+    "uncapped": false,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "note": "Custom WebGL layer, MapLibre globe, 50 articles/s fake stream",
+    "gestures": {
+      "pan": {
+        "label": "pan",
+        "durationMs": 2108.699999988079,
+        "frames": 253,
+        "fps": 120.00189726319785,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.300000000000182,
+          "p99": 9.400000000000546,
+          "max": 9.400000000000546
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.2537549404287527,
+          "p95": 2.399999976158142,
+          "max": 2.800000011920929
+        }
+      },
+      "zoom": {
+        "label": "zoom",
+        "durationMs": 2562.5999999940395,
+        "frames": 307,
+        "fps": 119.96404986127938,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.299999999999272,
+          "p99": 9.400000000000546,
+          "max": 9.400000000000546
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.5557003257134838,
+          "p95": 2.100000023841858,
+          "max": 3.7999999821186066
+        }
+      },
+      "rotate": {
+        "label": "rotate",
+        "durationMs": 1772.4000000059605,
+        "frames": 212,
+        "fps": 120.00452847277266,
+        "frameMs": {
+          "p50": 8.300000000001091,
+          "p95": 8.699999999998909,
+          "p99": 9.299999999999272,
+          "max": 9.399999999999636
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.034905660827205,
+          "p95": 2.399999976158142,
+          "max": 4.5999999940395355
+        }
+      },
+      "zoomIn": {
+        "label": "zoomIn",
+        "durationMs": 4227.700000017881,
+        "frames": 508,
+        "fps": 120.00661453780916,
+        "frameMs": {
+          "p50": 8.300000000001091,
+          "p95": 8.700000000000728,
+          "p99": 9.200000000000728,
+          "max": 9.399999999999636
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.1785433068284838,
+          "p95": 1.9000000059604645,
+          "max": 3.9000000059604645
+        }
+      }
+    },
+    "gestureSummary": {
+      "worstFrameP95Ms": 9.300000000000182,
+      "longTasks": 0,
+      "worstJsP95Ms": 2.399999976158142
+    },
+    "focus": {
+      "warm": {
+        "n": 20,
+        "p50": 4.800000011920929,
+        "p95": 9.5,
+        "max": 9.5,
+        "frames": {
+          "n": 20,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "window": {
+          "label": "focusWarm",
+          "durationMs": 3100.7999999821186,
+          "frames": 370,
+          "fps": 119.35868898996736,
+          "frameMs": {
+            "p50": 8.299999999999272,
+            "p95": 9,
+            "p99": 9.299999999999272,
+            "max": 25
+          },
+          "longTasks": 0,
+          "longestTaskMs": 0,
+          "loafCount": 0,
+          "loafMs": 0,
+          "jsMs": {
+            "mean": 1.3867567571433814,
+            "p95": 2.0999999940395355,
+            "max": 7.200000017881393
+          }
+        }
+      },
+      "cold": {
+        "n": 10,
+        "p50": 3.300000011920929,
+        "p95": 7.9000000059604645,
+        "max": 7.9000000059604645,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "click": {
+        "n": 10,
+        "p50": 7.0999999940395355,
+        "p95": 9.300000011920929,
+        "max": 9.300000011920929,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "samples": [
+        {
+          "kind": "key",
+          "inputAt": 17473.5,
+          "appliedAt": 17476.899999976158,
+          "renderAt": 17478.79999998212,
+          "latencyMs": 5.299999982118607,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 17639.19999998808,
+          "appliedAt": 17640.5,
+          "renderAt": 17642.69999998808,
+          "latencyMs": 3.5,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 17793,
+          "appliedAt": 17794.59999999404,
+          "renderAt": 17802,
+          "latencyMs": 9,
+          "frames": 1,
+          "focusIndex": 15,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 17947.19999998808,
+          "appliedAt": 17948.5,
+          "renderAt": 17951.29999998212,
+          "latencyMs": 4.0999999940395355,
+          "frames": 1,
+          "focusIndex": 20,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18101.899999976158,
+          "appliedAt": 18103.79999998212,
+          "renderAt": 18110.29999998212,
+          "latencyMs": 8.400000005960464,
+          "frames": 1,
+          "focusIndex": 2,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18256.79999998212,
+          "appliedAt": 18258.29999998212,
+          "renderAt": 18260.29999998212,
+          "latencyMs": 3.5,
+          "frames": 1,
+          "focusIndex": 16,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18411.19999998808,
+          "appliedAt": 18412.29999998212,
+          "renderAt": 18418.19999998808,
+          "latencyMs": 7,
+          "frames": 1,
+          "focusIndex": 9,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18565.19999998808,
+          "appliedAt": 18566.399999976158,
+          "renderAt": 18568.79999998212,
+          "latencyMs": 3.5999999940395355,
+          "frames": 1,
+          "focusIndex": 2312,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18719.59999999404,
+          "appliedAt": 18720.59999999404,
+          "renderAt": 18726.79999998212,
+          "latencyMs": 7.199999988079071,
+          "frames": 1,
+          "focusIndex": 2260,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18873.59999999404,
+          "appliedAt": 18874.69999998808,
+          "renderAt": 18877.19999998808,
+          "latencyMs": 3.5999999940395355,
+          "frames": 1,
+          "focusIndex": 24,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19027.5,
+          "appliedAt": 19028.59999999404,
+          "renderAt": 19035.69999998808,
+          "latencyMs": 8.199999988079071,
+          "frames": 1,
+          "focusIndex": 10,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19180.899999976158,
+          "appliedAt": 19181.899999976158,
+          "renderAt": 19185.69999998808,
+          "latencyMs": 4.800000011920929,
+          "frames": 1,
+          "focusIndex": 4344,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19334.29999998212,
+          "appliedAt": 19338.29999998212,
+          "renderAt": 19343.79999998212,
+          "latencyMs": 9.5,
+          "frames": 1,
+          "focusIndex": 1,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19490.59999999404,
+          "appliedAt": 19491.899999976158,
+          "renderAt": 19493.29999998212,
+          "latencyMs": 2.699999988079071,
+          "frames": 1,
+          "focusIndex": 3181,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19647.899999976158,
+          "appliedAt": 19649.19999998808,
+          "renderAt": 19652.09999999404,
+          "latencyMs": 4.200000017881393,
+          "frames": 1,
+          "focusIndex": 309,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19804.29999998212,
+          "appliedAt": 19805.399999976158,
+          "renderAt": 19810.5,
+          "latencyMs": 6.200000017881393,
+          "frames": 1,
+          "focusIndex": 531,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19957,
+          "appliedAt": 19958,
+          "renderAt": 19959.399999976158,
+          "latencyMs": 2.399999976158142,
+          "frames": 1,
+          "focusIndex": 1474,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20113.399999976158,
+          "appliedAt": 20114.09999999404,
+          "renderAt": 20117.899999976158,
+          "latencyMs": 4.5,
+          "frames": 1,
+          "focusIndex": 707,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20265.79999998212,
+          "appliedAt": 20266.5,
+          "renderAt": 20268.399999976158,
+          "latencyMs": 2.5999999940395355,
+          "frames": 1,
+          "focusIndex": 2162,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20419.79999998212,
+          "appliedAt": 20420.79999998212,
+          "renderAt": 20426.29999998212,
+          "latencyMs": 6.5,
+          "frames": 1,
+          "focusIndex": 724,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21883.19999998808,
+          "appliedAt": 21884,
+          "renderAt": 21884.899999976158,
+          "latencyMs": 1.699999988079071,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 23396.29999998212,
+          "appliedAt": 23396.899999976158,
+          "renderAt": 23401.79999998212,
+          "latencyMs": 5.5,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 24924.5,
+          "appliedAt": 24925.69999998808,
+          "renderAt": 24927.59999999404,
+          "latencyMs": 3.0999999940395355,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 26448.399999976158,
+          "appliedAt": 26449.19999998808,
+          "renderAt": 26451.69999998808,
+          "latencyMs": 3.300000011920929,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 27975,
+          "appliedAt": 27975.79999998212,
+          "renderAt": 27977.19999998808,
+          "latencyMs": 2.199999988079071,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 29522.5,
+          "appliedAt": 29523.59999999404,
+          "renderAt": 29526.09999999404,
+          "latencyMs": 3.5999999940395355,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 31049.19999998808,
+          "appliedAt": 31050.5,
+          "renderAt": 31051.899999976158,
+          "latencyMs": 2.699999988079071,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 32583.5,
+          "appliedAt": 32584.399999976158,
+          "renderAt": 32585.79999998212,
+          "latencyMs": 2.2999999821186066,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 34117.59999999404,
+          "appliedAt": 34118.39999997616,
+          "renderAt": 34122.79999998212,
+          "latencyMs": 5.199999988079071,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 35648.39999997616,
+          "appliedAt": 35649.29999998212,
+          "renderAt": 35656.29999998212,
+          "latencyMs": 7.9000000059604645,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 38589.79999998212,
+          "appliedAt": 38590.79999998212,
+          "renderAt": 38598,
+          "latencyMs": 8.200000017881393,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 40192.79999998212,
+          "appliedAt": 40195.69999998808,
+          "renderAt": 40197.79999998212,
+          "latencyMs": 5,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 41799,
+          "appliedAt": 41800.39999997616,
+          "renderAt": 41806.09999999404,
+          "latencyMs": 7.0999999940395355,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 43398.5,
+          "appliedAt": 43402.5,
+          "renderAt": 43405.69999998808,
+          "latencyMs": 7.199999988079071,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 45051.59999999404,
+          "appliedAt": 45053.29999998212,
+          "renderAt": 45056.39999997616,
+          "latencyMs": 4.799999982118607,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 46671.39999997616,
+          "appliedAt": 46675.89999997616,
+          "renderAt": 46680.69999998808,
+          "latencyMs": 9.300000011920929,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 48286.5,
+          "appliedAt": 48288.69999998808,
+          "renderAt": 48290,
+          "latencyMs": 3.5,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 49944.89999997616,
+          "appliedAt": 49946.69999998808,
+          "renderAt": 49947.69999998808,
+          "latencyMs": 2.800000011920929,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 51565.39999997616,
+          "appliedAt": 51568.59999999404,
+          "renderAt": 51573.09999999404,
+          "latencyMs": 7.700000017881393,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 53153.59999999404,
+          "appliedAt": 53156.59999999404,
+          "renderAt": 53158.29999998212,
+          "latencyMs": 4.699999988079071,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        }
+      ]
+    },
+    "noQueue": {
+      "cameraBefore": {
+        "started": 50,
+        "finished": 40,
+        "interrupted": 0,
+        "moveends": 116,
+        "active": true,
+        "pending": true
+      },
+      "during": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 156,
+        "active": true,
+        "pending": false
+      },
+      "after": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 157,
+        "active": false,
+        "pending": false
+      },
+      "burstMs": 668,
+      "settledMs": 625,
+      "selections": 20,
+      "settledWithinOneFlight": true,
+      "settled": true,
+      "finalFocus": 4119,
+      "finalCenter": [
+        51.343773024921575,
+        5.753492225058257
+      ]
+    },
+    "rendererStats": {
+      "frames": 5429,
+      "globeFrames": 5429,
+      "mercatorFrames": 0,
+      "globe": true
+    }
+  },
+  {
+    "scenario": "custom-globe",
+    "profile": "4x",
+    "cpuThrottle": 4,
+    "dpr": 1,
+    "refreshHz": 120,
+    "uncapped": false,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "note": "Custom WebGL layer, MapLibre globe, 50 articles/s fake stream",
+    "gestures": {
+      "pan": {
+        "label": "pan",
+        "durationMs": 2120.100000023842,
+        "frames": 254,
+        "fps": 120.04348031570491,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.199999999999818,
+          "p99": 9.300000000000182,
+          "max": 9.400000000000091
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.8456692902121956,
+          "p95": 3.2000000178813934,
+          "max": 8.400000005960464
+        }
+      },
+      "zoom": {
+        "label": "zoom",
+        "durationMs": 2501.899999976158,
+        "frames": 300,
+        "fps": 120.04321555760076,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.199999999999818,
+          "p99": 9.300000000000182,
+          "max": 9.400000000000546
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 2.634000000754992,
+          "p95": 3.5999999940395355,
+          "max": 5.800000011920929
+        }
+      },
+      "rotate": {
+        "label": "rotate",
+        "durationMs": 1783,
+        "frames": 214,
+        "fps": 120.0493660944688,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.200000000000728,
+          "p99": 9.300000000000182,
+          "max": 9.300000000001091
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.2397196253883505,
+          "p95": 3.100000023841858,
+          "max": 8.099999994039536
+        }
+      },
+      "zoomIn": {
+        "label": "zoomIn",
+        "durationMs": 4214.0999999940395,
+        "frames": 506,
+        "fps": 120.01897533206831,
+        "frameMs": {
+          "p50": 8.299999999999272,
+          "p95": 9.200000000000728,
+          "p99": 9.300000000001091,
+          "max": 9.300000000001091
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 2.306126482401912,
+          "p95": 3.5999999940395355,
+          "max": 4.9000000059604645
+        }
+      }
+    },
+    "gestureSummary": {
+      "worstFrameP95Ms": 9.200000000000728,
+      "longTasks": 0,
+      "worstJsP95Ms": 3.5999999940395355
+    },
+    "focus": {
+      "warm": {
+        "n": 20,
+        "p50": 10.300000011920929,
+        "p95": 12.199999988079071,
+        "max": 12.199999988079071,
+        "frames": {
+          "n": 20,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "window": {
+          "label": "focusWarm",
+          "durationMs": 3190.199999988079,
+          "frames": 379,
+          "fps": 119.03266331658293,
+          "frameMs": {
+            "p50": 8.30000000000291,
+            "p95": 9.200000000000728,
+            "p99": 9.299999999999272,
+            "max": 24.700000000000728
+          },
+          "longTasks": 0,
+          "longestTaskMs": 0,
+          "loafCount": 0,
+          "loafMs": 0,
+          "jsMs": {
+            "mean": 3.366226914139725,
+            "p95": 5,
+            "max": 9.299999982118607
+          }
+        }
+      },
+      "cold": {
+        "n": 10,
+        "p50": 4.9000000059604645,
+        "p95": 5.799999982118607,
+        "max": 5.799999982118607,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "click": {
+        "n": 10,
+        "p50": 8.099999994039536,
+        "p95": 11.800000011920929,
+        "max": 11.800000011920929,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "samples": [
+        {
+          "kind": "key",
+          "inputAt": 17681.09999999404,
+          "appliedAt": 17686.70000001788,
+          "renderAt": 17692.70000001788,
+          "latencyMs": 11.600000023841858,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 17838.5,
+          "appliedAt": 17841.90000000596,
+          "renderAt": 17845.5,
+          "latencyMs": 7,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18001.90000000596,
+          "appliedAt": 18006.70000001788,
+          "renderAt": 18011,
+          "latencyMs": 9.099999994039536,
+          "frames": 1,
+          "focusIndex": 15,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18167.70000001788,
+          "appliedAt": 18170.09999999404,
+          "renderAt": 18175,
+          "latencyMs": 7.299999982118607,
+          "frames": 1,
+          "focusIndex": 20,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18322.59999999404,
+          "appliedAt": 18327.30000001192,
+          "renderAt": 18334,
+          "latencyMs": 11.400000005960464,
+          "frames": 1,
+          "focusIndex": 2,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18479.59999999404,
+          "appliedAt": 18482.09999999404,
+          "renderAt": 18484.40000000596,
+          "latencyMs": 4.800000011920929,
+          "frames": 1,
+          "focusIndex": 16,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18639.59999999404,
+          "appliedAt": 18643.40000000596,
+          "renderAt": 18649.90000000596,
+          "latencyMs": 10.300000011920929,
+          "frames": 1,
+          "focusIndex": 9,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18795.30000001192,
+          "appliedAt": 18797.5,
+          "renderAt": 18801.20000001788,
+          "latencyMs": 5.9000000059604645,
+          "frames": 1,
+          "focusIndex": 2312,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18956.5,
+          "appliedAt": 18961.90000000596,
+          "renderAt": 18966.80000001192,
+          "latencyMs": 10.300000011920929,
+          "frames": 1,
+          "focusIndex": 2260,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19115,
+          "appliedAt": 19121.59999999404,
+          "renderAt": 19125.70000001788,
+          "latencyMs": 10.700000017881393,
+          "frames": 1,
+          "focusIndex": 24,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19273.90000000596,
+          "appliedAt": 19281.20000001788,
+          "renderAt": 19284.90000000596,
+          "latencyMs": 11,
+          "frames": 1,
+          "focusIndex": 10,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19440.40000000596,
+          "appliedAt": 19448.09999999404,
+          "renderAt": 19452.40000000596,
+          "latencyMs": 12,
+          "frames": 1,
+          "focusIndex": 4344,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19609.90000000596,
+          "appliedAt": 19613.59999999404,
+          "renderAt": 19619.09999999404,
+          "latencyMs": 9.199999988079071,
+          "frames": 1,
+          "focusIndex": 1,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19766.5,
+          "appliedAt": 19769.09999999404,
+          "renderAt": 19777.70000001788,
+          "latencyMs": 11.200000017881393,
+          "frames": 1,
+          "focusIndex": 3181,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19921.30000001192,
+          "appliedAt": 19924.20000001788,
+          "renderAt": 19928.30000001192,
+          "latencyMs": 7,
+          "frames": 1,
+          "focusIndex": 309,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20085,
+          "appliedAt": 20087.40000000596,
+          "renderAt": 20092.59999999404,
+          "latencyMs": 7.5999999940395355,
+          "frames": 1,
+          "focusIndex": 531,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20239.90000000596,
+          "appliedAt": 20246.09999999404,
+          "renderAt": 20252.09999999404,
+          "latencyMs": 12.199999988079071,
+          "frames": 1,
+          "focusIndex": 1474,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20397.80000001192,
+          "appliedAt": 20402.40000000596,
+          "renderAt": 20409.59999999404,
+          "latencyMs": 11.799999982118607,
+          "frames": 1,
+          "focusIndex": 707,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20555,
+          "appliedAt": 20556.40000000596,
+          "renderAt": 20559.30000001192,
+          "latencyMs": 4.300000011920929,
+          "frames": 1,
+          "focusIndex": 2162,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20715.70000001788,
+          "appliedAt": 20719.09999999404,
+          "renderAt": 20724.90000000596,
+          "latencyMs": 9.199999988079071,
+          "frames": 1,
+          "focusIndex": 724,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 22805.20000001788,
+          "appliedAt": 22807.20000001788,
+          "renderAt": 22810.09999999404,
+          "latencyMs": 4.899999976158142,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 24987.59999999404,
+          "appliedAt": 24989.59999999404,
+          "renderAt": 24992.59999999404,
+          "latencyMs": 5,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 27188.5,
+          "appliedAt": 27190.40000000596,
+          "renderAt": 27193.30000001192,
+          "latencyMs": 4.800000011920929,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 29397.80000001192,
+          "appliedAt": 29399.90000000596,
+          "renderAt": 29402.5,
+          "latencyMs": 4.699999988079071,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 31588.59999999404,
+          "appliedAt": 31590.30000001192,
+          "renderAt": 31592.90000000596,
+          "latencyMs": 4.300000011920929,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 33795.40000000596,
+          "appliedAt": 33797.20000001788,
+          "renderAt": 33800.80000001192,
+          "latencyMs": 5.4000000059604645,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 35994.90000000596,
+          "appliedAt": 35996.90000000596,
+          "renderAt": 36000,
+          "latencyMs": 5.0999999940395355,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 38188.59999999404,
+          "appliedAt": 38191,
+          "renderAt": 38193.5,
+          "latencyMs": 4.9000000059604645,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 40402.80000001192,
+          "appliedAt": 40404.80000001192,
+          "renderAt": 40408.59999999404,
+          "latencyMs": 5.799999982118607,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 42588.30000001192,
+          "appliedAt": 42590.40000000596,
+          "renderAt": 42592.40000000596,
+          "latencyMs": 4.0999999940395355,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 46862.09999999404,
+          "appliedAt": 46866.20000001788,
+          "renderAt": 46869.59999999404,
+          "latencyMs": 7.5,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 49143.80000001192,
+          "appliedAt": 49147,
+          "renderAt": 49151.90000000596,
+          "latencyMs": 8.099999994039536,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 51440.59999999404,
+          "appliedAt": 51447.70000001788,
+          "renderAt": 51451.20000001788,
+          "latencyMs": 10.600000023841858,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 53722.70000001788,
+          "appliedAt": 53728.70000001788,
+          "renderAt": 53733.40000000596,
+          "latencyMs": 10.699999988079071,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 55990,
+          "appliedAt": 55993.20000001788,
+          "renderAt": 56001.30000001192,
+          "latencyMs": 11.300000011920929,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 58263.5,
+          "appliedAt": 58265.90000000596,
+          "renderAt": 58269.09999999404,
+          "latencyMs": 5.5999999940395355,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 60539,
+          "appliedAt": 60541.90000000596,
+          "renderAt": 60545,
+          "latencyMs": 6,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 62802.59999999404,
+          "appliedAt": 62807.5,
+          "renderAt": 62809.80000001192,
+          "latencyMs": 7.200000017881393,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 65064.40000000596,
+          "appliedAt": 65071.40000000596,
+          "renderAt": 65076.20000001788,
+          "latencyMs": 11.800000011920929,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 67319.80000001192,
+          "appliedAt": 67323.09999999404,
+          "renderAt": 67326.5,
+          "latencyMs": 6.699999988079071,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        }
+      ]
+    },
+    "noQueue": {
+      "cameraBefore": {
+        "started": 50,
+        "finished": 40,
+        "interrupted": 0,
+        "moveends": 116,
+        "active": true,
+        "pending": true
+      },
+      "during": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 156,
+        "active": true,
+        "pending": false
+      },
+      "after": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 157,
+        "active": false,
+        "pending": false
+      },
+      "burstMs": 714,
+      "settledMs": 574,
+      "selections": 20,
+      "settledWithinOneFlight": true,
+      "settled": true,
+      "finalFocus": 4119,
+      "finalCenter": [
+        51.343773024921575,
+        5.753492225058257
+      ]
+    },
+    "rendererStats": {
+      "frames": 5421,
+      "globeFrames": 5421,
+      "mercatorFrames": 0,
+      "globe": true
+    }
+  },
+  {
+    "scenario": "custom-globe",
+    "profile": "6x",
+    "cpuThrottle": 6,
+    "dpr": 1,
+    "refreshHz": 120,
+    "uncapped": false,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "note": "Custom WebGL layer, MapLibre globe, 50 articles/s fake stream",
+    "gestures": {
+      "pan": {
+        "label": "pan",
+        "durationMs": 2130.199999988079,
+        "frames": 255,
+        "fps": 119.99435320690793,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.199999999999818,
+          "p99": 9.300000000000182,
+          "max": 9.300000000000182
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 2.4749019606440674,
+          "p95": 4.5,
+          "max": 8.800000011920929
+        }
+      },
+      "zoom": {
+        "label": "zoom",
+        "durationMs": 2507.5999999940395,
+        "frames": 300,
+        "fps": 119.61245564371434,
+        "frameMs": {
+          "p50": 8.300000000000182,
+          "p95": 9.200000000000728,
+          "p99": 9.300000000000182,
+          "max": 16.5
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 4.07033333281676,
+          "p95": 6.0999999940395355,
+          "max": 14.299999982118607
+        }
+      },
+      "rotate": {
+        "label": "rotate",
+        "durationMs": 1964.300000011921,
+        "frames": 235,
+        "fps": 119.9591628381827,
+        "frameMs": {
+          "p50": 8.300000000001091,
+          "p95": 9.200000000000728,
+          "p99": 9.300000000001091,
+          "max": 9.399999999999636
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 1.902978722719436,
+          "p95": 5.0999999940395355,
+          "max": 14.5
+        }
+      },
+      "zoomIn": {
+        "label": "zoomIn",
+        "durationMs": 4254.4000000059605,
+        "frames": 510,
+        "fps": 119.99999999999999,
+        "frameMs": {
+          "p50": 8.300000000001091,
+          "p95": 9.200000000000728,
+          "p99": 9.300000000001091,
+          "max": 9.400000000001455
+        },
+        "longTasks": 0,
+        "longestTaskMs": 0,
+        "loafCount": 0,
+        "loafMs": 0,
+        "jsMs": {
+          "mean": 3.4462745088572597,
+          "p95": 5.299999982118607,
+          "max": 7.799999982118607
+        }
+      }
+    },
+    "gestureSummary": {
+      "worstFrameP95Ms": 9.200000000000728,
+      "longTasks": 0,
+      "worstJsP95Ms": 6.0999999940395355
+    },
+    "focus": {
+      "warm": {
+        "n": 20,
+        "p50": 10.400000005960464,
+        "p95": 15.800000011920929,
+        "max": 15.800000011920929,
+        "frames": {
+          "n": 20,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "window": {
+          "label": "focusWarm",
+          "durationMs": 3259,
+          "frames": 375,
+          "fps": 115.10835533181903,
+          "frameMs": {
+            "p50": 8.299999999999272,
+            "p95": 9.299999999999272,
+            "p99": 17.5,
+            "max": 32.599999999998545
+          },
+          "longTasks": 0,
+          "longestTaskMs": 0,
+          "loafCount": 0,
+          "loafMs": 0,
+          "jsMs": {
+            "mean": 4.4072000001271565,
+            "p95": 7.0999999940395355,
+            "max": 11.700000017881393
+          }
+        }
+      },
+      "cold": {
+        "n": 10,
+        "p50": 7.800000011920929,
+        "p95": 9.700000017881393,
+        "max": 9.700000017881393,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "click": {
+        "n": 10,
+        "p50": 13.299999982118607,
+        "p95": 14.900000005960464,
+        "max": 14.900000005960464,
+        "frames": {
+          "n": 10,
+          "p50": 1,
+          "p95": 1,
+          "max": 1
+        }
+      },
+      "samples": [
+        {
+          "kind": "key",
+          "inputAt": 18659.5,
+          "appliedAt": 18669.69999998808,
+          "renderAt": 18675.30000001192,
+          "latencyMs": 15.800000011920929,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18820.09999999404,
+          "appliedAt": 18829.19999998808,
+          "renderAt": 18835,
+          "latencyMs": 14.900000005960464,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 18993.90000000596,
+          "appliedAt": 18999,
+          "renderAt": 19003.40000000596,
+          "latencyMs": 9.5,
+          "frames": 1,
+          "focusIndex": 15,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19163,
+          "appliedAt": 19171.80000001192,
+          "renderAt": 19176.09999999404,
+          "latencyMs": 13.099999994039536,
+          "frames": 1,
+          "focusIndex": 20,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19334.09999999404,
+          "appliedAt": 19338.30000001192,
+          "renderAt": 19343,
+          "latencyMs": 8.900000005960464,
+          "frames": 1,
+          "focusIndex": 2,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19500.69999998808,
+          "appliedAt": 19503.90000000596,
+          "renderAt": 19507.69999998808,
+          "latencyMs": 7,
+          "frames": 1,
+          "focusIndex": 16,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19666.5,
+          "appliedAt": 19669.90000000596,
+          "renderAt": 19675.19999998808,
+          "latencyMs": 8.699999988079071,
+          "frames": 1,
+          "focusIndex": 9,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19821,
+          "appliedAt": 19824.5,
+          "renderAt": 19828.59999999404,
+          "latencyMs": 7.5999999940395355,
+          "frames": 1,
+          "focusIndex": 2312,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 19987.69999998808,
+          "appliedAt": 19994.80000001192,
+          "renderAt": 20000.40000000596,
+          "latencyMs": 12.700000017881393,
+          "frames": 1,
+          "focusIndex": 2260,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20147.30000001192,
+          "appliedAt": 20152.09999999404,
+          "renderAt": 20158.30000001192,
+          "latencyMs": 11,
+          "frames": 1,
+          "focusIndex": 24,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20304,
+          "appliedAt": 20311.19999998808,
+          "renderAt": 20316.5,
+          "latencyMs": 12.5,
+          "frames": 1,
+          "focusIndex": 10,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20474.40000000596,
+          "appliedAt": 20476.80000001192,
+          "renderAt": 20483.5,
+          "latencyMs": 9.099999994039536,
+          "frames": 1,
+          "focusIndex": 4344,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20628.30000001192,
+          "appliedAt": 20631.59999999404,
+          "renderAt": 20636,
+          "latencyMs": 7.699999988079071,
+          "frames": 1,
+          "focusIndex": 1,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20791.40000000596,
+          "appliedAt": 20795.5,
+          "renderAt": 20801.19999998808,
+          "latencyMs": 9.799999982118607,
+          "frames": 1,
+          "focusIndex": 3181,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 20948.19999998808,
+          "appliedAt": 20952.09999999404,
+          "renderAt": 20958.59999999404,
+          "latencyMs": 10.400000005960464,
+          "frames": 1,
+          "focusIndex": 309,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21103.90000000596,
+          "appliedAt": 21110.30000001192,
+          "renderAt": 21115.90000000596,
+          "latencyMs": 12,
+          "frames": 1,
+          "focusIndex": 531,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21261.09999999404,
+          "appliedAt": 21266.69999998808,
+          "renderAt": 21273.90000000596,
+          "latencyMs": 12.800000011920929,
+          "frames": 1,
+          "focusIndex": 1474,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21419.30000001192,
+          "appliedAt": 21425.69999998808,
+          "renderAt": 21429.5,
+          "latencyMs": 10.199999988079071,
+          "frames": 1,
+          "focusIndex": 707,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21587.40000000596,
+          "appliedAt": 21593.59999999404,
+          "renderAt": 21599.69999998808,
+          "latencyMs": 12.299999982118607,
+          "frames": 1,
+          "focusIndex": 2162,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 21745.90000000596,
+          "appliedAt": 21751.69999998808,
+          "renderAt": 21756.30000001192,
+          "latencyMs": 10.400000005960464,
+          "frames": 1,
+          "focusIndex": 724,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 24401.59999999404,
+          "appliedAt": 24404.5,
+          "renderAt": 24409.19999998808,
+          "latencyMs": 7.5999999940395355,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 27111.09999999404,
+          "appliedAt": 27114.40000000596,
+          "renderAt": 27120.80000001192,
+          "latencyMs": 9.700000017881393,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 29851.09999999404,
+          "appliedAt": 29854.19999998808,
+          "renderAt": 29858.40000000596,
+          "latencyMs": 7.300000011920929,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 32600.40000000596,
+          "appliedAt": 32603.59999999404,
+          "renderAt": 32607,
+          "latencyMs": 6.5999999940395355,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 35303.69999998808,
+          "appliedAt": 35307.40000000596,
+          "renderAt": 35311.5,
+          "latencyMs": 7.800000011920929,
+          "frames": 1,
+          "focusIndex": 0,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 38011.30000001192,
+          "appliedAt": 38014.69999998808,
+          "renderAt": 38020.19999998808,
+          "latencyMs": 8.899999976158142,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 40736.09999999404,
+          "appliedAt": 40739.5,
+          "renderAt": 40743.5,
+          "latencyMs": 7.4000000059604645,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 43466.90000000596,
+          "appliedAt": 43470.59999999404,
+          "renderAt": 43475.40000000596,
+          "latencyMs": 8.5,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 46177.30000001192,
+          "appliedAt": 46180.80000001192,
+          "renderAt": 46184.80000001192,
+          "latencyMs": 7.5,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "key",
+          "inputAt": 48903.5,
+          "appliedAt": 48907.09999999404,
+          "renderAt": 48912.40000000596,
+          "latencyMs": 8.900000005960464,
+          "frames": 1,
+          "focusIndex": 8,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 54139,
+          "appliedAt": 54147,
+          "renderAt": 54151.40000000596,
+          "latencyMs": 12.400000005960464,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 56940.40000000596,
+          "appliedAt": 56944.09999999404,
+          "renderAt": 56949.90000000596,
+          "latencyMs": 9.5,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 59683.30000001192,
+          "appliedAt": 59692.09999999404,
+          "renderAt": 59697.30000001192,
+          "latencyMs": 14,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 62448.40000000596,
+          "appliedAt": 62457.59999999404,
+          "renderAt": 62462.69999998808,
+          "latencyMs": 14.299999982118607,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 65194.69999998808,
+          "appliedAt": 65199.09999999404,
+          "renderAt": 65203,
+          "latencyMs": 8.300000011920929,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 67963.40000000596,
+          "appliedAt": 67972.90000000596,
+          "renderAt": 67978.30000001192,
+          "latencyMs": 14.900000005960464,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 70759.09999999404,
+          "appliedAt": 70764,
+          "renderAt": 70769.80000001192,
+          "latencyMs": 10.700000017881393,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 73533.30000001192,
+          "appliedAt": 73541.90000000596,
+          "renderAt": 73546.59999999404,
+          "latencyMs": 13.299999982118607,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 76280.19999998808,
+          "appliedAt": 76285.69999998808,
+          "renderAt": 76291.30000001192,
+          "latencyMs": 11.100000023841858,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        },
+        {
+          "kind": "click",
+          "inputAt": 79099.19999998808,
+          "appliedAt": 79108,
+          "renderAt": 79112.80000001192,
+          "latencyMs": 13.600000023841858,
+          "frames": 1,
+          "focusIndex": 4930,
+          "secondDegree": false
+        }
+      ]
+    },
+    "noQueue": {
+      "cameraBefore": {
+        "started": 50,
+        "finished": 40,
+        "interrupted": 0,
+        "moveends": 116,
+        "active": true,
+        "pending": true
+      },
+      "during": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 156,
+        "active": true,
+        "pending": false
+      },
+      "after": {
+        "started": 70,
+        "finished": 61,
+        "interrupted": 0,
+        "moveends": 157,
+        "active": false,
+        "pending": false
+      },
+      "burstMs": 846,
+      "settledMs": 578,
+      "selections": 20,
+      "settledWithinOneFlight": true,
+      "settled": true,
+      "finalFocus": 4119,
+      "finalCenter": [
+        51.343773024921575,
+        5.753492225058257
+      ]
+    },
+    "rendererStats": {
+      "frames": 5448,
+      "globeFrames": 5448,
+      "mercatorFrames": 0,
+      "globe": true
+    }
+  }
+]

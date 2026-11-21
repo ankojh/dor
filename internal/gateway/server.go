@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
@@ -53,6 +54,7 @@ type Config struct {
 	Logger  *slog.Logger
 	Text    TextService
 	Store   StoryStore
+	Places  *geo.Gazetteer
 }
 
 // Server is one gateway replica.
@@ -93,6 +95,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /api/stories", s.handleStories)
 	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
+	mux.HandleFunc("GET /api/places", s.handlePlaces)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil

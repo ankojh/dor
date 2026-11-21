@@ -313,6 +313,7 @@ func runCommand(args []string) error {
 		if dbStore != nil {
 			gwCfg.Store = dbStore
 		}
+		gwCfg.Places = enrichmentDeps.Gazetteer
 		gw, err = gateway.New(gwCfg)
 		if err != nil {
 			return err

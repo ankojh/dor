@@ -133,6 +133,18 @@ func TestRegionWithoutPlaceDataDowngradesToCountry(t *testing.T) {
 	if !ok || !p.CountryID || p.ID != "country:US" || PrecisionOf(p) != CountryResolution {
 		t.Fatalf("region without coordinates should downgrade to country: %+v, %v", p, ok)
 	}
+	// Wyoming is present only as a RegionAlias on the country fallback; it must
+	// not manufacture a country-sized event location from capital-only data.
+	candidates := g.Candidates("", "Officials gather in Wyoming", "", "", 10)
+	for _, candidate := range candidates {
+		if candidate.ID == "country:US" {
+			t.Fatalf("unsupported RegionAlias must not auto-match through country coordinates: %+v", candidates)
+		}
+	}
+	decision := g.RepairLocation(StoredLocation{PlaceID: "country:US", Lat: 38.9, Lon: -77, Precision: CountryResolution}, []TextEvidence{{Title: "Officials gather in Wyoming"}})
+	if decision.Reason != "unsupported_match" || decision.Replacement != nil {
+		t.Fatalf("unsupported downgraded RegionAlias row should be removed: %+v", decision)
+	}
 }
 
 func TestCountryFallbackUsesCapitalAndDoesNotBorrowAnotherCity(t *testing.T) {
@@ -253,6 +265,14 @@ func TestRepairPreservesValidHazardHintPoint(t *testing.T) {
 	decision := g.RepairLocation(StoredLocation{PlaceID: "hint:event-7", Lat: 12.3, Lon: 45.6, Precision: PointResolution}, []TextEvidence{{Title: "Earthquake reported"}})
 	if decision.Reason != "" || decision.Replacement != nil {
 		t.Fatalf("valid hazard point should remain unchanged, got %+v", decision)
+	}
+}
+
+func TestRepairRemovesUnsupportedCanonicalADM1Row(t *testing.T) {
+	g := fixtureGazetteer(t)
+	decision := g.RepairLocation(StoredLocation{PlaceID: "112", Lat: 31, Lon: -100, Precision: RegionResolution}, []TextEvidence{{Title: "Toyota recalls vehicles after airbag fault"}})
+	if decision.Reason != "unsupported_match" || decision.Replacement != nil {
+		t.Fatalf("valid-coordinate ADM1 row unsupported by article evidence must be removed: %+v", decision)
 	}
 }
 

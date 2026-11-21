@@ -158,6 +158,13 @@ func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool)
 	}
 	for _, p := range places {
 		g.add(p)
+		if p.Normalized == normalize(p.Name) {
+			for _, form := range []string{expandedPlaceName(p.Name), abbreviatedPlaceName(p.Name)} {
+				if form != p.Normalized {
+					g.addAlias(form, p)
+				}
+			}
+		}
 	}
 	for code, c := range countries {
 		countryPlace := Place{
@@ -221,6 +228,11 @@ func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool)
 				alias.RegionAlias = name
 			}
 			g.addAlias(name, alias)
+			for _, form := range []string{expandedPlaceName(name), abbreviatedPlaceName(name)} {
+				if form != normalize(name) {
+					g.addAlias(form, alias)
+				}
+			}
 		}
 	}
 	g.buildSearchIndex()
@@ -897,9 +909,14 @@ func ambiguousNames() map[string]struct{} {
 		"christian", "sale", "deal", "bury", "live", "rivers", "river", "coast",
 		"upper", "lower", "eastern", "western", "northern", "southern", "capital",
 		"toyota", "google", "lula", "international", "delta", "stat", "africa", "asia", "europe",
-		"victoria", "jackson", "michael", "hamilton", "lincoln", "austin", "florence",
-		"charlotte", "phoenix", "taylor", "jordan", "chelsea", "mercedes", "batman",
-		"michael jackson", "victoria beckham", "delta air lines", "eastern europe", "western leaders", "northern lights",
+		"jackson", "michael", "hamilton", "lincoln", "austin", "florence",
+		"charlotte", "phoenix", "taylor", "chelsea", "mercedes", "batman",
+		// Common words and personal names also used as ADM1 labels.
+		"van", "mary", "colon", "unity", "centre", "nacional",
+		"acre", "mono", "donga", "littoral", "plateau", "plateaux", "pool", "cuvette",
+		"forest", "vale", "bride", "peel", "northwest", "northeast", "saga", "ogre",
+		"bar", "mon", "rota", "muscat", "cascade", "ascension", "grad", "bay",
+		"lac", "maritime", "male", "mascara", "oriental", "savannah",
 	}
 	out := make(map[string]struct{}, len(names))
 	for _, n := range names {

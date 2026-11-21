@@ -27,15 +27,12 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 		for n := 8; n > 0; n-- {
 			for i := 0; i+n <= len(words); i++ {
 				separated := false
-				initialism := true
-				for k := i; k < i+n; k++ {
-					if len(words[k].raw) != 1 || words[k].raw != strings.ToUpper(words[k].raw) {
-						initialism = false
-					}
-				}
 				for k := i + 1; k < i+n; k++ {
 					separator := words[k].sep
-					if initialism {
+					// GeoNames uses punctuated abbreviations and initials in
+					// canonical names (St. Louis, José C. Paz, U.S.). A full
+					// sentence boundary still cannot join an ordinary phrase.
+					if abbreviationToken(words[k-1].norm) && strings.Count(separator, ".") == 1 {
 						separator = strings.ReplaceAll(separator, ".", "")
 					}
 					if strings.ContainsAny(separator, "\n.;:!?") {
@@ -133,21 +130,35 @@ func independentQualifier(p Place, words []token, start, count int, dateline boo
 		}
 		return end < len(words) && words[end].norm == "in" && matches(end+1)
 	}
-	return adjacent(p.Country) || adjacent(p.Admin)
+	// An uppercase administrative code is an explicit qualifier, including
+	// conventional unpunctuated forms such as Washington DC or Paris TX.
+	end := start + count
+	adminCode := false
+	if end < len(words) && len(p.AdminCode) == 2 && p.AdminCode == strings.ToUpper(p.AdminCode) &&
+		p.AdminCode[0] >= 'A' && p.AdminCode[0] <= 'Z' {
+		adminCode = words[end].raw == p.AdminCode
+		if end+1 < len(words) && strings.Contains(words[end+1].sep, ".") && !strings.ContainsAny(words[end+1].sep, "\n;:!?") {
+			adminCode = adminCode || words[end].raw+words[end+1].raw == p.AdminCode
+		}
+	}
+	return adjacent(p.Country) || adjacent(p.Admin) || adminCode
 }
 
 func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, start, count int, dateline bool, hint string) int {
-	if !ValidCoordinates(p.Lat, p.Lon) || !capitalized(words[start].raw) {
+	// No-data regions may remain explicit lookup aliases, but cannot turn a
+	// bare regional name into an automatic dot at another country's capital.
+	if p.RegionAlias != "" || !ValidCoordinates(p.Lat, p.Lon) || !capitalized(words[start].raw) {
 		return 0
 	}
-	canonicalName := p.Name
-	if p.RegionAlias != "" {
-		canonicalName = p.RegionAlias
+	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) {
+		// A populated-place coordinate does not establish the position of a
+		// separately named river/valley, or an administrative jurisdiction.
+		return 0
 	}
-	canonical := phrase == normalize(canonicalName)
-	countryName := p.CountryID && p.RegionAlias == "" && canonical
+	canonical := expandedPlaceName(phrase) == expandedPlaceName(p.Name)
+	countryName := p.CountryID && canonical
 	// ISO/IATA aliases describe explicit lookup vocabulary, not ordinary prose.
-	if p.CountryID && !canonical && p.RegionAlias == "" {
+	if p.CountryID && !canonical {
 		if !strings.Contains(" us usa uk u s u k u s a ", " "+phrase+" ") ||
 			p.CountryCode != "US" && p.CountryCode != "GB" {
 			return 0
@@ -168,15 +179,23 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 		}
 	}
 	if !p.CountryID && !canonical {
-		name := normalize(p.Name)
+		longForm := expandedPlaceName(phrase)
+		if longForm == expandedPlaceName(p.Admin) || longForm == expandedPlaceName(p.Country) {
+			// A city's alternate name can duplicate its enclosing region
+			// (Rio Grande / Rio Grande do Sul). It is evidence for that
+			// jurisdiction, never an independently supported city coordinate.
+			return 0
+		}
+		name := expandedPlaceName(p.Name)
 		// Accept faithful longer/shorter forms (NEW YORK / New York City),
 		// not unrelated historical aliases, brands or airport codes.
-		if count == 1 || !(strings.HasPrefix(name, phrase+" ") || strings.HasPrefix(phrase, name+" ")) {
+		if count == 1 || !(strings.HasPrefix(name, longForm+" ") || strings.HasPrefix(longForm, name+" ")) {
 			return 0
 		}
 	}
 	for _, w := range words[start : start+count] {
-		if !capitalized(w.raw) && !strings.Contains(" de la le del dos da of the and ", " "+w.norm+" ") {
+		nameSuffix := w.norm == "s" && strings.ContainsAny(w.sep, "'’")
+		if !capitalized(w.raw) && !nameSuffix && !strings.Contains(" de la le del dos do da of the and upon ", " "+w.norm+" ") {
 			return 0
 		}
 	}
@@ -191,11 +210,34 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 	_, ambiguous := g.skip[phrase]
 	// Possessive apostrophe-s is grammar, not a location pattern. Only an
 	// actual preposition or the explicit '-based' construction is locative.
-	locative := start > 0 && strings.Contains(" in at near across around within outside into ", " "+words[start-1].norm+" ")
-	if end := start + count; end < len(words) && words[end].norm == "based" {
+	locative := start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") &&
+		strings.Contains(" in at near across around within outside into ", " "+words[start-1].norm+" ")
+	if end := start + count; end < len(words) && words[end].norm == "based" && !strings.ContainsAny(words[end].sep, "\n.;:!?") {
 		locative = true
 	}
+	explicitCountry := countryName && g.explicitCountryEvidence(p, words, start, count, dateline, hint)
+	if countryName && g.foreignRegionCollision(p) && !explicitCountry {
+		// A locative such as 'living in Georgia' does not distinguish the
+		// country from the US state. Keep both possibilities unlocated unless
+		// independent evidence identifies the country or an actual venue.
+		return 0
+	}
+	_, contextualName := contextNames[phrase]
+	if contextualName && !p.CountryID && !qualified && g.foreignCanonicalCollision(p) {
+		// 'in Victoria' is geographic syntax, but still cannot distinguish
+		// the Australian region from several cities in other countries.
+		return 0
+	}
+	// Shared personal names and country/commodity names need actual text
+	// evidence. A publisher's country alone cannot locate a person or brand.
+	if contextualName && !(textQualified || dateline || locative || explicitCountry || countryName && disasterImpact(words, start)) {
+		return 0
+	}
 	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
+		return 0
+	}
+	if canonical && p.Feature == "ADM1" && count == 1 && !g.uniqueRegionName(p) &&
+		!(textQualified || dateline || locative) {
 		return 0
 	}
 	if dateline {
@@ -216,11 +258,11 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 	if ambiguous {
 		return 0
 	}
-	if canonical && p.Feature == "ADM1" {
-		return 32
-	}
 	if locative {
 		return 40
+	}
+	if canonical && p.Feature == "ADM1" && count == 1 {
+		return 32
 	}
 	// A full multiword name is more specific than a capitalized surname or
 	// brand. Single-token canonical cities still require geographic context.
@@ -228,6 +270,133 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 		return 30
 	}
 	return 0
+}
+
+func incompatibleFeatureSuffix(p Place, next string) bool {
+	natural := strings.Contains(" river lake valley mountain range ", " "+next+" ")
+	admin := strings.Contains(" province state county district ", " "+next+" ")
+	if p.CountryID {
+		return false // A country can honestly represent a coarser jurisdiction.
+	}
+	if p.Feature == "ADM1" {
+		return natural
+	}
+	return natural || admin
+}
+
+// Prefix abbreviations are faithful canonical forms, unlike arbitrary
+// alternate names. Both forms are indexed regardless of GeoNames alias order.
+func expandedPlaceName(s string) string {
+	parts := strings.Fields(normalize(s))
+	if len(parts) > 1 {
+		switch parts[0] {
+		case "st":
+			parts[0] = "saint"
+		case "ste":
+			parts[0] = "sainte"
+		case "ft":
+			parts[0] = "fort"
+		case "mt":
+			parts[0] = "mount"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func abbreviatedPlaceName(s string) string {
+	parts := strings.Fields(expandedPlaceName(s))
+	if len(parts) > 1 {
+		switch parts[0] {
+		case "saint":
+			parts[0] = "st"
+		case "sainte":
+			parts[0] = "ste"
+		case "fort":
+			parts[0] = "ft"
+		case "mount":
+			parts[0] = "mt"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func abbreviationToken(s string) bool {
+	return s == "st" || s == "ste" || s == "ft" || s == "mt" || len(s) == 1
+}
+
+// These canonical geographic names are also common personal names or words.
+// Unlike the lexical stoplist, a genuine locative/dateline can admit them.
+var contextNames = map[string]struct{}{
+	"victoria": {}, "jordan": {}, "chad": {}, "israel": {}, "turkey": {},
+	"reunion": {}, "georgia": {}, "lori": {}, "mila": {}, "diana": {},
+	"nan": {}, "mara": {}, "carolina": {}, "alberta": {}, "brittany": {},
+	"miranda": {}, "uri": {}, "andreas": {}, "douglas": {}, "patrick": {},
+	"constantine": {}, "sofia": {}, "sal": {}, "paola": {}, "indiana": {},
+}
+
+// An impact verb alone can describe a person. Require a nearby disaster noun
+// before accepting that construction as country geography (Floods hit Jordan).
+func disasterImpact(words []token, start int) bool {
+	if start < 2 || !strings.Contains(" hit hits struck strikes ", " "+words[start-1].norm+" ") {
+		return false
+	}
+	for i := start; i >= max(0, start-4); i-- {
+		if i < start-1 && strings.Contains(" flood floods flooding earthquake earthquakes storm storms hurricane hurricanes cyclone cyclones wildfire wildfires bushfire bushfires tornado tornadoes tsunami drought ", " "+words[i].norm+" ") {
+			return true
+		}
+		if strings.ContainsAny(words[i].sep, "\n.;:!?") {
+			return false
+		}
+	}
+	return false
+}
+
+func (g *Gazetteer) foreignCanonicalCollision(p Place) bool {
+	for _, other := range g.byName[normalize(p.Name)] {
+		if other.RegionAlias == "" && other.CountryCode != p.CountryCode && normalize(other.Name) == normalize(p.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gazetteer) foreignRegionCollision(p Place) bool {
+	for _, other := range g.byName[normalize(p.Name)] {
+		if other.RegionAlias == "" && other.Feature == "ADM1" && other.CountryCode != p.CountryCode && normalize(other.Name) == normalize(p.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gazetteer) explicitCountryEvidence(p Place, words []token, start, count int, dateline bool, hint string) bool {
+	if hint != "" && hint == p.CountryCode {
+		return true
+	}
+	if start > 0 && words[start-1].norm == "country" ||
+		start > 1 && words[start-1].norm == "of" && words[start-2].norm == "country" ||
+		start+count < len(words) && words[start+count].norm == "country" {
+		return true
+	}
+	country, ok := g.countries[p.CountryCode]
+	capital := normalize(country.Capital)
+	return ok && dateline && capital != "" && strings.Contains(" "+tokensText(words)+" ", " "+capital+" ")
+}
+
+// The capitalization-only ADM1 shortcut is limited to canonical names with
+// one geographic meaning. Cities, countries and other regions with the same
+// name require a dateline, locative or independently stated qualifier.
+func (g *Gazetteer) uniqueRegionName(p Place) bool {
+	for _, other := range g.byName[normalize(p.Name)] {
+		if other.RegionAlias != "" || normalize(other.Name) != normalize(p.Name) || other.ID == p.ID {
+			continue
+		}
+		if other.Feature == "ADM1" && other.CountryCode == p.CountryCode && other.AdminCode == p.AdminCode {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func boolScore(b bool, n int) int {

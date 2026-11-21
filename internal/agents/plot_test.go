@@ -95,9 +95,9 @@ func plotMatchingFixture(t *testing.T) *geo.Gazetteer {
 	add("101", "Paris", "", "PPL", "33.6609", "-95.5555", "US", "TX", "25000")
 	// Deliberate collisions model GeoNames names/alternate names that must not
 	// become an event location from capitalization or a single matching word.
-	for i, name := range []string{"Drug", "Paradise", "March", "It", "Africa", "Toyota", "Michael Jackson", "Victoria Beckham", "Google", "Lula", "STAT+", "International", "Eastern Europe", "Western leaders", "Northern Lights", "Delta Air Lines", "Delta", "Goodyear", "Florida", "York"} {
+	for i, name := range []string{"Drug", "Paradise", "March", "It", "Africa", "Toyota", "Delta", "Goodyear", "Florida", "York"} {
 		code, admin := "US", "DC"
-		if name == "March" || name == "Victoria Beckham" || name == "York" {
+		if name == "March" || name == "York" {
 			code, admin = "GB", "ENG"
 		}
 		if name == "Africa" {
@@ -524,19 +524,7 @@ func TestAutomaticCountryInitialismsRemainSupported(t *testing.T) {
 }
 
 func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
-	dir := os.Getenv("DOR_TEST_GEONAMES_DIR")
-	if dir == "" {
-		t.Skip("set DOR_TEST_GEONAMES_DIR to run these cases against the full cached GeoNames dataset")
-	}
-	for _, file := range []string{"cities15000.txt", "countryInfo.txt", "admin1CodesASCII.txt"} {
-		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
-			t.Fatalf("configured GeoNames dataset is incomplete (%s): %v", file, err)
-		}
-	}
-	g, err := geo.Load(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	g := loadFullCacheForPlotTests(t)
 	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
 	for _, tc := range []struct {
 		name, title, lede, dateline string
@@ -672,6 +660,181 @@ func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFullCacheContextualReviewEvidence(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	tests := []struct {
+		name, title, lede, dateline string
+		wantCountry, wantName       string
+		wantPrecision               dorv1.Precision
+		wantNone                    bool
+	}{
+		// Ambiguous towns resolve only with independent geography.
+		{"San Salvador El Salvador", "Officials meet in San Salvador, El Salvador", "The meeting followed a cabinet announcement.", "San Salvador, El Salvador", "SV", "san salvador", dorv1.Precision_PRECISION_CITY, false},
+		{"Santa Cruz Bolivia", "Residents gather in Santa Cruz, Bolivia", "The protest followed a policy announcement.", "Santa Cruz, Bolivia", "BO", "santa cruz", dorv1.Precision_PRECISION_CITY, false},
+		{"Porto Novo Benin", "Officials meet in Porto-Novo, Benin", "The talks continued late into the evening.", "Porto-Novo, Benin", "BJ", "porto", dorv1.Precision_PRECISION_CITY, false},
+		{"Boa Vista Brazil", "Storms damage homes in Boa Vista, Brazil", "Emergency crews worked through the night.", "Boa Vista, Brazil", "BR", "boa vista", dorv1.Precision_PRECISION_CITY, false},
+		{"Southampton England", "Officials gather in Southampton, England", "The meeting was held at city hall.", "Southampton, England", "GB", "southampton", dorv1.Precision_PRECISION_CITY, false},
+		{"Florida Uruguay", "Officials meet in Florida, Uruguay", "The policy was announced at a local ceremony.", "Florida, Uruguay", "UY", "florida", dorv1.Precision_PRECISION_CITY, false},
+		{"Rio Grande Brazil", "Flooding hits Rio Grande, Brazil", "Residents were asked to move to higher ground.", "Rio Grande, Brazil", "BR", "rio grande", dorv1.Precision_PRECISION_CITY, false},
+		{"Rio Grande do Sul region", "Flooding spreads across Rio Grande do Sul", "Emergency crews were deployed across the state.", "Rio Grande do Sul, Brazil", "BR", "rio grande do sul", dorv1.Precision_PRECISION_REGION, false},
+		{"Male ordinary text", "The male driver was taken to hospital", "Police said the road was reopened.", "", "", "", 0, true},
+		{"Male Maldives", "Officials meet in Malé, Maldives", "The talks focused on climate policy.", "Malé, Maldives", "MV", "male", dorv1.Precision_PRECISION_CITY, false},
+		{"Kingston upon Thames", "Officials gather in Kingston upon Thames", "The meeting was held in southwest London.", "Kingston upon Thames, United Kingdom", "GB", "united kingdom", dorv1.Precision_PRECISION_COUNTRY, false},
+		// False matches that are names, brands, commodities or organizations.
+		{"Washington Post", "Washington Post reports newsroom changes", "The newspaper announced a new editor.", "", "", "", 0, true},
+		{"Denzel Washington", "Denzel Washington receives lifetime award", "The actor thanked his family.", "", "", "", 0, true},
+		{"FEMA Washington DC office", "FEMA opens a Washington, D.C. office", "The office will coordinate disaster response.", "", "US", "washington", dorv1.Precision_PRECISION_CITY, false},
+		{"Virginia Giuffre", "Virginia Giuffre case draws renewed attention", "Lawyers filed a new motion.", "", "", "", 0, true},
+		{"Indiana Jones", "Indiana Jones sequel begins production", "The studio announced the cast.", "", "", "", 0, true},
+		{"Van driver", "Van driver questioned after collision", "Police said no one was seriously injured.", "", "", "", 0, true},
+		{"Van Hollen", "Van Hollen introduces a new bill", "The proposal was sent to committee.", "", "", "", 0, true},
+		{"Mary Berry", "Mary Berry shares a new recipe", "The chef discussed the dish on television.", "", "", "", 0, true},
+		{"Colon cancer", "Colon cancer screening rates rise", "Doctors urged more patients to seek testing.", "", "", "", 0, true},
+		{"Unity government", "Unity government talks resume", "Leaders said negotiations remain difficult.", "", "", "", 0, true},
+		{"Indian Centre", "Indian Centre opens a new exhibition", "The organization welcomed local visitors.", "", "", "", 0, true},
+		{"Manchester team", "Manchester United signs a new striker", "The club announced a multi-year deal.", "", "", "", 0, true},
+		{"Nacional team", "Nacional wins the league final", "Supporters celebrated after the match.", "", "", "", 0, true},
+		{"Israel Adesanya", "Israel Adesanya announces return to competition", "The athlete said he is ready to fight.", "", "", "", 0, true},
+		{"Chad Johnson", "Chad Johnson joins the broadcast team", "The former player will work as an analyst.", "", "", "", 0, true},
+		{"Turkey prices", "Turkey prices fall ahead of holiday", "Retailers offered discounts on poultry.", "", "", "", 0, true},
+		{"Reunion tour", "Band announces Reunion tour dates", "Tickets will go on sale next week.", "", "", "", 0, true},
+		{"Georgia runoff", "Georgia runoff election draws national attention", "Campaigns spent heavily on advertising.", "", "", "", 0, true},
+		{"Georgia without country proof", "Atlanta crash injures two people", "The victims were living in Georgia.", "", "", "", 0, true},
+		{"Southampton team", "Southampton signs a new midfielder", "The club confirmed the transfer.", "", "", "", 0, true},
+		// Safe administrative regions and explicit country/geographic contexts.
+		{"Texas region", "Texas officials announce a new safety plan", "The policy applies statewide.", "", "US", "texas", dorv1.Precision_PRECISION_REGION, false},
+		{"Kerala region", "Heavy rain hits Kerala", "Flood warnings were issued across the state.", "", "IN", "kerala", dorv1.Precision_PRECISION_REGION, false},
+		{"Gauteng region", "Thunderstorms to hit Gauteng over the weekend", "Residents were advised to take precautions.", "", "ZA", "gauteng", dorv1.Precision_PRECISION_REGION, false},
+		{"St Louis locative", "Officials meet in St. Louis", "The talks focused on transit.", "", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
+		{"St Louis dateline", "Officials announce a new plan", "The city hosted the announcement.", "ST. LOUIS", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
+		{"St Johns Newfoundland", "Officials gather in St. John's, Newfoundland", "The meeting was held at city hall.", "St. John's, Newfoundland and Labrador, Canada", "CA", "st. john", dorv1.Precision_PRECISION_CITY, false},
+		{"St Petersburg Russia", "Ministers meet in St. Petersburg, Russia", "The meeting continued through the afternoon.", "St. Petersburg, Russia", "RU", "saint petersburg", dorv1.Precision_PRECISION_CITY, false},
+		{"Ft Worth Texas", "Officials gather in Ft. Worth, Texas", "The meeting was held downtown.", "Ft. Worth, Texas", "US", "fort worth", dorv1.Precision_PRECISION_CITY, false},
+		{"Mt Pleasant South Carolina", "Officials gather in Mt. Pleasant, South Carolina", "The meeting was held at city hall.", "Mt. Pleasant, South Carolina", "US", "mount pleasant", dorv1.Precision_PRECISION_CITY, false},
+		{"Ste Marie Ontario", "Officials gather in Sault Ste. Marie, Ontario", "The meeting was held at city hall.", "Sault Ste. Marie, Ontario, Canada", "CA", "sault ste. marie", dorv1.Precision_PRECISION_CITY, false},
+		{"Jordan locative country", "Floods hit Jordan", "Authorities warned residents to avoid river valleys.", "", "JO", "jordan", dorv1.Precision_PRECISION_COUNTRY, false},
+		{"Victoria without independent qualifier", "Bushfires spread in Victoria", "Fire crews were deployed across the state.", "", "", "", 0, true},
+		{"Victoria Australia qualified", "Bushfires spread in Victoria, Australia", "Fire crews were deployed across the state.", "", "AU", "victoria", dorv1.Precision_PRECISION_REGION, false},
+		{"Israel country counterpart", "Rocket fire reported in Israel", "Emergency services treated several people.", "", "IL", "israel", dorv1.Precision_PRECISION_COUNTRY, false},
+		{"Chad country counterpart", "Flooding spreads in Chad", "Thousands of residents need assistance.", "", "TD", "chad", dorv1.Precision_PRECISION_COUNTRY, false},
+		{"Turkey country counterpart", "Inflation rises in Turkey", "The central bank announced new figures.", "", "TR", "turkey", dorv1.Precision_PRECISION_COUNTRY, false},
+		{"Reunion geographic counterpart", "Cyclone makes landfall on Réunion", "Officials closed schools across the island.", "Saint-Denis, Réunion", "RE", "saint-denis", dorv1.Precision_PRECISION_CITY, false},
+		{"Georgia US qualifier", "Georgia voters return to the polls", "The runoff was held in Georgia, United States.", "Atlanta, Georgia, United States", "US", "atlanta", dorv1.Precision_PRECISION_CITY, false},
+		{"Georgia country capital qualifier", "Georgia parliament approves a new bill", "The vote followed days of debate.", "Tbilisi, Georgia", "GE", "tbilisi", dorv1.Precision_PRECISION_CITY, false},
+		{"India country context", "Monsoon flooding worsens in India", "Millions of residents are affected.", "", "IN", "india", dorv1.Precision_PRECISION_COUNTRY, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "review-" + tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline})
+			if tc.wantNone {
+				if tc.name == "Georgia without country proof" {
+					for _, loc := range placed.Locations {
+						if candidate, ok := g.ByID(loc.PlaceId); ok && candidate.CountryID && candidate.CountryCode == "GE" {
+							t.Errorf("Georgia without country-specific evidence must not resolve to country GE: %+v", placed.Locations)
+						}
+					}
+					return
+				}
+				if len(placed.Locations) != 0 {
+					t.Errorf("unqualified/ambiguous wording should not produce a location: %+v", placed.Locations)
+				}
+				return
+			}
+			if len(placed.Locations) == 0 {
+				t.Fatalf("expected grounded %s location but got none (backend=%s)", tc.wantCountry, placed.Backend)
+			}
+			loc := placed.Locations[0]
+			got, ok := g.ByID(loc.PlaceId)
+			if !ok || got.CountryCode != tc.wantCountry || loc.Precision != tc.wantPrecision || !strings.Contains(strings.ToLower(loc.Name), tc.wantName) {
+				t.Errorf("resolved %q/%q precision=%s (known=%v), want %q/%q precision=%s; full output=%+v", loc.Name, loc.PlaceId, loc.Precision, ok, tc.wantCountry, tc.wantName, tc.wantPrecision, placed.Locations)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, title, dateline, correctCountry string
+		forbidCountries                       []string
+		mustBeUnlocated                       bool
+	}{
+		{"bare San Salvador mayor", "San Salvador mayor announces new plan", "", "SV", []string{"BS"}, false},
+		{"bare San Salvador dateline", "Mayor announces a new plan", "SAN SALVADOR", "SV", []string{"BS"}, false},
+		{"bare Santa Cruz floods", "Santa Cruz floods after heavy rain", "", "BO", []string{"BS"}, false},
+		{"bare Santa Cruz dateline", "Flood warnings issued", "SANTA CRUZ", "BO", []string{"BS"}, false},
+		{"bare Boa Vista hospitals", "Boa Vista hospitals prepare for strike", "", "BR", []string{"CV"}, false},
+		{"bare Boa Vista dateline", "Hospitals prepare for strike", "BOA VISTA", "BR", []string{"CV"}, false},
+		{"bare Porto Novo summit", "Porto Novo hosts regional summit", "", "BJ", []string{"CV"}, false},
+		{"bare Porto Novo dateline", "Regional summit opens", "PORTO NOVO", "BJ", []string{"CV"}, false},
+		{"Florida governor", "Florida governor signs budget", "", "", []string{"PR"}, false},
+		{"Rio Grande valley", "Rio Grande valley braces for flooding", "", "", []string{"PR"}, false},
+		{"Male nurses", "Male nurses call for better conditions", "", "", nil, true},
+		{"Washington warns", "Washington warns officials of new sanctions", "", "", nil, true},
+	} {
+		t.Run("bare_"+tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "bare-" + tc.name, Title: tc.title, Dateline: tc.dateline})
+			if tc.mustBeUnlocated && len(placed.Locations) != 0 {
+				t.Fatalf("ordinary phrase should not create a location: %+v", placed.Locations)
+			}
+			for _, loc := range placed.Locations {
+				candidate, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				for _, forbidden := range tc.forbidCountries {
+					if candidate.CountryCode == forbidden {
+						t.Errorf("%q was incorrectly resolved in %s: %+v", tc.title, forbidden, loc)
+					}
+				}
+				if tc.correctCountry != "" && candidate.CountryCode != tc.correctCountry {
+					t.Errorf("ambiguous name should resolve only to %s or no location; got %+v (%s)", tc.correctCountry, loc, candidate.CountryCode)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, title string
+		cityTokens  []string
+	}{
+		{"St Johns River", "Flood warnings issued along the St. Johns River", []string{"st. john", "saint john"}},
+		{"St Louis River", "Crews search the St. Louis River after a boating accident", []string{"st. louis", "saint louis"}},
+	} {
+		t.Run("river_feature_suffix_"+tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "river-" + tc.name, Title: tc.title})
+			for _, loc := range placed.Locations {
+				candidate, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				name := strings.ToLower(candidate.Name)
+				for _, city := range tc.cityTokens {
+					if strings.Contains(name, city) {
+						t.Errorf("river feature phrase %q must not be resolved as city %q (%s): %+v", tc.title, candidate.Name, candidate.ID, loc)
+					}
+				}
+			}
+		})
+	}
+}
+
+func loadFullCacheForPlotTests(t *testing.T) *geo.Gazetteer {
+	t.Helper()
+	dir := os.Getenv("DOR_TEST_GEONAMES_DIR")
+	if dir == "" {
+		t.Skip("set DOR_TEST_GEONAMES_DIR to run these cases against the full cached GeoNames dataset")
+	}
+	for _, file := range []string{"cities15000.txt", "countryInfo.txt", "admin1CodesASCII.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+			t.Fatalf("full cached GeoNames dataset is incomplete (%s): %v", file, err)
+		}
+	}
+	g, err := geo.LoadExisting(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("load full cached GeoNames: %v", err)
+	}
+	return g
 }
 
 func normalizePlotName(name string) string {

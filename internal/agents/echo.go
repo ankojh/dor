@@ -48,21 +48,17 @@ func EchoOutputMsgID(inputID string) string {
 	return "echo:" + hex.EncodeToString(sum[:16])
 }
 
-// Deps are optional runtime dependencies shared by the built-in agents.
+// Builtins registers every agent compiled into this binary. Fetchers are
+// always registered; --agents selects what runs.
 type Deps struct {
-	// ArticleSink is the asynchronous Postgres writer. Nil keeps the pipeline
-	// running without a database; normalize still publishes clean articles.
 	ArticleSink ArticleSink
 }
 
-// Builtins registers every agent with no optional dependencies.
-func Builtins(b *bus.Bus, metrics *Metrics, log *slog.Logger) (*Registry, error) {
-	return BuiltinsWithDeps(b, metrics, log, Deps{})
+func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config) (*Registry, error) {
+	return BuiltinsWithDeps(ctx, b, metrics, log, cfg, Deps{})
 }
 
-// BuiltinsWithDeps registers every agent compiled into this binary. Real
-// pipeline agents are added here as their tickets land.
-func BuiltinsWithDeps(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (*Registry, error) {
+func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config, deps Deps) (*Registry, error) {
 	registry := NewRegistry()
 	echo, err := NewEcho(b, metrics, log)
 	if err != nil {
@@ -71,11 +67,38 @@ func BuiltinsWithDeps(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps)
 	if err := registry.Register(echo); err != nil {
 		return nil, err
 	}
+
+	runtime, err := newFetcherRuntime(ctx, b, metrics, log, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, build := range []func(*fetcherRuntime) (Agent, error){
+		newRSSFetcher,
+		newGDELTFetcher,
+		newHazardFetcher,
+	} {
+		agent, err := build(runtime)
+		if err != nil {
+			return nil, err
+		}
+		if err := registry.Register(agent); err != nil {
+			return nil, err
+		}
+	}
 	normalize, err := NewNormalizer(b, metrics, log, NormalizerConfig{Sink: deps.ArticleSink})
 	if err != nil {
 		return nil, err
 	}
 	if err := registry.Register(normalize); err != nil {
+
+		return nil, err
+	}
+
+	publisher, err := NewPublisher(b, metrics, log)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(publisher); err != nil {
 		return nil, err
 	}
 	return registry, nil

@@ -49,11 +49,16 @@ const (
 	KVBucketSpend     = "spend"
 	KVBucketLiveState = "live_state"
 
-	KVSeenTTL      = 48 * time.Hour
-	KVJoinsTTL     = 30 * time.Second
-	KVBudgetsTTL   = time.Hour
-	KVSpendTTL     = 48 * time.Hour
-	KVLiveStateTTL = 48 * time.Hour
+	KVSeenTTL            = 48 * time.Hour
+	KVJoinsTTL           = 30 * time.Second
+	KVBudgetsTTL         = time.Hour
+	KVSpendTTL           = 48 * time.Hour
+	KVLiveStateTTL       = 48 * time.Hour
+	KVBucketSourceHealth = "source_health"
+	KVSourceHealthTTL    = 7 * 24 * time.Hour
+
+	KVLiveStateSnapshotKey = "snapshot"
+	KVPublisherSeqKey      = "publisher.seq"
 )
 
 // Header names shared by every agent.
@@ -364,6 +369,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketBudgets, KVBudgetsTTL},
 		{KVBucketSpend, KVSpendTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
+		{KVBucketSourceHealth, KVSourceHealthTTL},
 	}
 }
 

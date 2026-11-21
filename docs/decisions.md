@@ -478,6 +478,177 @@ implemented: a `TYPESAFE_API_KEY` needs an explicit base URL, path and request
 shape (`openrouter-decisions`) and otherwise fails early; the direct
 `/v1/systemone` shape is not guessed. Push CI is mock-only and gets no secrets;
 only manual `workflow_dispatch` runs live.
+## Globe renderer (M0·2, 2026-11-20; fixup 1)
+
+**Custom WebGL layer on the MapLibre GL JS v5 globe.** The first decision note
+gave a false cause: deck.gl 9.4.1's `ArcLayer`/`LineLayer` **do** render on the
+globe. deck's `_GlobeView` defaults to back-face culling, and
+`parameters: {cullMode: 'none'}` makes arcs and lines render (reviewer repro;
+verified by this tree's `?renderer=deck` page). The decision does not rely on
+that failure.
+
+We choose the custom layer because:
+
+- **(a)** focus is exactly the plan's model: per-instance focus texels plus a
+  200 ms shader fade, written synchronously by a main-thread CSR mirror in
+  O(degree), without waiting on a worker round trip;
+- **(b)** control over street-zoom coordinate precision; historical alignment
+  measurements were superseded by canonical-coordinate implementation changes
+  and are not validation of the current build;
+- **(c)** all encodings are in one shader set (one arc buffer with strength,
+  dashes, pulses, glow; GPU ripple ring buffer; tethers; brackets), with no
+  fragile shader injection into another layer;
+- **(d)** deck + luma (~220 KB gzip) stay off the app path against the 150 KB
+  initial-JS budget; the deck page is a lazily imported dev-only comparison;
+- **(e)** no interleaved depth z-fighting with MapLibre's globe.
+
+**Costs:** we own GPU picking, resource lifecycle and about 1.5k lines of
+GLSL/TS; there is no WebGPU path; swapping renderers later is a rewrite. deck
+is dev-only (`@deck.gl/*` in devDependencies, dynamic import only for
+`?renderer=deck`). No deck performance comparison is claimed: the earlier table
+measured a full-rebuild integration and was not like-for-like.
+
+**Focus and picking.** The worker ships its CSR adjacency; `FocusMirror` keeps
+a lit set on the main thread, resets every old lit index that is not in the new
+thread, and writes the new focus bytes synchronously. Stale/dropped worker
+patches cannot leave ghost focus. Clicks use a per-frame GPU id pass and a
+one-pixel readback (occlusion-correct; no CPU loop over stories). MapLibre
+`flyTo` owns flights (interruptible, gesture-cancelled); Esc returns to ambient
+without moving the camera. Reusable GPU data uses 2D textures (width ≤ 2048),
+pre-allocated capacity, a free-list, sub-range writes, and full disposal.
+
+Full method, numbers, screenshots and caveats:
+[docs/globe-spike.md](globe-spike.md).
+
+## Fetchers (M1·1, 2026-11-20; fixup 1, 2026-11-21)
+
+**The source list is one reviewed YAML file, read at startup.** `deploy/sources/sources.yaml`
+holds RSS/Atom feeds and the GDELT/hazard upstreams; `internal/sources` loads
+and validates it, and each fetcher selects by `kind`. There is no database
+dependency in M1·1; M1·2 seeds the same file into Postgres. `enabled: true`
+requires `terms_ok: true` and a non-empty `terms_note` at load time, and source
+ids are validated against the NATS KV key charset because they are also KV keys.
+
+**Review by live check, not by trust.** `tools/feedcheck` fetches every source
+with the production User-Agent and adapter. On 2026-11-20 it checked 364 RSS
+candidates: 63 dead ones were dropped, 52 access-blocked ones stay disabled
+with the reason, and 37 entries from 17 publisher hosts were disabled by the
+terms decision. The committed `deploy/sources/feedcheck-2026-11-20.json` is the
+evidence. This is not legal sign-off: a human review of the 212 enabled feeds
+is a follow-up.
+
+**Terms decision.** Publishers whose RSS terms are personal/non-commercial only
+or whose content is paywalled are disabled: NYT, Washington Post, WSJ and
+MarketWatch (Dow Jones), FT, Bloomberg, The Economist, TIME, The Atlantic,
+Foreign Affairs, Foreign Policy, The Telegraph, The Globe and Mail, the New
+Statesman, Nikkei Asia, MIT Technology Review and Wired. Every enabled entry
+has a per-publisher `terms_note`: a verified terms URL where one exists (135
+publisher hosts), otherwise "no published RSS terms found; robots.txt allows
+the feed path; headline, snippet and link only, attributed".
+
+**Robots is RFC 9309 with wildcards, and transient failures retry.** `*`
+matches any sequence, a trailing `$` anchors the end, and the longest matching
+pattern wins (Allow on a tie). A real Disallow blocks the path — ReliefWeb's
+`/*/rss.xml` is why `reliefweb-updates` is disabled. A 4xx means "no robots".
+A timeout, 429, 5xx or unreachable robots endpoint is a retryable fetch error:
+it backs off and retries, never becomes a cached disallow and never quarantines
+the host. The body is capped at 512 KiB and one singleflight request per host
+serves every caller.
+
+**Three RSS replicas, sharded in-process locally.** `FeedShard` is
+FNV-1a(feed id) mod 3. `--rss-shard=-1` runs all three shards in one process
+(local mode); a production process sets `DOR_RSS_SHARD=0..2`. Changing
+`--rss-shards` moves feeds between replicas, so **stop all replicas first**
+(or accept temporary double-publishing until the next restart); the `seen`
+KV bucket and JetStream dedupe make the overlap harmless but the shard map is
+only stable for a fixed N.
+
+**Adaptive interval, with interval_s as a floor.** After each successful poll,
+rate = new items since the previous successful poll / wall time since it,
+smoothed with an EWMA (alpha 0.4); interval = 60 s / rate, clamped to
+`[interval_s, max(300 s, interval_s)]`. The floor applies to every kind:
+hazards keep their configured cadence and a ten-minute EONET feed is not
+polled faster than that. Network failures back off 30 s → 15 min. Five
+consecutive parse failures quarantine for 30 min; a robots or permanent-403
+denial quarantines for the same cool-off without counting as a parse error.
+Each feed owns a goroutine and timer, with a semaphore (8) bounding concurrent
+fetches per shard, so a hanging feed holds one slot for at most one 20 s
+timeout.
+
+**Per-host token buckets in `budgets`, key `host.<host>`.** NATS KV keys allow
+only `[-/_=.a-zA-Z0-9]`, so the host is sanitized (`:`, ports and anything
+else become `_`). 1 request/s with a burst of 4, updated with KV CAS so three
+replicas share the allowance. KV calls time out after 500 ms. If the KV is
+unavailable the fetcher uses an in-process limiter and logs a warning once per
+host per ten minutes: politeness must not become an ingest outage, and a silent
+fallback is not acceptable either.
+
+**No republish: source-scoped ids, a sliding seen set and KV persistence.** The
+fetcher id is `raw:<kind>:<sha256(key)>` (`raw:rss:…`, `raw:gdelt:…`,
+`raw:usgs:…`, …), so RSS and GDELT can carry the same URL and both survive
+until the normalizer merges them. Each feed keeps a bounded seen set sized at
+`max(256, 2 × observed window)` with a sliding 48-hour TTL. Published ids are
+persisted in the `seen` bucket for 48 hours under `fetch.<sha256(rawID)>`, so a
+restart does not republish. On a cold start an RSS item is published only when
+`published_at` is within 48 hours; an undated item is accepted once. The
+20-minute JetStream dedupe window is a fast path for a crash/restart, not the
+correctness guarantee; the KV record and the downstream Normalizer are.
+
+**GDELT consumes GKG by default.** GKG is document-centric and carries both
+themes and extracted locations, which is what a raw article needs; the export
+family (CAMEO events with action coordinates) is supported with
+`--gdelt-file=export` and covered by fixtures; its event roots are mapped onto
+the same theme allowlist (14 → protest, 13/15/16/17 → military, 18/19/20 →
+armed conflict) so one policy works for both. Both are filtered by a domain
+allowlist, a required coordinate and a theme-prefix allowlist, capped at 300
+items per file, and marked `burst: true` so the wire can collapse them. GDELT
+titles come from the GKG `<PAGE_TITLE>` extras, the location pick is the first
+entry at the highest precision (GDELT's salience order), and GDELT is a
+separate agent with its own goroutine and backoff: it can never block RSS. A
+404 on a file named in `lastupdate.txt` (published before the bytes land) is a
+transient backoff, never a quarantine.
+
+**Hazards publish to `article.raw.priority`, keyed by revision.** USGS, GDACS
+and EONET each get their own schedule and backoff in one hazard agent. The seen
+key and msg id include the event revision (USGS `updated`, GDACS episode id +
+alert level, EONET latest geometry date, ReliefWeb `date.changed`) while
+`hints.event_id` stays stable, so an escalation or a revised magnitude is a new
+message. Items older than 48 hours are not backfilled on a cold start. GDACS
+severity is `max(alert-level map, alert score / 3)`. ReliefWeb is implemented
+against API v2 but ships disabled: anonymous requests return HTTP 403
+("You are not using an approved appname"); enabling it needs
+`DOR_RELIEFWEB_APPNAME` and a terms review.
+
+**Record mode is a raw-stream tee with its own writer goroutine.**
+`--record-dir` writes `<dir>/YYYY-MM-DD/HH.pb.gz`: a `DORREC\0\1` header and
+length-delimited `RecordFrame` protobufs inside one gzip stream. Frames are
+enqueued on a bounded channel and dropped (counted separately from disk errors)
+rather than blocking a fetcher; the writer flushes every 64 frames **or every
+5 seconds**, and a `Record` after `Close` is a no-op. A publish that JetStream
+acknowledges as a duplicate is not recorded (`Emitter.PublishAck` surfaces
+`PubAck.Duplicate`). A restart opens a new `HH-N.pb.gz` segment instead of
+appending, so a crash-truncated tail never corrupts later data; the reader
+orders segments by hour then numeric suffix. The reader is
+`internal/record.Reader`; the format is `docs/record-format.md`.
+
+**One new KV bucket, `source_health` (7-day TTL).** It is provisioned by the bus
+owner with the other buckets. Health records restore `last_success`,
+`items_total`, the current-hour counters and the metrics on startup, so a
+restart does not reset them. Per-source Prometheus series are accepted because
+the ticket needs per-feed health and the cardinality is bounded by the ~300-row
+seed list; the metric labels are source ids, never URLs or article ids.
+
+**GDELT's FIPS country code is not mapped to ISO.** `RawHints.country` carries
+only ISO 3166 codes; GDELT's location country code is FIPS 10-4 (`BG` is
+Bangladesh, `PO` is Portugal), so it stays out of the hint and the full place
+name travels in `RawHints.place` instead. Hazards put the upstream place name
+in `place` and an ISO3 code in `country` when one exists (GDACS, ReliefWeb).
+
+**Proto additions are append-only at the end of `dor.proto`.** `SourceKind`,
+`RawHints`, `RawArticle` and `RecordFrame` are new messages/enum values; no
+existing tag moved. `RawHints` gained `place`, `magnitude_unit` and `revision`
+in fixup 1 (tags 12, 11, 13). Goldens exist on both sides.
+
 
 
 ## Normalizer and store (M1·2)

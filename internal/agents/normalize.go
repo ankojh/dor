@@ -352,7 +352,7 @@ func simHashKeys(id string, h uint64) []string {
 	keys := make([]string, 0, simHashBands)
 	for band := 0; band < simHashBands; band++ {
 		part := uint16(h >> uint(band*16))
-		keys = append(keys, fmt.Sprintf("norm:sim:%d:%04x:%s", band, part, id))
+		keys = append(keys, fmt.Sprintf("norm.sim.%d.%04x.%s", band, part, id))
 	}
 	return keys
 }
@@ -362,7 +362,7 @@ func (n *normalizer) duplicate(ctx context.Context, clean *dorv1.Article) string
 	if kv == nil {
 		return ""
 	}
-	if _, err := kv.Get(ctx, "norm:exact:"+clean.Id); err == nil {
+	if _, err := kv.Get(ctx, "norm.exact."+clean.Id); err == nil {
 		return "exact"
 	} else if !isKVNotFound(err) {
 		n.metrics.dedupeErrors.Inc()
@@ -374,7 +374,7 @@ func (n *normalizer) duplicate(ctx context.Context, clean *dorv1.Article) string
 	}
 	sim := SimHash(text)
 	for _, key := range simHashKeys(clean.Id, sim) {
-		prefix := key[:strings.LastIndexByte(key, ':')+1]
+		prefix := key[:strings.LastIndexByte(key, '.')+1]
 		lister, err := kv.ListKeysFiltered(ctx, prefix+"*")
 		if err != nil {
 			if !isKVNotFound(err) {
@@ -406,7 +406,7 @@ func (n *normalizer) remember(ctx context.Context, clean *dorv1.Article) {
 	if kv == nil {
 		return
 	}
-	if _, err := kv.Put(ctx, "norm:exact:"+clean.Id, []byte{1}); err != nil {
+	if _, err := kv.Put(ctx, "norm.exact."+clean.Id, []byte{1}); err != nil {
 		n.metrics.dedupeErrors.Inc()
 		n.log.Warn("normalizer: exact dedupe write failed", "err", err)
 	}

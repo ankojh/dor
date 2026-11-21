@@ -8,13 +8,17 @@ of truth for how the repo is wired.
 
 ```
 cmd/dor/                 one binary: dor run --agents=all|a,b,c
-internal/agents/         agent interface, Base, registry, runner, metrics, tracing
-                         and the dev echo agent
+internal/agents/         agent interface, Base, registry, runner, metrics, tracing,
+                         the dev echo agent and the rss/gdelt/hazard fetchers
 internal/bus/            embedded NATS, subjects, stream/KV, durable consumers,
                          idempotent publish
 internal/decide/         decide() interface, jev client, question builders
 internal/llm/            Claude client, prompts, structured outputs
 internal/budget/         model token buckets, daily spend cap, shed order
+internal/sources/        loader and validation for deploy/sources/sources.yaml
+internal/fetch/          source adapters (RSS/Atom, GDELT, USGS, GDACS, EONET,
+                         ReliefWeb), polite HTTP, robots, host budget, health
+internal/record/         record mode: raw-stream writer and reader
 internal/geo/            GeoNames, Photon, H3                        (later)
 internal/store/          pgx pool, migrations runner, batch writer
 migrations/              embedded up/down SQL (schema_migrations)
@@ -28,6 +32,7 @@ web/                     Vite + SolidJS + TypeScript
   src/ui/                wire, panels, alerts (later)
   src/gen/               generated TypeScript protobuf (do not edit)
 tools/probe/             dev publisher/counter used by test-echo-restart
+tools/feedcheck/         live source verification (writes the seed-list report)
 tools/proto-check.sh     proto drift check used by CI
 scripts/                 dev/acceptance scripts (test-echo-restart.sh)
 eval/                    labelled sets, labelling CLI, eval runner
@@ -57,6 +62,7 @@ before implementation.
 | `make web-dev` | Vite dev server on 127.0.0.1:5173 |
 | `make web-lint` / `web-format-check` / `web-typecheck` / `web-test` / `web-build` | web gates |
 | `make test-echo-restart` | kill -9 the echo agent mid-stream and verify no duplicates |
+| `make sources-check` | fetch and verify every source in the seed list (network; JSON to stdout) |
 | `make ci` | exactly what `.github/workflows/ci.yml` runs |
 
 `make ci` is the local evidence for a green CI. There is no remote yet.
@@ -91,6 +97,17 @@ Every flag has a `DOR_*` fallback. An explicit flag wins.
 | `--max-ack-pending` | `DOR_MAX_ACK_PENDING` | `256` |
 | `--provision` | `DOR_PROVISION` | `false` (embedded mode always provisions) |
 | `--shutdown-timeout` | `DOR_SHUTDOWN_TIMEOUT` | `45s` |
+| `--sources-file` | `DOR_SOURCES_FILE` | `deploy/sources/sources.yaml` |
+| `--record-dir` | `DOR_RECORD_DIR` | empty → record mode off |
+| `--http-user-agent` | `DOR_HTTP_USER_AGENT` | `DorBot/0.1 (+https://github.com/ankojh/dor)` |
+| `--rss-shards` | `DOR_RSS_SHARDS` | `3` |
+| `--rss-shard` | `DOR_RSS_SHARD` | `-1` (all shards in this process) |
+| `--rss-concurrency` | `DOR_RSS_CONCURRENCY` | `8` |
+| `--gdelt-file` | `DOR_GDELT_FILE` | `gkg` (`export` selects CAMEO events) |
+| `--gdelt-max-items` | `DOR_GDELT_MAX_ITEMS` | `300` |
+| `--gdelt-extra-domains` | `DOR_GDELT_EXTRA_DOMAINS` | empty |
+| `--reliefweb-appname` | `DOR_RELIEFWEB_APPNAME` | empty (adapter disabled) |
+
 | `--db-url` | `DOR_DATABASE_URL` | `postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable` (empty/off disables) |
 | `--db-max-conns` | `DOR_DB_MAX_CONNECTIONS` | `10` |
 
@@ -164,6 +181,18 @@ KV buckets (created by the provisioning owner):
 | `budgets` | 1 h | short-lived token buckets only; never daily spend counters |
 | `spend` | 48 h | daily model spend, keyed by UTC day (`daily.YYYY-MM-DD`) |
 | `live_state` | 48 h | hot stories/links for snapshot rebuilds |
+| `source_health` | 7 d | one JSON health record per source (state, last success, counters, validators) |
+
+`budgets` also holds the per-host fetch token buckets (`host.<host>`, host
+sanitized to the NATS key charset), shared by every replica. `seen` also holds
+the fetch stage's published raw ids (`fetch.<sha256>`, 48 h) so a restart does
+not republish. See `docs/sources.md` for the fetch rules and metrics and
+`docs/record-format.md` for `--record-dir`.
+
+Feed sharding is `FNV-1a(feed id) mod --rss-shards`; a replica selects one
+shard with `--rss-shard`/`DOR_RSS_SHARD` (`-1` runs all shards in one process).
+**Stop all replicas to change `--rss-shards`**: the shard map is stable only
+for a fixed N.
 
 ## Adding an agent
 

@@ -1,0 +1,178 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:geo="http://www.w3.org/2003/01/geo/wgs84_pos#" xmlns:gdacs="http://www.gdacs.org" xmlns:glide="http://glidenumber.net" xmlns:georss="http://www.georss.org/georss" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>GDACS RSS information</title>
+    <link>http://www.gdacs.org/</link>
+    <copyright>public domain</copyright>
+    <description>Near real-time notification about natural disaster with a potential humanitarian impact</description>
+    <managingEditor>stefano.paris@ext.ec.europa.eu</managingEditor>
+    <!--Records number 353-->
+    <!--Start 11/21/2026 6:12:45 AM-->
+    <!--=Start 11/21/2026 6:12:45 AM-->
+    <webMaster>stefano.paris@ext.ec.europa.eu</webMaster>
+    <pubDate>Sat, 21 Nov 2026 05:12:45 GMT</pubDate>
+    <atom:link href="http://www.gdacs.org/xml/rss_7d.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>Green earthquake (Magnitude 4.9M, Depth:10km) in Reykjanes Ridge 21/11/2026 02:24 UTC, No people affected in 100km.</title>
+      <description>On 11/21/2026 2:24:37 AM, an earthquake occurred in Reykjanes Ridge potentially affecting No people affected in 100km. The earthquake had Magnitude 4.9M, Depth:10km.</description>
+      <enclosure type="image/png" length="1" url="https://www.gdacs.org/contentdata/resources/imgtemp/gdacs/eq/eq1747873_1.png" />
+      <gdacs:temporary>false</gdacs:temporary>
+      <link>http://www.gdacs.org/report.aspx?eventtype=EQ&amp;eventid=1578488</link>
+      <pubDate>Sat, 21 Nov 2026 02:43:23 GMT</pubDate>
+      <gdacs:dateadded>Sat, 21 Nov 2026 02:43:23 GMT</gdacs:dateadded>
+      <gdacs:datemodified>Sat, 21 Nov 2026 02:43:23 GMT</gdacs:datemodified>
+      <gdacs:iscurrent>true</gdacs:iscurrent>
+      <gdacs:fromdate>Sat, 21 Nov 2026 02:24:37 GMT</gdacs:fromdate>
+      <gdacs:todate>Sat, 21 Nov 2026 02:24:37 GMT</gdacs:todate>
+      <gdacs:durationinweek>0</gdacs:durationinweek>
+      <gdacs:year>2026</gdacs:year>
+      <dc:subject>EQ1</dc:subject>
+      <guid isPermaLink="false">EQ1578488</guid>
+      <geo:Point>
+        <geo:lat>58.5457</geo:lat>
+        <geo:long>-31.857</geo:long>
+      </geo:Point>
+      <!--gdacs:bbox format = lonmin lonmax latmin latmax-->
+      <gdacs:bbox>-35.857 -27.857 54.5457 62.5457</gdacs:bbox>
+      <georss:point>58.5457 -31.857</georss:point>
+      <gdacs:cap>https://www.gdacs.org/contentdata/resources/EQ/1578488/cap_1578488.xml</gdacs:cap>
+      <gdacs:icon>http://www.gdacs.org/Images/gdacs_icons/alerts/Green/EQ.png</gdacs:icon>
+      <gdacs:version>1</gdacs:version>
+      <gdacs:eventtype>EQ</gdacs:eventtype>
+      <gdacs:alertlevel>Green</gdacs:alertlevel>
+      <gdacs:alertscore>0</gdacs:alertscore>
+      <gdacs:episodealertlevel>Green</gdacs:episodealertlevel>
+      <gdacs:episodealertscore>1</gdacs:episodealertscore>
+      <gdacs:eventname />
+      <gdacs:eventid>1578488</gdacs:eventid>
+      <gdacs:episodeid>1747873</gdacs:episodeid>
+      <gdacs:calculationtype>earthquakeonly</gdacs:calculationtype>
+      <gdacs:severity unit="M" value="4.9">Magnitude 4.9M, Depth:10km</gdacs:severity>
+      <gdacs:population unit="in MMI -" value="0" />
+      <gdacs:vulnerability value="1.3145341380124" />
+      <gdacs:iso3 />
+      <gdacs:country>Reykjanes Ridge</gdacs:country>
+      <gdacs:glide />
+      <gdacs:mapimage />
+      <gdacs:maplink />
+      <gdacs:gtsimage />
+      <gdacs:gtslink />
+      <gdacs:resources>
+        <gdacs:resource id="event_rss" version="0" source="EC-JRC" url="http://www.gdacs.org//datareport/resources/EQ/1578488/rss_1578488.xml" type="rss">
+          <gdacs:title>Event in rss format</gdacs:title>
+          <gdacs:description>Joint Research Center of the European Commission</gdacs:description>
+          <gdacs:acknowledgements>Copyright notice: European Union (CC BY 4.0), reuse is allowed, provided appropriate credit to GDACS is given.</gdacs:acknowledgements>
+          <gdacs:accesslevel>Public</gdacs:accesslevel>
+        </gdacs:resource>
+      </gdacs:resources>
+    </item>
+    <item>
+      <title>Green earthquake (Magnitude 4.9M, Depth:10km) in Reykjanes Ridge 21/11/2026 01:26 UTC, No people affected in 100km.</title>
+      <description>On 11/21/2026 1:26:19 AM, an earthquake occurred in Reykjanes Ridge potentially affecting No people affected in 100km. The earthquake had Magnitude 4.9M, Depth:10km.</description>
+      <enclosure type="image/png" length="1" url="https://www.gdacs.org/contentdata/resources/imgtemp/gdacs/eq/eq1747858_1.png" />
+      <gdacs:temporary>false</gdacs:temporary>
+      <link>http://www.gdacs.org/report.aspx?eventtype=EQ&amp;eventid=1578474</link>
+      <pubDate>Sat, 21 Nov 2026 01:49:22 GMT</pubDate>
+      <gdacs:dateadded>Sat, 21 Nov 2026 01:49:22 GMT</gdacs:dateadded>
+      <gdacs:datemodified>Sat, 21 Nov 2026 01:49:22 GMT</gdacs:datemodified>
+      <gdacs:iscurrent>true</gdacs:iscurrent>
+      <gdacs:fromdate>Sat, 21 Nov 2026 01:26:19 GMT</gdacs:fromdate>
+      <gdacs:todate>Sat, 21 Nov 2026 01:26:19 GMT</gdacs:todate>
+      <gdacs:durationinweek>0</gdacs:durationinweek>
+      <gdacs:year>2026</gdacs:year>
+      <dc:subject>EQ1</dc:subject>
+      <guid isPermaLink="false">EQ1578474</guid>
+      <geo:Point>
+        <geo:lat>58.3017</geo:lat>
+        <geo:long>-31.7606</geo:long>
+      </geo:Point>
+      <!--gdacs:bbox format = lonmin lonmax latmin latmax-->
+      <gdacs:bbox>-35.7606 -27.7606 54.3017 62.3017</gdacs:bbox>
+      <georss:point>58.3017 -31.7606</georss:point>
+      <gdacs:cap>https://www.gdacs.org/contentdata/resources/EQ/1578474/cap_1578474.xml</gdacs:cap>
+      <gdacs:icon>http://www.gdacs.org/Images/gdacs_icons/alerts/Green/EQ.png</gdacs:icon>
+      <gdacs:version>1</gdacs:version>
+      <gdacs:eventtype>EQ</gdacs:eventtype>
+      <gdacs:alertlevel>Green</gdacs:alertlevel>
+      <gdacs:alertscore>0</gdacs:alertscore>
+      <gdacs:episodealertlevel>Green</gdacs:episodealertlevel>
+      <gdacs:episodealertscore>1</gdacs:episodealertscore>
+      <gdacs:eventname />
+      <gdacs:eventid>1578474</gdacs:eventid>
+      <gdacs:episodeid>1747858</gdacs:episodeid>
+      <gdacs:calculationtype>earthquakeonly</gdacs:calculationtype>
+      <gdacs:severity unit="M" value="4.9">Magnitude 4.9M, Depth:10km</gdacs:severity>
+      <gdacs:population unit="in MMI -" value="0" />
+      <gdacs:vulnerability value="1.3145341380124" />
+      <gdacs:iso3 />
+      <gdacs:country>Reykjanes Ridge</gdacs:country>
+      <gdacs:glide />
+      <gdacs:mapimage />
+      <gdacs:maplink />
+      <gdacs:gtsimage />
+      <gdacs:gtslink />
+      <gdacs:resources>
+        <gdacs:resource id="event_rss" version="0" source="EC-JRC" url="http://www.gdacs.org//datareport/resources/EQ/1578474/rss_1578474.xml" type="rss">
+          <gdacs:title>Event in rss format</gdacs:title>
+          <gdacs:description>Joint Research Center of the European Commission</gdacs:description>
+          <gdacs:acknowledgements>Copyright notice: European Union (CC BY 4.0), reuse is allowed, provided appropriate credit to GDACS is given.</gdacs:acknowledgements>
+          <gdacs:accesslevel>Public</gdacs:accesslevel>
+        </gdacs:resource>
+      </gdacs:resources>
+    </item>
+    <item>
+      <title>Green earthquake (Magnitude 4.7M, Depth:120.01km) in Chile 21/11/2026 01:24 UTC, 160 thousand in 100km.</title>
+      <description>On 11/21/2026 1:24:09 AM, an earthquake occurred in Chile potentially affecting 160 thousand in 100km. The earthquake had Magnitude 4.7M, Depth:120.01km.</description>
+      <enclosure type="image/png" length="1" url="https://www.gdacs.org/contentdata/resources/imgtemp/gdacs/eq/eq1747856_1.png" />
+      <gdacs:temporary>false</gdacs:temporary>
+      <link>http://www.gdacs.org/report.aspx?eventtype=EQ&amp;eventid=1578473</link>
+      <pubDate>Sat, 21 Nov 2026 01:35:19 GMT</pubDate>
+      <gdacs:dateadded>Sat, 21 Nov 2026 01:35:19 GMT</gdacs:dateadded>
+      <gdacs:datemodified>Sat, 21 Nov 2026 02:04:28 GMT</gdacs:datemodified>
+      <gdacs:iscurrent>true</gdacs:iscurrent>
+      <gdacs:fromdate>Sat, 21 Nov 2026 01:24:09 GMT</gdacs:fromdate>
+      <gdacs:todate>Sat, 21 Nov 2026 01:24:09 GMT</gdacs:todate>
+      <gdacs:durationinweek>0</gdacs:durationinweek>
+      <gdacs:year>2026</gdacs:year>
+      <dc:subject>EQ1</dc:subject>
+      <guid isPermaLink="false">EQ1578473</guid>
+      <geo:Point>
+        <geo:lat>-22.2307</geo:lat>
+        <geo:long>-68.6409</geo:long>
+      </geo:Point>
+      <!--gdacs:bbox format = lonmin lonmax latmin latmax-->
+      <gdacs:bbox>-72.6409 -64.6409 -26.2307 -18.2307</gdacs:bbox>
+      <georss:point>-22.2307 -68.6409</georss:point>
+      <gdacs:cap>https://www.gdacs.org/contentdata/resources/EQ/1578473/cap_1578473.xml</gdacs:cap>
+      <gdacs:icon>http://www.gdacs.org/Images/gdacs_icons/alerts/Green/EQ.png</gdacs:icon>
+      <gdacs:version>1</gdacs:version>
+      <gdacs:eventtype>EQ</gdacs:eventtype>
+      <gdacs:alertlevel>Green</gdacs:alertlevel>
+      <gdacs:alertscore>0</gdacs:alertscore>
+      <gdacs:episodealertlevel>Green</gdacs:episodealertlevel>
+      <gdacs:episodealertscore>1</gdacs:episodealertscore>
+      <gdacs:eventname />
+      <gdacs:eventid>1578473</gdacs:eventid>
+      <gdacs:episodeid>1747856</gdacs:episodeid>
+      <gdacs:calculationtype>earthquakeonly</gdacs:calculationtype>
+      <gdacs:severity unit="M" value="4.7">Magnitude 4.7M, Depth:120km</gdacs:severity>
+      <gdacs:population unit="in MMI III" value="150318">150 thousand in MMI III</gdacs:population>
+      <gdacs:vulnerability value="1.3145341380124" />
+      <gdacs:iso3>CHL</gdacs:iso3>
+      <gdacs:country>Chile</gdacs:country>
+      <gdacs:glide />
+      <gdacs:mapimage />
+      <gdacs:maplink />
+      <gdacs:gtsimage />
+      <gdacs:gtslink />
+      <gdacs:resources>
+        <gdacs:resource id="event_rss" version="0" source="EC-JRC" url="http://www.gdacs.org//datareport/resources/EQ/1578473/rss_1578473.xml" type="rss">
+          <gdacs:title>Event in rss format</gdacs:title>
+          <gdacs:description>Joint Research Center of the European Commission</gdacs:description>
+          <gdacs:acknowledgements>Copyright notice: European Union (CC BY 4.0), reuse is allowed, provided appropriate credit to GDACS is given.</gdacs:acknowledgements>
+          <gdacs:accesslevel>Public</gdacs:accesslevel>
+        </gdacs:resource>
+      </gdacs:resources>
+    </item>
+  </channel>
+</rss>

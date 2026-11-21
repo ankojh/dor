@@ -22,6 +22,7 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 const publisherCheckpointKey = "checkpoint"
@@ -46,13 +47,13 @@ type publisherCheckpoint struct {
 }
 
 type publisherBatch struct {
+	record    *publication.Record
 	data      []byte
 	deltas    []*dorv1.Delta
 	waiters   []chan struct{}
 	reserved  bool
 	published bool
 	streamSeq uint64
-	snapshot  []byte
 	revisions map[string]uint64
 	scores    map[string]*dorv1.MatchScore
 }
@@ -104,35 +105,75 @@ func (c *publisherCore) accept(ctx context.Context, apply func()) error {
 // Revisions are per entity AND source stream; a newer unrelated entity never
 // suppresses an older unseen one. Separate clean/placed keys retain precedence.
 func (c *publisherCore) acceptInput(ctx context.Context, msg *Message, key string, apply func()) error {
-	c.ingestMu.Lock()
-	accepted := true
 	if msg != nil && msg.StreamSequence > 0 {
 		key = bus.StreamForSubject(msg.Subject) + "/" + key
+	}
+	for {
+		c.ingestMu.Lock()
 		c.mu.Lock()
-		if msg.StreamSequence <= c.committedRevisions[key] {
+		if c.fenced.Load() {
 			c.mu.Unlock()
 			c.ingestMu.Unlock()
-			return nil
+			return Retry(publication.ErrFenced)
 		}
-		accepted = msg.StreamSequence > c.revisions[key]
-		if accepted {
+		accepted := true
+		if msg != nil && msg.StreamSequence > 0 {
+			if msg.StreamSequence <= c.committedRevisions[key] {
+				c.mu.Unlock()
+				c.ingestMu.Unlock()
+				return nil
+			}
+			accepted = msg.StreamSequence > c.revisions[key]
+		}
+		var credit int64
+		if accepted && msg != nil {
+			credit = int64(len(msg.Data) + 512)
+			if msg.Subject == bus.SubjectMatchScore || msg.Subject == bus.SubjectArticleClean || msg.Subject == bus.SubjectArticlePlaced {
+				_, id, _ := strings.Cut(key, ":")
+				if row := c.wireRows[id]; row != nil {
+					credit += int64(proto.Size(row))
+				}
+			}
+			if credit+1024 > c.bus.NC().MaxPayload() {
+				c.mu.Unlock()
+				c.ingestMu.Unlock()
+				return Retry(fmt.Errorf("publisher: input exceeds safe DELTA admission budget (%d bytes)", credit))
+			}
+		}
+		if c.pendingCredit > 0 && c.pendingCredit+credit+1024 > c.bus.NC().MaxPayload() {
+			pulse := c.capacity
+			c.mu.Unlock()
+			c.ingestMu.Unlock()
+			select {
+			case <-pulse:
+				continue
+			case <-ctx.Done():
+				return Retry(ctx.Err())
+			case <-c.fenceDone:
+				return Retry(publication.ErrFenced)
+			}
+		}
+		if accepted && msg != nil && msg.StreamSequence > 0 {
 			c.revisions[key] = msg.StreamSequence
 		}
 		c.mu.Unlock()
-	}
-	if accepted {
-		apply()
-	}
-	c.mu.Lock()
-	done := make(chan struct{})
-	c.waiters = append(c.waiters, done)
-	c.mu.Unlock()
-	c.ingestMu.Unlock()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return Retry(ctx.Err())
+		if accepted {
+			apply()
+		}
+		c.mu.Lock()
+		done := make(chan struct{})
+		c.waiters = append(c.waiters, done)
+		c.pendingCredit += credit
+		c.mu.Unlock()
+		c.ingestMu.Unlock()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return Retry(ctx.Err())
+		case <-c.fenceDone:
+			return Retry(publication.ErrFenced)
+		}
 	}
 }
 
@@ -144,7 +185,7 @@ func cloneScores(scores map[string]*dorv1.MatchScore) map[string]*dorv1.MatchSco
 	return result
 }
 
-func (c *publisherCore) restore(ctx context.Context) error {
+func (c *publisherCore) restoreV1(ctx context.Context) error {
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
 	kv, err := c.bus.KV(ctx, bus.KVBucketPublisher)
@@ -159,6 +200,12 @@ func (c *publisherCore) restore(ctx context.Context) error {
 		var revision uint64
 		cp = publisherCheckpoint{}
 		if getErr == nil {
+			var format struct {
+				Version int `json:"version"`
+			}
+			if json.Unmarshal(entry.Value(), &format) == nil && format.Version == 2 {
+				return errPublicationLayoutChanged
+			}
 			if err := decodePublisherCheckpoint(entry.Value(), &cp); err != nil {
 				return fmt.Errorf("publisher checkpoint: %w", err)
 			}
@@ -274,6 +321,9 @@ func (c *publisherCore) restore(ctx context.Context) error {
 		c.inflight = &publisherBatch{data: cp.Pending, deltas: batch.Deltas, reserved: true, revisions: maps.Clone(cp.PendingRevisions), scores: cloneScores(cp.PendingScores)}
 		for _, d := range batch.Deltas {
 			if row := d.GetWire(); row != nil {
+				if c.wireRows[row.ArticleId] == nil {
+					c.wireOrder = append(c.wireOrder, row.ArticleId)
+				}
 				c.wireRows[row.ArticleId] = row
 			}
 		}
@@ -290,7 +340,7 @@ func (c *publisherCore) restore(ctx context.Context) error {
 	c.fenced.Store(false)
 	// Restore before consumers or gateway startup. A pending publication is retried
 	// by the flush loop; its inputs remain unacknowledged in their source streams.
-	return c.writeSnapshotLocked(ctx)
+	return nil
 }
 
 // Upgrade recovery: the old publisher acknowledged between snapshots. Replay
@@ -371,7 +421,7 @@ func (c *publisherCore) restoreLegacy(ctx context.Context) (*dorv1.Snapshot, uin
 
 // saveCheckpoint verifies owner and CASes the whole record. A delayed old owner
 // cannot reserve or commit any subsequent sequence once a takeover wins CAS.
-func (c *publisherCore) saveCheckpoint(ctx context.Context, cp publisherCheckpoint) error {
+func (c *publisherCore) saveLegacyCheckpoint(ctx context.Context, cp publisherCheckpoint) error {
 	kv, err := c.bus.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		return err
@@ -408,7 +458,7 @@ func (c *publisherCore) saveCheckpoint(ctx context.Context, cp publisherCheckpoi
 	return nil
 }
 
-func (c *publisherCore) release(ctx context.Context) error {
+func (c *publisherCore) releaseLegacy(ctx context.Context) error {
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
 	if !c.restored {
@@ -439,103 +489,6 @@ func (c *publisherCore) release(ctx context.Context) error {
 	_, err = kv.Update(ctx, publisherCheckpointKey, data, entry.Revision())
 	c.restored = false
 	return err
-}
-
-func (c *publisherCore) flush(ctx context.Context) error {
-	c.flushMu.Lock()
-	defer c.flushMu.Unlock()
-	if !c.restored {
-		return errors.New("publisher: state not restored")
-	}
-	c.ingestMu.Lock()
-	c.mu.Lock()
-	if c.inflight == nil && (len(c.pending) > 0 || len(c.waiters) > 0) {
-		batch := &publisherBatch{waiters: c.waiters, revisions: maps.Clone(c.revisions), scores: cloneScores(c.scores)}
-		next := c.seq
-		for _, key := range c.order {
-			d := proto.Clone(c.pending[key]).(*dorv1.Delta)
-			next++
-			d.Seq = next
-			quantizeDelta(d)
-			batch.deltas = append(batch.deltas, d)
-		}
-		var err error
-		batch.data, err = proto.MarshalOptions{Deterministic: true}.Marshal(&dorv1.DeltaBatch{Deltas: batch.deltas})
-		if err != nil {
-			c.mu.Unlock()
-			c.ingestMu.Unlock()
-			return err
-		}
-		c.inflight = batch
-		c.pending, c.order, c.waiters = make(map[string]*dorv1.Delta), nil, nil
-	}
-	c.mu.Unlock()
-	c.ingestMu.Unlock()
-	batch := c.inflight
-	if batch == nil {
-		return c.saveCheckpoint(ctx, c.checkpoint)
-	}
-	if !batch.reserved {
-		cp := c.checkpoint
-		cp.Pending = batch.data
-		cp.PendingRevisions, cp.PendingScores = batch.revisions, batch.scores
-		if err := c.saveCheckpoint(ctx, cp); err != nil {
-			return err
-		}
-		batch.reserved = true
-	} else if err := c.saveCheckpoint(ctx, c.checkpoint); err != nil {
-		return err
-	}
-	if !batch.published {
-		last := c.seq
-		if len(batch.deltas) > 0 {
-			last = batch.deltas[len(batch.deltas)-1].Seq
-		}
-		id := fmt.Sprintf("delta:%d", last)
-		pubCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-		var err error
-		if len(batch.deltas) > 0 {
-			err = c.publishBatch(pubCtx, batch, id)
-		} else {
-			batch.streamSeq = c.checkpoint.StreamSeq
-		}
-		cancel()
-		if err != nil {
-			return fmt.Errorf("publisher: publish %s: %w", id, err)
-		}
-		c.mu.Lock()
-		for _, d := range batch.deltas {
-			c.applyDeltaLocked(d)
-		}
-		c.seq = last
-		snap := c.snapshotLocked()
-		c.mu.Unlock()
-		batch.snapshot, err = live.MarshalSnapshot(snap)
-		if err != nil {
-			return err
-		}
-		batch.published = true
-	}
-	// Persist the public snapshot before acknowledging the inputs. If either KV
-	// write fails, retain the exact batch and retry this commit, not its successors.
-	if err := c.writeSnapshotLocked(ctx); err != nil {
-		return err
-	}
-	cp := c.checkpoint
-	cp.Snapshot, cp.Pending, cp.StreamSeq = batch.snapshot, nil, batch.streamSeq
-	cp.Revisions, cp.Scores = batch.revisions, batch.scores
-	cp.PendingRevisions, cp.PendingScores = nil, nil
-	if err := c.saveCheckpoint(ctx, cp); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	c.committedRevisions = maps.Clone(batch.revisions)
-	c.mu.Unlock()
-	for _, done := range batch.waiters {
-		close(done)
-	}
-	c.inflight = nil
-	return nil
 }
 
 func (c *publisherCore) publishBatch(ctx context.Context, batch *publisherBatch, id string) error {
@@ -587,7 +540,10 @@ func (c *publisherCore) flushLoop(ctx context.Context, every time.Duration) {
 			if time.Now().Before(next) {
 				continue
 			}
-			if err := c.flush(ctx); err != nil {
+			started := time.Now()
+			err := c.flush(ctx)
+			c.recordFlush(err, time.Since(started))
+			if err != nil {
 				c.log.Warn("publisher: flush will retry", "err", err)
 				next = time.Now().Add(delay)
 				delay = min(delay*2, 500*time.Millisecond)
@@ -608,6 +564,9 @@ func (c *publisherCore) snapshotLoop(ctx context.Context, every time.Duration) {
 		case <-ticker.C:
 			if err := c.writeSnapshot(ctx); err != nil {
 				c.log.Warn("publisher: snapshot will retry", "err", err)
+				if c.metrics != nil {
+					c.metrics.errors.WithLabelValues("publisher-cache").Inc()
+				}
 			}
 			if err := c.pruneInputRevisions(ctx); err != nil {
 				c.log.Debug("publisher: input revision pruning deferred", "err", err)
@@ -688,11 +647,19 @@ func (c *publisherCore) snapshotLocked() *dorv1.Snapshot {
 
 func (c *publisherCore) writeSnapshot(ctx context.Context) error {
 	c.flushMu.Lock()
-	defer c.flushMu.Unlock()
-	return c.writeSnapshotLocked(ctx)
+	if c.storage == nil {
+		defer c.flushMu.Unlock()
+		return c.writeSnapshotLocked(ctx)
+	}
+	snap := c.committed.Snapshot()
+	c.flushMu.Unlock()
+	return c.storePublicSnapshot(ctx, snap)
 }
 
 func (c *publisherCore) writeSnapshotLocked(ctx context.Context) error {
+	if c.storage != nil {
+		return c.storePublicSnapshot(ctx, c.committed.Snapshot())
+	}
 	if !c.restored {
 		return errors.New("publisher: refusing snapshot before state restoration")
 	}

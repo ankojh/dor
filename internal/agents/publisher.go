@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 // PublisherAgentName is the registry name of the publisher. One publisher per
@@ -32,6 +34,10 @@ const (
 // from limiting input throughput to one event per flush.
 func NewPublisher(b *bus.Bus, metrics *Metrics, log *slog.Logger) (Agent, error) {
 	core := newPublisherCore(b, log)
+	core.metrics = metrics
+	if metrics != nil {
+		metrics.RegisterAgent(PublisherAgentName)
+	}
 
 	enrich, err := NewBase(b, metrics, log, Spec{
 		Name:    "publisher-enrich",
@@ -147,6 +153,7 @@ type publisherAgent struct {
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
+	runCtx  context.Context
 	lastErr error
 	wg      sync.WaitGroup
 }
@@ -164,12 +171,12 @@ func (p *publisherAgent) Start(ctx context.Context) error {
 		return err
 	}
 	p.startLoops(ctx)
-	if err := p.enrich.Start(ctx); err != nil {
+	if err := p.enrich.Start(p.runCtx); err != nil {
 		_ = p.Stop(ctx)
 		return err
 	}
 	for _, consumer := range []*Base{p.story, p.alert} {
-		if err := consumer.Start(ctx); err != nil {
+		if err := consumer.Start(p.runCtx); err != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = p.Stop(stopCtx)
 			stopCancel()
@@ -184,9 +191,21 @@ func (p *publisherAgent) startLoops(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	p.mu.Lock()
 	p.cancel = cancel
+	p.runCtx = runCtx
 	p.mu.Unlock()
+	p.core.onFence = func() {
+		cancel()
+		go func() {
+			ctx, done := context.WithTimeout(context.Background(), time.Second)
+			defer done()
+			for _, b := range []*Base{p.enrich, p.story, p.alert} {
+				_ = b.Stop(ctx)
+			}
+		}()
+	}
 	p.running.Store(true)
-	p.wg.Add(3)
+	p.wg.Add(4)
+	go func() { defer p.wg.Done(); p.core.compactionLoop(runCtx) }()
 	go func() {
 		defer p.wg.Done()
 		p.core.flushLoop(runCtx, defaultFlushInterval)
@@ -273,6 +292,12 @@ func (p *publisherAgent) LastError() error {
 	if p.core.fenced.Load() {
 		return fmt.Errorf("publisher: publication owner fenced")
 	}
+	p.core.errMu.Lock()
+	err := p.core.flushErr
+	p.core.errMu.Unlock()
+	if err != nil {
+		return err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.lastErr != nil {
@@ -300,18 +325,28 @@ type publisherCore struct {
 	log *slog.Logger
 	now func() time.Time
 
-	flushMu     sync.Mutex // serialises flush, ownership and checkpoint writes
-	ingestMu    sync.Mutex // seals inputs and their acknowledgement barriers together
-	checkpoint  publisherCheckpoint
-	revision    uint64
-	owner       string
-	restored    bool
-	inflight    *publisherBatch
-	lastChunkGC time.Time
-	fenced      atomic.Bool
-	waiters     []chan struct{}
-	publish     func(context.Context, []byte, string) error
-	mu          sync.Mutex // guards pending and live state
+	flushMu       sync.Mutex // serialises flush, ownership and checkpoint writes
+	ingestMu      sync.Mutex // seals inputs and their acknowledgement barriers together
+	checkpoint    publisherCheckpoint
+	revision      uint64
+	owner         string
+	restored      bool
+	inflight      *publisherBatch
+	lastChunkGC   time.Time
+	fenced        atomic.Bool
+	storage       *publication.Store
+	committed     *publication.State
+	scoreOrder    []string
+	fenceDone     chan struct{}
+	onFence       func()
+	errMu         sync.Mutex
+	flushErr      error
+	metrics       *Metrics
+	waiters       []chan struct{}
+	pendingCredit int64
+	capacity      chan struct{}
+	publish       func(context.Context, []byte, string) error
+	mu            sync.Mutex // guards pending and live state
 
 	seq                uint64
 	pending            map[string]*dorv1.Delta
@@ -343,6 +378,7 @@ func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
 		committedRevisions: make(map[string]uint64),
 		scores:             make(map[string]*dorv1.MatchScore),
 		placed:             make(map[string]bool),
+		capacity:           make(chan struct{}),
 	}
 }
 
@@ -424,6 +460,9 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 		c.wireOrder = c.wireOrder[1:]
 		delete(c.wireRows, old)
 		delete(c.scores, old)
+		if i := slices.Index(c.scoreOrder, old); i >= 0 {
+			c.scoreOrder = slices.Delete(c.scoreOrder, i, i+1)
+		}
 		delete(c.placed, old)
 	}
 	c.mu.Unlock()
@@ -474,13 +513,27 @@ func (c *publisherCore) onMatchScore(score *dorv1.MatchScore) {
 		return
 	}
 	c.mu.Lock()
+	if c.scores[score.ArticleId] == nil {
+		c.scoreOrder = append(c.scoreOrder, score.ArticleId)
+	}
 	c.scores[score.ArticleId] = proto.Clone(score).(*dorv1.MatchScore)
-	if len(c.scores) > 1500 {
-		for id := range c.scores {
-			if id != score.ArticleId {
-				delete(c.scores, id)
-				break
-			}
+	// Bound pending pre-wire scores separately from active wire scores. Evict
+	// oldest pending IDs deterministically; active score updates cannot randomly
+	// erase an unrelated article still waiting for its first wire row.
+	pending := 0
+	for _, id := range c.scoreOrder {
+		if c.wireRows[id] == nil {
+			pending++
+		}
+	}
+	for i := 0; pending > 1500 && i < len(c.scoreOrder); {
+		id := c.scoreOrder[i]
+		if c.wireRows[id] == nil {
+			delete(c.scores, id)
+			c.scoreOrder = slices.Delete(c.scoreOrder, i, i+1)
+			pending--
+		} else {
+			i++
 		}
 	}
 	row, ok := c.wireRows[score.ArticleId]

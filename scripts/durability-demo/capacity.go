@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,7 +8,9 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 	"google.golang.org/protobuf/proto"
+	"sort"
 )
 
 // capacityReport extends the copied rows to the planned presentation load. This
@@ -65,44 +65,22 @@ func capacityReport(b *bus.Bus, original *dorv1.Snapshot) error {
 		}
 		scores[row.ArticleId] = &dorv1.MatchScore{ArticleId: row.ArticleId, Scores: map[string]float32{"capacity-prompt": .8}}
 	}
-	record := map[string]any{"snapshot": stored, "stream_seq": 1, "revisions": revisions, "scores": scores, "owner": "", "lease_until": 0}
-	encode := func(value any) ([]byte, error) {
-		data, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		var out bytes.Buffer
-		w, err := gzip.NewWriterLevel(&out, gzip.BestSpeed)
-		if err != nil {
-			return nil, err
-		}
-		if _, err = w.Write(data); err != nil {
-			return nil, err
-		}
-		if err = w.Close(); err != nil {
-			return nil, err
-		}
-		return out.Bytes(), nil
+	state := publication.NewState(s)
+	state.Revisions, state.Scores = revisions, scores
+	for id := range scores {
+		state.ScoreOrder = append(state.ScoreOrder, id)
 	}
-	checkpoint, err := encode(record)
+	sort.Strings(state.ScoreOrder)
+	base, err := publication.Encode(state)
 	if err != nil {
 		return err
 	}
-	rootBytes := len(checkpoint)
-	chunks := 0
-	if int64(rootBytes)+1024 > b.NC().MaxPayload() {
-		hash := fmt.Sprintf("%x", sha256.Sum256(checkpoint))
-		var keys []string
-		for offset := 0; offset < len(checkpoint); offset += 256 * 1024 {
-			keys = append(keys, fmt.Sprintf("chunk.%s.%d", hash, len(keys)))
-		}
-		chunks = len(keys)
-		root, err := encode(map[string]any{"owner": "capacity-owner", "lease_until": 123456789, "chunks": keys, "hash": hash, "size": len(checkpoint)})
-		if err != nil {
-			return err
-		}
-		rootBytes = len(root)
+	count := (len(base) + publication.ChunkSize - 1) / publication.ChunkSize
+	blob := publication.Blob{ID: "0123456789abcdefghijkl", Hash: fmt.Sprintf("%x", sha256.Sum256(base)), Size: len(base), Count: count}
+	root, err := json.Marshal(publication.Root{Version: 2, Owner: "capacity-owner", Base: publication.Entry{Blob: blob}})
+	if err != nil {
+		return err
 	}
-	fmt.Printf("CAPACITY stories=%d links=%d wire=%d raw_proto_bytes=%d snapshot_stored_bytes=%d snapshot_headroom_bytes=%d revisions=%d checkpoint_content_bytes=%d root_bytes=%d chunks=%d max_chunk_bytes=%d\n", len(s.Stories), len(s.Links), len(s.RecentWire), len(raw), len(stored), b.NC().MaxPayload()-int64(len(stored)), len(revisions), len(checkpoint), rootBytes, chunks, 256*1024)
+	fmt.Printf("CAPACITY_V2 stories=%d links=%d wire=%d raw_proto_bytes=%d snapshot_stored_bytes=%d snapshot_headroom_bytes=%d revisions=%d base_content_bytes=%d root_bytes=%d chunks=%d max_chunk_bytes=%d\n", len(s.Stories), len(s.Links), len(s.RecentWire), len(raw), len(stored), b.NC().MaxPayload()-int64(len(stored)), len(revisions), len(base), len(root), count, publication.ChunkSize)
 	return nil
 }

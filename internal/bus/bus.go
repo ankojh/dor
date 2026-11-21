@@ -390,11 +390,29 @@ func kvBuckets() []kvSpec {
 
 func (b *Bus) provisionKV(ctx context.Context) error {
 	for _, spec := range kvBuckets() {
+		var maxBytes int64
+		if spec.name == KVBucketPublisher {
+			maxBytes = 1 << 30
+			// Never introduce a lower quota against an already overfull legacy
+			// checkpoint bucket. Leave its policy/data intact for offline recovery.
+			if stream, err := b.js.Stream(ctx, "KV_"+spec.name); err == nil {
+				info, err := stream.Info(ctx)
+				if err != nil {
+					return err
+				}
+				if info.Config.MaxBytes != maxBytes && info.State.Bytes > uint64(maxBytes*3/4) {
+					return fmt.Errorf("bus: publisher bucket uses %d bytes; offline migration/cleanup must establish headroom before applying %d-byte quota (existing policy unchanged)", info.State.Bytes, maxBytes)
+				}
+			} else if !errors.Is(err, jetstream.ErrStreamNotFound) {
+				return err
+			}
+		}
 		kv, err := b.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-			Bucket:  spec.name,
-			History: 1,
-			TTL:     spec.ttl,
-			Storage: jetstream.FileStorage,
+			Bucket:   spec.name,
+			History:  1,
+			TTL:      spec.ttl,
+			Storage:  jetstream.FileStorage,
+			MaxBytes: maxBytes,
 		})
 		if err != nil {
 			return fmt.Errorf("bus: provision kv %s: %w", spec.name, err)

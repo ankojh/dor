@@ -16,6 +16,7 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
@@ -210,14 +211,12 @@ func main() {
 	publish("durability-demo-2")
 	publish("durability-demo-3")
 	time.Sleep(1300 * time.Millisecond)
-	e, err := kv.Get(ctx, bus.KVLiveStateSnapshotKey)
+	during, err := publication.Snapshot(ctx, checkpointKV, kv)
 	must(err)
-	var during dorv1.Snapshot
-	must(live.UnmarshalSnapshot(e.Value(), &during))
 	if during.Seq != 1 {
 		panic("advanced failed publish watermark")
 	}
-	fmt.Printf("INJECTED_FAILURE snapshot_seq=%d stable=true\n", during.Seq)
+	fmt.Printf("INJECTED_FAILURE committed_seq=%d stable=true\n", during.Seq)
 	_, err = b.JS().UpdateStream(ctx, original)
 	must(err)
 	readUntil(3)

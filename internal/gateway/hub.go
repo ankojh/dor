@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
-	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 const (
@@ -43,6 +43,10 @@ type hub struct {
 	snapVal      *dorv1.Snapshot
 	snapSeq      uint64
 	snapAt       time.Time
+	snapLoad     chan struct{}
+	snapErr      error
+	snapRetryAt  time.Time
+	snapFailures int
 	readSnapshot func(context.Context) (*dorv1.Snapshot, error) // injectable KV read
 }
 
@@ -230,6 +234,7 @@ func (h *hub) resume(c *client, lastSeq uint64) {
 }
 
 func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reason string) {
+	forceSnapshot := reason != ""
 	for {
 		if ctx.Err() != nil || c.closed.Load() {
 			return
@@ -250,11 +255,17 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 				h.seq = snap.Seq
 			}
 			from := lastSeq + 1
-			snapshotNeeded := lastSeq == 0 || lastSeq > h.seq
+			snapshotNeeded := forceSnapshot || lastSeq == 0 || lastSeq > h.seq
 			deltas, covered := h.sinceLocked(from)
 			if !snapshotNeeded && !covered {
 				snapshotNeeded = true
 				reason = "client behind the replay ring"
+			}
+			// Coverage alone is insufficient: the bounded socket queue must hold
+			// the replay. Escalate now instead of retrying the same large range.
+			if !snapshotNeeded && len(deltas) > replayChunk*(cap(c.send)-2) {
+				snapshotNeeded = true
+				reason = "replay exceeds client queue"
 			}
 			if snapshotNeeded {
 				from = snap.Seq + 1 // seq zero is a real baseline, never a replay sentinel
@@ -306,9 +317,11 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 			h.mu.Unlock()
 			// Cache might predate the ring; retry from publisher state, without sending
 			// an incomplete snapshot or silently declaring this client caught up.
-			h.snapMu.Lock()
-			h.snapAt = time.Time{}
-			h.snapMu.Unlock()
+			forceSnapshot = true
+			if reason == "" {
+				reason = "snapshot tail is unavailable"
+			}
+			h.requestSnapshotAfter(snap.Seq)
 		}
 		select {
 		case <-ctx.Done():
@@ -316,6 +329,16 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// A delayed client cannot invalidate a newer snapshot fetched by another
+// recovery. Reload rate is shared by the hub, rather than multiplied by clients.
+func (h *hub) requestSnapshotAfter(seq uint64) {
+	h.snapMu.Lock()
+	if h.snapSeq <= seq {
+		h.snapAt = time.Time{}
+	}
+	h.snapMu.Unlock()
 }
 
 // sinceLocked validates every sequence through the tail, not just the first.
@@ -343,14 +366,58 @@ func (h *hub) sinceLocked(from uint64) ([]*dorv1.Delta, bool) {
 // loadSnapshot returns only a successfully decoded publisher snapshot. Missing
 // keys, read failures and corrupt bytes leave clients waiting for recovery.
 func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error) {
-	h.snapMu.Lock()
-	if h.snapVal != nil && time.Since(h.snapAt) < snapshotTTL {
-		data, snap := append([]byte(nil), h.snapBytes...), h.snapVal
+	for {
+		h.snapMu.Lock()
+		if h.snapVal != nil && time.Since(h.snapAt) < snapshotTTL {
+			data, snap := append([]byte(nil), h.snapBytes...), h.snapVal
+			h.snapMu.Unlock()
+			return data, snap, nil
+		}
+		if loading := h.snapLoad; loading != nil {
+			h.snapMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-loading:
+				continue
+			}
+		}
+		if time.Now().Before(h.snapRetryAt) {
+			err := h.snapErr
+			if err == nil {
+				err = fmt.Errorf("gateway: waiting for newer snapshot")
+			}
+			h.snapMu.Unlock()
+			return nil, nil, err
+		}
+		h.snapLoad = make(chan struct{})
 		h.snapMu.Unlock()
-		return data, snap, nil
+		data, snap, err := h.fetchSnapshot(context.WithoutCancel(ctx))
+		h.snapMu.Lock()
+		if err == nil {
+			h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = data, snap, snap.Seq, time.Now()
+			h.snapFailures = 0
+		} else {
+			h.snapFailures++
+		}
+		h.snapErr = err
+		delay := 100 * time.Millisecond
+		for i := 1; i < h.snapFailures && delay < 2*time.Second; i++ {
+			delay *= 2
+		}
+		if delay > 2*time.Second {
+			delay = 2 * time.Second
+		}
+		h.snapRetryAt = time.Now().Add(delay)
+		close(h.snapLoad)
+		h.snapLoad = nil
+		h.snapMu.Unlock()
+		return data, snap, err
 	}
-	h.snapMu.Unlock()
-	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+}
+
+func (h *hub) fetchSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error) {
+	opCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var snap *dorv1.Snapshot
 	var err error
@@ -361,11 +428,10 @@ func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error)
 		if kvErr != nil {
 			return nil, nil, kvErr
 		}
-		entry, getErr := kv.Get(opCtx, bus.KVLiveStateSnapshotKey)
+		publisher, getErr := h.bus.KV(opCtx, bus.KVBucketPublisher)
 		err = getErr
 		if err == nil {
-			snap = &dorv1.Snapshot{}
-			err = live.UnmarshalSnapshot(entry.Value(), snap)
+			snap, err = publication.Snapshot(opCtx, publisher, kv)
 		}
 	}
 	if err != nil {
@@ -378,8 +444,5 @@ func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error)
 	if err != nil {
 		return nil, nil, err
 	}
-	h.snapMu.Lock()
-	h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = wire, snap, snap.Seq, time.Now()
-	h.snapMu.Unlock()
 	return wire, snap, nil
 }

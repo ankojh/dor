@@ -17,16 +17,59 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type fixedDatabaseRow struct {
+	name string
+	err  error
+}
+
+func (r fixedDatabaseRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != 1 {
+		return errors.New("expected one scan destination")
+	}
+	name, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("expected string scan destination")
+	}
+	*name = r.name
+	return nil
+}
+
+type fixedDatabase struct{ row pgx.Row }
+
+func (db fixedDatabase) QueryRow(context.Context, string, ...any) pgx.Row { return db.row }
+
+func TestApplyDatabaseGateBlocksLiveDatabaseUnconditionally(t *testing.T) {
+	ctx := context.Background()
+	if err := validateApplyDatabase(ctx, fixedDatabase{row: fixedDatabaseRow{name: "dor"}}, "dor"); err == nil || !strings.Contains(err.Error(), "live database dor is blocked") {
+		t.Fatalf("live database must fail the unconditional safety gate even if explicitly allowed, got %v", err)
+	}
+	if err := validateApplyDatabase(ctx, fixedDatabase{row: fixedDatabaseRow{name: "test_db"}}, ""); err == nil {
+		t.Fatal("empty allow-list name must fail")
+	}
+	if err := validateApplyDatabase(ctx, fixedDatabase{row: fixedDatabaseRow{name: "test_db"}}, "other_db"); err == nil {
+		t.Fatal("database mismatch must fail")
+	}
+	queryErr := errors.New("current_database unavailable")
+	if err := validateApplyDatabase(ctx, fixedDatabase{row: fixedDatabaseRow{err: queryErr}}, "test_db"); !errors.Is(err, queryErr) {
+		t.Fatalf("database identity query error should propagate, got %v", err)
+	}
+}
+
 func TestParseOptionsRequiresExplicitWriteAuthorization(t *testing.T) {
 	for _, args := range [][]string{
 		{"--dsn", "postgres://example", "--dry-run=false"},
 		{"--dsn", "postgres://example", "--dry-run=false", "--apply=false"},
+		{"--dsn", "postgres://example", "--apply"},
+		{"--dsn", "postgres://example", "--apply", "--allow-db", "dor"},
 	} {
 		if _, err := parseOptions(args); err == nil {
 			t.Errorf("parseOptions(%q) should reject write-like dry-run setting without --apply", args)
 		}
 	}
-	parsed, err := parseOptions([]string{"--dsn", "postgres://example", "--apply"})
+	parsed, err := parseOptions([]string{"--dsn", "postgres://example", "--apply", "--allow-db", "dor_f1_1_sql_test"})
 	if err != nil || !parsed.apply {
 		t.Fatalf("explicit --apply should enable writes: options=%+v err=%v", parsed, err)
 	}
@@ -38,7 +81,7 @@ func TestParseOptionsRequiresExplicitWriteAuthorization(t *testing.T) {
 
 func TestRunReportRejectsMissingDatasetBeforeDatabaseConnect(t *testing.T) {
 	empty := t.TempDir()
-	err := runReport(context.Background(), "postgres://not-reached", empty, false, "")
+	err := runReport(context.Background(), "postgres://not-reached", empty, false, "", "")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "cities15000.txt") {
 		t.Fatalf("missing local GeoNames dataset should fail before connecting to database, got %v", err)
 	}
@@ -50,6 +93,15 @@ func TestRepairDatabaseFlow(t *testing.T) {
 	defer cancel()
 	conn, g := prepareRepairDB(t, ctx, dsn)
 	defer conn.Close(ctx)
+	if err := validateApplyDatabase(ctx, conn, "dor_f1_1_sql_test"); err != nil {
+		t.Fatalf("exact isolated database name should authorize apply: %v", err)
+	}
+	if err := validateApplyDatabase(ctx, conn, "another_db"); err == nil {
+		t.Fatal("database name mismatch should fail the apply gate")
+	}
+	if err := validateApplyDatabase(ctx, conn, "dor"); err == nil {
+		t.Fatal("live database name must never pass the apply gate")
+	}
 
 	proposed, err := repair(ctx, conn, g, false)
 	if err != nil {

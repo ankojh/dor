@@ -53,8 +53,8 @@ type report struct {
 	Bundle    LocationRepairBundle `json:"bundle"`
 }
 type options struct {
-	dsn, dir, reportPath string
-	apply                bool
+	dsn, dir, reportPath, allowDB string
+	apply                         bool
 }
 
 func parseOptions(args []string) (options, error) {
@@ -63,7 +63,8 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.dsn, "dsn", os.Getenv("DOR_DATABASE_URL"), "Postgres DSN (or DOR_DATABASE_URL)")
 	fs.StringVar(&o.dir, "geonames-dir", geo.DefaultDir, "complete existing GeoNames cache (never downloaded)")
 	fs.StringVar(&o.reportPath, "report", "", "atomic JSON audit and repair bundle output")
-	fs.BoolVar(&o.apply, "apply", false, "explicitly commit Postgres repairs")
+	fs.BoolVar(&o.apply, "apply", false, "explicitly commit isolated-copy Postgres repairs")
+	fs.StringVar(&o.allowDB, "allow-db", "", "required exact isolated database name for --apply (live dor is refused)")
 	dry := fs.Bool("dry-run", true, "read-only proposed audit (default)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -73,6 +74,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if !*dry && !o.apply {
 		return o, fmt.Errorf("--dry-run=false does not authorize writes; explicit --apply is required")
+	}
+	if o.apply && (o.allowDB == "" || o.allowDB == "dor") {
+		return o, fmt.Errorf("--apply requires --allow-db naming an isolated copy; live database dor is blocked until coordinated cutover")
 	}
 	if fs.NArg() != 0 {
 		return o, fmt.Errorf("unexpected positional arguments")
@@ -87,12 +91,12 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := runReport(ctx, o.dsn, o.dir, o.apply, o.reportPath); err != nil {
+	if err := runReport(ctx, o.dsn, o.dir, o.apply, o.reportPath, o.allowDB); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
-func runReport(ctx context.Context, dsn, dir string, apply bool, path string) error {
+func runReport(ctx context.Context, dsn, dir string, apply bool, path, allowDB string) error {
 	g, err := geo.LoadExisting(ctx, dir, slog.Default())
 	if err != nil {
 		return err
@@ -102,6 +106,11 @@ func runReport(ctx context.Context, dsn, dir string, apply bool, path string) er
 		return err
 	}
 	defer conn.Close(ctx)
+	if apply {
+		if err := validateApplyDatabase(ctx, conn, allowDB); err != nil {
+			return err
+		}
+	}
 	r, err := repair(ctx, conn, g, apply)
 	if err != nil {
 		return err
@@ -119,6 +128,26 @@ func runReport(ctx context.Context, dsn, dir string, apply bool, path string) er
 		DatasetSHA256 string             `json:"dataset_sha256"`
 	}{r.Status, r.Committed, r.Tables, r.Bundle.RunID, r.Bundle.DatasetSHA256})
 }
+
+// A DSN can select a different database than its apparent path (for example
+// through connection parameters). Bind permission to the connected server's
+// actual identity before opening any read-write repair transaction.
+func validateApplyDatabase(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, allowDB string) error {
+	var actual string
+	if err := db.QueryRow(ctx, `SELECT current_database()`).Scan(&actual); err != nil {
+		return fmt.Errorf("check apply database: %w", err)
+	}
+	if actual == "dor" {
+		return fmt.Errorf("live database dor is blocked until coordinated cutover; this standalone command cannot apply it")
+	}
+	if allowDB == "" || actual != allowDB {
+		return fmt.Errorf("--allow-db must exactly match current_database(): connected to %q, allowed %q", actual, allowDB)
+	}
+	return nil
+}
+
 func writeReport(path string, r report) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

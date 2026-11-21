@@ -8,6 +8,17 @@ seat or largest supported populated place within that region. The command
 requires all three existing GeoNames files; it never downloads a replacement
 dataset. The exact source files are identified by SHA-256 in the audit/bundle.
 
+Automatic matching excludes no-data region aliases that point at country
+capitals; those aliases remain available to explicit lookup. Single-word ADM1
+names without geographic syntax are accepted only when geographically unique
+and absent from the curated common-word/personal-name ambiguity vocabulary.
+Punctuated canonical abbreviations (St./Ste./Ft./Mt./initials) remain supported.
+Ambiguous personal or commodity country names need geographic text; a country
+that shares its name with a foreign region needs stronger country evidence.
+For example, unqualified “in Victoria” or “living in Georgia” can remain
+unlocated, while “Victoria, Australia” and “Tbilisi, Georgia” are supported.
+This deliberately reduces recall instead of inventing a jurisdiction.
+
 ## Audit and explicit apply
 
 ```sh
@@ -22,13 +33,18 @@ bundle. Neither its proposals nor a zero-change second run prove that a live
 cutover is safe. Review replacement and retained-place frequencies and sample
 article title, lede and dateline evidence.
 
-Only an explicit `--apply` authorizes writes; `--dry-run=false` alone is an
+Only an explicit `--apply --allow-db COPY_DATABASE` authorizes writes; `--dry-run=false` alone is an
 error. Applying on an isolated copy is the rehearsal path:
 
 ```sh
 go run ./scripts/repair-geocoding --geonames-dir /path/to/geonames \
-  --apply --report /absolute/path/committed.json
+  --apply --allow-db dor_f1_1_review --report /absolute/path/committed.json
 ```
+
+The connected server's `current_database()` must exactly match `--allow-db`.
+The live database `dor` is always refused, even when explicitly allowed. This
+standalone command has no coordinated cutover gate; a DB-only live apply must
+not bypass the future hot-state reconciliation.
 
 Apply uses one serializable transaction with location/story table locks. It
 deletes all rejected rows before inserting replacements, coalesces duplicate
@@ -71,6 +87,9 @@ error explicitly says the repair committed; do not treat that as a rollback.
 - This exporter supplies DB hashes, **not KV/root revisions**. The future
   read-only maintenance planner must independently bind actual hot-state
   revisions and its own before hashes under the quiesce/fence barrier.
+  The async DB mirror can drop queued story writes; the hot-state planner must
+  recompute decisions from actual KV stories and article evidence, including
+  stories present only in KV. DB bundle coverage is not hot-state coverage.
   `revision_binding=unbound_requires_fenced_hot_state_plan` is intentional.
 
 ## Live cutover is blocked

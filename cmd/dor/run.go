@@ -21,6 +21,8 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/fetch"
 	"github.com/ankojh/dor/internal/record"
+
+	"github.com/ankojh/dor/internal/store"
 )
 
 const version = "0.1.0-dev"
@@ -46,6 +48,9 @@ type config struct {
 	gdeltMaxItems     int
 	gdeltExtraDomains string
 	reliefWebAppname  string
+
+	dbURL      string
+	dbMaxConns int
 }
 
 func runCommand(args []string) error {
@@ -70,6 +75,9 @@ func runCommand(args []string) error {
 		gdeltMaxItems:     envIntOr("DOR_GDELT_MAX_ITEMS", 300),
 		gdeltExtraDomains: envOr("DOR_GDELT_EXTRA_DOMAINS", ""),
 		reliefWebAppname:  envOr("DOR_RELIEFWEB_APPNAME", ""),
+
+		dbURL:      envOr("DOR_DATABASE_URL", "postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable"),
+		dbMaxConns: envIntOr("DOR_DB_MAX_CONNECTIONS", 10),
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -93,6 +101,9 @@ func runCommand(args []string) error {
 	fs.IntVar(&cfg.gdeltMaxItems, "gdelt-max-items", cfg.gdeltMaxItems, "cap items published per GDELT file")
 	fs.StringVar(&cfg.gdeltExtraDomains, "gdelt-extra-domains", cfg.gdeltExtraDomains, "comma-separated extra domains for the GDELT allowlist")
 	fs.StringVar(&cfg.reliefWebAppname, "reliefweb-appname", cfg.reliefWebAppname, "approved ReliefWeb appname (empty keeps the adapter disabled)")
+
+	fs.StringVar(&cfg.dbURL, "db-url", cfg.dbURL, "Postgres URL; empty or off disables durable writes")
+	fs.IntVar(&cfg.dbMaxConns, "db-max-conns", cfg.dbMaxConns, "Postgres pool size")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -160,7 +171,7 @@ func runCommand(args []string) error {
 		}()
 	}
 
-	registry, err := agents.Builtins(ctx, b, metrics, logger, agents.Config{
+	fetchConfig := agents.Config{
 		SourcesFile:       cfg.sourcesFile,
 		Recorder:          recorder,
 		UserAgent:         cfg.httpUserAgent,
@@ -172,7 +183,51 @@ func runCommand(args []string) error {
 		GDELTExtraDomains: splitList(cfg.gdeltExtraDomains),
 		ReliefWebAppname:  cfg.reliefWebAppname,
 		FetchMetrics:      fetchMetrics,
-	})
+	}
+
+	var dbStore *store.Store
+	var dbWriter *store.Writer
+	var articleSink agents.ArticleSink
+	if cfg.dbURL != "" && !strings.EqualFold(cfg.dbURL, "off") {
+		openCtx, openCancel := context.WithTimeout(ctx, 2*time.Second)
+		st, err := store.Open(openCtx, store.Config{URL: cfg.dbURL, MaxConns: int32(cfg.dbMaxConns)})
+		openCancel()
+		if err != nil {
+			logger.Warn("postgres unavailable; durable writes disabled, pipeline continues", "err", err)
+		} else {
+			migrateCtx, migrateCancel := context.WithTimeout(ctx, 20*time.Second)
+			migrateErr := st.Migrate(migrateCtx)
+			migrateCancel()
+			if migrateErr != nil {
+				logger.Warn("postgres migrations failed; durable writes disabled, pipeline continues", "err", migrateErr)
+				st.Close()
+			} else {
+				w, werr := store.NewWriter(st, store.WriterOptions{Logger: logger})
+				if werr != nil {
+					logger.Warn("postgres writer unavailable; durable writes disabled", "err", werr)
+					st.Close()
+				} else {
+					w.Start()
+					dbStore = st
+					dbWriter = w
+					articleSink = w
+					logger.Info("postgres store ready")
+				}
+			}
+		}
+	}
+	if dbWriter != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := dbWriter.Close(closeCtx); err != nil {
+				logger.Warn("store writer close", "err", err)
+			}
+			dbStore.Close()
+		}()
+	}
+
+	registry, err := agents.BuiltinsWithDeps(ctx, b, metrics, logger, fetchConfig, agents.Deps{ArticleSink: articleSink})
 	if err != nil {
 		return err
 	}
@@ -210,6 +265,7 @@ func runCommand(args []string) error {
 		"nats_url", b.RedactedURL(),
 		"agents", runner.Names(),
 		"admin_addr", cfg.adminAddr,
+		"store", articleSink != nil,
 	)
 
 	exitReason := "signal"

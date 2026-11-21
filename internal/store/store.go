@@ -1,0 +1,193 @@
+// Package store owns the durable Postgres store: a pgx pool, migrations and
+// the asynchronous batch writer used by the pipeline agents.
+//
+// The hot path never waits on the database. Agents enqueue records into Writer,
+// which batches and upserts them off the message handler. The store is
+// optional: cmd/dor starts without it and logs the degradation.
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Config is the Postgres connection and pool configuration.
+type Config struct {
+	URL            string
+	MaxConns       int32
+	ConnectTimeout time.Duration
+}
+
+// Store is the pgx pool plus the migration and upsert helpers.
+type Store struct {
+	pool *pgxpool.Pool
+	cfg  Config
+}
+
+// Open parses the URL, opens a pool and verifies it with a ping.
+func Open(ctx context.Context, cfg Config) (*Store, error) {
+	if cfg.URL == "" {
+		return nil, errors.New("store: database URL is empty")
+	}
+	if cfg.ConnectTimeout <= 0 {
+		cfg.ConnectTimeout = 5 * time.Second
+	}
+	pc, err := pgxpool.ParseConfig(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse database URL: %w", err)
+	}
+	if cfg.MaxConns > 0 {
+		pc.MaxConns = cfg.MaxConns
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, pc)
+	if err != nil {
+		return nil, fmt.Errorf("store: open pool: %w", err)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("store: ping: %w", err)
+	}
+	return &Store{pool: pool, cfg: cfg}, nil
+}
+
+// Close releases the pool.
+func (s *Store) Close() {
+	if s != nil && s.pool != nil {
+		s.pool.Close()
+	}
+}
+
+// Pool exposes the underlying pool for agents that need a custom query. Keep
+// this for the gateway and later story/alert agents.
+func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// EnsurePartition makes sure the articles partition for day exists. day is
+// interpreted in UTC by the SQL function.
+func (s *Store) EnsurePartition(ctx context.Context, day time.Time) error {
+	_, err := s.pool.Exec(ctx, `SELECT ensure_article_partition($1::date)`, day.UTC().Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("store: ensure article partition %s: %w", day.UTC().Format("2006-01-02"), err)
+	}
+	return nil
+}
+
+// UpsertArticles writes a batch in one transaction. It is idempotent by the
+// (id, created_at) primary key and article locations by (article_id, place_id,
+// role).
+func (s *Store) UpsertArticles(ctx context.Context, records []ArticleRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	for i := range records {
+		if records[i].PublishedAt.IsZero() {
+			if !records[i].CreatedAt.IsZero() {
+				records[i].PublishedAt = records[i].CreatedAt
+			} else {
+				records[i].PublishedAt = now
+			}
+		}
+		if records[i].CreatedAt.IsZero() {
+			records[i].CreatedAt = records[i].PublishedAt
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin articles batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	days := make(map[string]bool, len(records))
+	for _, r := range records {
+		days[r.CreatedAt.UTC().Format("2006-01-02")] = true
+	}
+	for day := range days {
+		if _, err := tx.Exec(ctx, `SELECT ensure_article_partition($1::date)`, day); err != nil {
+			return fmt.Errorf("store: ensure partition %s: %w", day, err)
+		}
+	}
+
+	batch := &pgx.Batch{}
+	const articleSQL = `
+INSERT INTO articles
+    (id, source_id, url, title, lede, published_at, lang, dateline, category, cat_conf, story_id, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),$12)
+ON CONFLICT (id, created_at) DO UPDATE SET
+    source_id = EXCLUDED.source_id,
+    url = EXCLUDED.url,
+    title = EXCLUDED.title,
+    lede = EXCLUDED.lede,
+    published_at = EXCLUDED.published_at,
+    lang = EXCLUDED.lang,
+    dateline = EXCLUDED.dateline,
+    category = EXCLUDED.category,
+    cat_conf = EXCLUDED.cat_conf,
+    story_id = COALESCE(EXCLUDED.story_id, articles.story_id)`
+	const locationSQL = `
+INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (article_id, place_id, role) DO UPDATE SET
+    name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+    precision = EXCLUDED.precision, conf = EXCLUDED.conf`
+	for _, r := range records {
+		batch.Queue(articleSQL, r.ID, r.SourceID, r.URL, r.Title, r.Lede, r.PublishedAt,
+			r.Lang, r.Dateline, r.Category, r.CategoryConfidence, r.StoryID, r.CreatedAt)
+		for _, loc := range r.Locations {
+			batch.Queue(locationSQL, r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon,
+				loc.Precision, loc.Role, loc.Confidence)
+		}
+	}
+	br := tx.SendBatch(ctx, batch)
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("store: articles batch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit articles batch: %w", err)
+	}
+	return nil
+}
+
+// UpsertSources seeds or updates the reviewed source list.
+func (s *Store) UpsertSources(ctx context.Context, records []SourceRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin sources batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	batch := &pgx.Batch{}
+	const sql = `
+INSERT INTO sources (id, kind, url, country, region, lang, interval_s, enabled, terms_ok, terms_note, hazard, notes, health_json)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'{}'::jsonb))
+ON CONFLICT (id) DO UPDATE SET
+    kind = EXCLUDED.kind, url = EXCLUDED.url, country = EXCLUDED.country,
+    region = EXCLUDED.region, lang = EXCLUDED.lang, interval_s = EXCLUDED.interval_s,
+    enabled = EXCLUDED.enabled, terms_ok = EXCLUDED.terms_ok,
+    terms_note = EXCLUDED.terms_note, hazard = EXCLUDED.hazard,
+    notes = EXCLUDED.notes, updated_at = now()`
+	for _, r := range records {
+		var health any
+		if len(r.Health) > 0 {
+			health = string(r.Health)
+		}
+		batch.Queue(sql, r.ID, r.Kind, r.URL, r.Country, r.Region, r.Lang, r.IntervalS,
+			r.Enabled, r.TermsOK, r.TermsNote, r.Hazard, r.Notes, health)
+	}
+	br := tx.SendBatch(ctx, batch)
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("store: sources batch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit sources: %w", err)
+	}
+	return nil
+}

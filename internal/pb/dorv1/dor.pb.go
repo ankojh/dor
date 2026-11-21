@@ -523,15 +523,19 @@ func (x *Location) GetWeight() float32 {
 
 // Article is the normalized ingest record. The full text is never stored.
 type Article struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	SourceId      string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Url           string                 `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
-	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
-	Lede          string                 `protobuf:"bytes,5,opt,name=lede,proto3" json:"lede,omitempty"`
-	PublishedAt   int64                  `protobuf:"varint,6,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"` // unix seconds
-	Lang          string                 `protobuf:"bytes,7,opt,name=lang,proto3" json:"lang,omitempty"`
-	Dateline      string                 `protobuf:"bytes,8,opt,name=dateline,proto3" json:"dateline,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	SourceId    string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	Url         string                 `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
+	Title       string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	Lede        string                 `protobuf:"bytes,5,opt,name=lede,proto3" json:"lede,omitempty"`
+	PublishedAt int64                  `protobuf:"varint,6,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"` // unix seconds
+	Lang        string                 `protobuf:"bytes,7,opt,name=lang,proto3" json:"lang,omitempty"`
+	Dateline    string                 `protobuf:"bytes,8,opt,name=dateline,proto3" json:"dateline,omitempty"`
+	// Append-only hints from the raw item. The plotter still decides the place;
+	// these only save it work and feed hazard heat.
+	Hints         *RawHints `protobuf:"bytes,9,opt,name=hints,proto3" json:"hints,omitempty"`
+	Burst         bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -620,6 +624,20 @@ func (x *Article) GetDateline() string {
 		return x.Dateline
 	}
 	return ""
+}
+
+func (x *Article) GetHints() *RawHints {
+	if x != nil {
+		return x.Hints
+	}
+	return nil
+}
+
+func (x *Article) GetBurst() bool {
+	if x != nil {
+		return x.Burst
+	}
+	return false
 }
 
 // Story is a cluster of articles about one event.
@@ -2303,7 +2321,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x03lon\x18\x04 \x01(\x02R\x03lon\x12/\n" +
 	"\tprecision\x18\x05 \x01(\x0e2\x11.dor.v1.PrecisionR\tprecision\x12 \n" +
 	"\x04role\x18\x06 \x01(\x0e2\f.dor.v1.RoleR\x04role\x12\x16\n" +
-	"\x06weight\x18\a \x01(\x02R\x06weight\"\xc5\x01\n" +
+	"\x06weight\x18\a \x01(\x02R\x06weight\"\x83\x02\n" +
 	"\aArticle\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
@@ -2312,7 +2330,10 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x04lede\x18\x05 \x01(\tR\x04lede\x12!\n" +
 	"\fpublished_at\x18\x06 \x01(\x03R\vpublishedAt\x12\x12\n" +
 	"\x04lang\x18\a \x01(\tR\x04lang\x12\x1a\n" +
-	"\bdateline\x18\b \x01(\tR\bdateline\"\x9a\x02\n" +
+	"\bdateline\x18\b \x01(\tR\bdateline\x12&\n" +
+	"\x05hints\x18\t \x01(\v2\x10.dor.v1.RawHintsR\x05hints\x12\x14\n" +
+	"\x05burst\x18\n" +
+	" \x01(\bR\x05burst\"\x9a\x02\n" +
 	"\x05Story\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12,\n" +
@@ -2551,40 +2572,41 @@ var file_dor_v1_dor_proto_goTypes = []any{
 var file_dor_v1_dor_proto_depIdxs = []int32{
 	1,  // 0: dor.v1.Location.precision:type_name -> dor.v1.Precision
 	2,  // 1: dor.v1.Location.role:type_name -> dor.v1.Role
-	0,  // 2: dor.v1.Story.category:type_name -> dor.v1.Category
-	7,  // 3: dor.v1.Story.locations:type_name -> dor.v1.Location
-	3,  // 4: dor.v1.Link.type:type_name -> dor.v1.LinkType
-	4,  // 5: dor.v1.Link.dir:type_name -> dor.v1.Direction
-	0,  // 6: dor.v1.WireRow.category:type_name -> dor.v1.Category
-	5,  // 7: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
-	29, // 8: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
-	9,  // 9: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
-	10, // 10: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
-	11, // 11: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
-	13, // 12: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
-	12, // 13: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
-	9,  // 14: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
-	10, // 15: dor.v1.Snapshot.links:type_name -> dor.v1.Link
-	14, // 16: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
-	15, // 17: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
-	16, // 18: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
-	17, // 19: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
-	0,  // 20: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
-	11, // 21: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
-	19, // 22: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
-	20, // 23: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
-	21, // 24: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
-	22, // 25: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
-	23, // 26: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
-	24, // 27: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
-	1,  // 28: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
-	6,  // 29: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
-	26, // 30: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
-	31, // [31:31] is the sub-list for method output_type
-	31, // [31:31] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	26, // 2: dor.v1.Article.hints:type_name -> dor.v1.RawHints
+	0,  // 3: dor.v1.Story.category:type_name -> dor.v1.Category
+	7,  // 4: dor.v1.Story.locations:type_name -> dor.v1.Location
+	3,  // 5: dor.v1.Link.type:type_name -> dor.v1.LinkType
+	4,  // 6: dor.v1.Link.dir:type_name -> dor.v1.Direction
+	0,  // 7: dor.v1.WireRow.category:type_name -> dor.v1.Category
+	5,  // 8: dor.v1.WireRow.join:type_name -> dor.v1.JoinKind
+	29, // 9: dor.v1.WireRow.prompt_scores:type_name -> dor.v1.WireRow.PromptScoresEntry
+	9,  // 10: dor.v1.Delta.story_upsert:type_name -> dor.v1.Story
+	10, // 11: dor.v1.Delta.link_upsert:type_name -> dor.v1.Link
+	11, // 12: dor.v1.Delta.link_remove:type_name -> dor.v1.LinkKey
+	13, // 13: dor.v1.Delta.wire:type_name -> dor.v1.WireRow
+	12, // 14: dor.v1.Delta.alert:type_name -> dor.v1.AlertHit
+	9,  // 15: dor.v1.Snapshot.stories:type_name -> dor.v1.Story
+	10, // 16: dor.v1.Snapshot.links:type_name -> dor.v1.Link
+	14, // 17: dor.v1.DeltaBatch.deltas:type_name -> dor.v1.Delta
+	15, // 18: dor.v1.ServerMessage.snapshot:type_name -> dor.v1.Snapshot
+	16, // 19: dor.v1.ServerMessage.deltas:type_name -> dor.v1.DeltaBatch
+	17, // 20: dor.v1.ServerMessage.resync:type_name -> dor.v1.Resync
+	0,  // 21: dor.v1.SetFilters.categories:type_name -> dor.v1.Category
+	11, // 22: dor.v1.GetText.link_keys:type_name -> dor.v1.LinkKey
+	19, // 23: dor.v1.ClientMessage.hello:type_name -> dor.v1.Hello
+	20, // 24: dor.v1.ClientMessage.set_filters:type_name -> dor.v1.SetFilters
+	21, // 25: dor.v1.ClientMessage.set_prompts:type_name -> dor.v1.SetPrompts
+	22, // 26: dor.v1.ClientMessage.focus:type_name -> dor.v1.Focus
+	23, // 27: dor.v1.ClientMessage.get_text:type_name -> dor.v1.GetText
+	24, // 28: dor.v1.ClientMessage.ack:type_name -> dor.v1.Ack
+	1,  // 29: dor.v1.RawHints.precision:type_name -> dor.v1.Precision
+	6,  // 30: dor.v1.RawArticle.kind:type_name -> dor.v1.SourceKind
+	26, // 31: dor.v1.RawArticle.hints:type_name -> dor.v1.RawHints
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_dor_v1_dor_proto_init() }

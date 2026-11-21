@@ -20,7 +20,8 @@ internal/fetch/          source adapters (RSS/Atom, GDELT, USGS, GDACS, EONET,
                          ReliefWeb), polite HTTP, robots, host budget, health
 internal/record/         record mode: raw-stream writer and reader
 internal/geo/            GeoNames, Photon, H3                        (later)
-internal/store/          pgx, migrations, batch writers              (later)
+internal/store/          pgx pool, migrations runner, batch writer
+migrations/              embedded up/down SQL (schema_migrations)
 internal/gateway/        WebSocket gateway, snapshot, resume        (later)
 internal/pb/dorv1/       generated Go protobuf (do not edit)
 proto/dor/v1/            protobuf source
@@ -106,6 +107,9 @@ Every flag has a `DOR_*` fallback. An explicit flag wins.
 | `--gdelt-max-items` | `DOR_GDELT_MAX_ITEMS` | `300` |
 | `--gdelt-extra-domains` | `DOR_GDELT_EXTRA_DOMAINS` | empty |
 | `--reliefweb-appname` | `DOR_RELIEFWEB_APPNAME` | empty (adapter disabled) |
+
+| `--db-url` | `DOR_DATABASE_URL` | `postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable` (empty/off disables) |
+| `--db-max-conns` | `DOR_DB_MAX_CONNECTIONS` | `10` |
 
 Tracing: W3C `traceparent` travels in NATS headers. The exporter is a noop
 unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, then OTLP/HTTP is used.

@@ -50,7 +50,15 @@ func EchoOutputMsgID(inputID string) string {
 
 // Builtins registers every agent compiled into this binary. Fetchers are
 // always registered; --agents selects what runs.
+type Deps struct {
+	ArticleSink ArticleSink
+}
+
 func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config) (*Registry, error) {
+	return BuiltinsWithDeps(ctx, b, metrics, log, cfg, Deps{})
+}
+
+func BuiltinsWithDeps(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Config, deps Deps) (*Registry, error) {
 	registry := NewRegistry()
 	echo, err := NewEcho(b, metrics, log)
 	if err != nil {
@@ -76,6 +84,13 @@ func Builtins(ctx context.Context, b *bus.Bus, metrics *Metrics, log *slog.Logge
 		if err := registry.Register(agent); err != nil {
 			return nil, err
 		}
+	}
+	normalize, err := NewNormalizer(b, metrics, log, NormalizerConfig{Sink: deps.ArticleSink})
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(normalize); err != nil {
+		return nil, err
 	}
 	return registry, nil
 }

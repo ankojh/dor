@@ -87,6 +87,10 @@ message Article {
   int64 published_at = 6; // unix seconds
   string lang = 7;
   string dateline = 8;
+  // Append-only hints from the raw item. The plotter still decides the place;
+  // these only save it work and feed hazard heat.
+  RawHints hints = 9;
+  bool burst = 10; // GDELT bulk item; the wire collapses bursts
 }
 
 // Story is a cluster of articles about one event.

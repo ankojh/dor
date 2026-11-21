@@ -22,6 +22,7 @@ import {
   LinkKeySchema,
   LinkSchema,
   LinkType,
+  MatchScoreSchema,
   Precision,
   RawArticleSchema,
   RecordFrameSchema,
@@ -169,6 +170,14 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
     expect(hints.revision).toBe("1700000030");
   });
 
+  it("MatchScore", () => {
+    const score = load(MatchScoreSchema, "match_score");
+    expect(score.articleId).toBe("art-1");
+    expect(score.scores).toEqual({ floods: 0.82 });
+    expect(score.approx).toEqual(["energy"]);
+    expect(score.updatedAt).toBe(1_700_000_500n);
+  });
+
   it("RecordFrame", () => {
     const frame = load(RecordFrameSchema, "record_frame");
     expect(frame.subject).toBe("article.raw.priority");
@@ -307,6 +316,10 @@ describe("Go golden protobuf binaries decode in TypeScript", () => {
     expect(filters.regions).toEqual(["eu-west", "fr"]);
     expect(filters.minSources).toBe(2);
     expect(filters.lang).toEqual(["en", "fr"]);
+    expect(filters.sources).toEqual(["bbc-world", "npr-news"]);
+    expect(filters.lat).toBe(48.5);
+    expect(filters.lon).toBe(2.25);
+    expect(filters.radiusKm).toBe(250);
   });
 
   it("SetPrompts", () => {

@@ -86,14 +86,20 @@ func goldenAlertHit() *AlertHit {
 
 func goldenWireRow() *WireRow {
 	return &WireRow{
-		ArticleId: "art-1",
-		StoryId:   "story-1",
-		Title:     "Flooding «Paris»",
-		Source:    "BBC",
-		Place:     "Paris, France",
-		Category:  Category_CATEGORY_ECONOMY,
-		At:        1_700_000_400,
-		Join:      JoinKind_JOIN_KIND_JOINED,
+		ArticleId:     "art-1",
+		StoryId:       "story-1",
+		Title:         "Flooding «Paris»",
+		Source:        "BBC",
+		Place:         "Paris, France",
+		Category:      Category_CATEGORY_ECONOMY,
+		At:            1_700_000_400,
+		Join:          JoinKind_JOIN_KIND_JOINED,
+		Country:       "FR",
+		Lang:          "en",
+		Lat:           48.5,
+		Lon:           2.25,
+		Located:       true,
+		ApproxPrompts: []string{"floods"},
 		PromptScores: map[string]float32{
 			"prompt-a": 0.5,
 			"prompt-b": 0.25,
@@ -188,6 +194,10 @@ func allGoldenCases() []goldenCase {
 		Regions:    []string{"eu-west", "fr"},
 		MinSources: 2,
 		Lang:       []string{"en", "fr"},
+		Sources:    []string{"bbc-world", "npr-news"},
+		Lat:        48.5,
+		Lon:        2.25,
+		RadiusKm:   250,
 	}
 	prompts := &SetPrompts{Prompts: []string{"floods", "energy"}}
 	focus := &Focus{StoryId: "story-1"}
@@ -208,6 +218,7 @@ func allGoldenCases() []goldenCase {
 	return []goldenCase{
 		{"article", goldenArticle()},
 		{"raw_article", goldenRawArticle()},
+		{"match_score", &MatchScore{ArticleId: "art-1", Scores: map[string]float32{"floods": 0.82}, Approx: []string{"energy"}, UpdatedAt: 1_700_000_500}},
 		{"record_frame", goldenRecordFrame()},
 		{"story", goldenStory()},
 		{"link", goldenLink()},

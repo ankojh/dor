@@ -91,6 +91,9 @@ message Article {
   // these only save it work and feed hazard heat.
   RawHints hints = 9;
   bool burst = 10; // GDELT bulk item; the wire collapses bursts
+  // Set on article.placed: the story the clusterer assigned and how it joined.
+  string story_id = 11;
+  JoinKind join = 12;
 }
 
 // Story is a cluster of articles about one event.
@@ -116,6 +119,9 @@ message Link {
   float confidence = 5;
   float strength = 6;
   int64 updated_at = 7; // unix seconds
+  // Unverified is set on similarity-only thematic links emitted when the
+  // relation judge has no model answer. The browser labels these.
+  bool unverified = 8;
 }
 
 // LinkKey identifies a link without its mutable scores.
@@ -166,6 +172,10 @@ message Snapshot {
   repeated Story stories = 2;
   repeated Link links = 3;
   int64 built_at = 4; // unix seconds
+  // Recent wire rows for a first connection or reload, newest last. These are
+  // not deltas and carry no sequence: they let the wire show real articles
+  // immediately without replaying old deltas as new ones.
+  repeated WireRow recent_wire = 5;
 }
 
 // DeltaBatch carries deltas from a snapshot seq onwards.

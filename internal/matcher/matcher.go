@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
@@ -48,16 +49,21 @@ type Service struct {
 	kv     jetstream.KeyValue
 	kvErr  error
 
-	mu           sync.Mutex
-	promptVecs   map[string][]float32
-	articleVec   map[string]articleVector
-	prompts      []string
-	clients      map[string][]string
-	alertsList   []alert.Alert
-	last         time.Time
-	lastBackfill time.Time
-	backfillSig  string
-	backfilling  bool
+	mu              sync.Mutex
+	promptVecs      map[string][]float32
+	articleVec      map[string]articleVector
+	prompts         []string
+	clients         map[string][]string
+	alertsList      []alert.Alert
+	last            time.Time
+	lastBackfill    time.Time
+	backfillSig     string
+	backfilling     bool
+	backfillPending bool
+	backfillCancel  context.CancelFunc
+	clientVersion   uint64
+	embedRetryAfter time.Time
+	backfillResult  WindowResult
 }
 
 type articleVector struct {
@@ -77,6 +83,7 @@ type BacktestStory struct {
 	Title       string  `json:"title"`
 	SourceCount int     `json:"source_count"`
 	Score       float64 `json:"score"`
+	Approx      bool    `json:"approx"`
 }
 
 // BacktestResult is the alert preview.
@@ -85,6 +92,17 @@ type BacktestResult struct {
 	Stories   []BacktestStory `json:"stories"`
 	Approx    bool            `json:"approx"`
 	TookMS    int64           `json:"took_ms"`
+	WindowResult
+}
+
+// WindowResult describes coverage independently of the preview's display limit.
+type WindowResult struct {
+	Partial   bool  `json:"partial"`
+	Scanned   int   `json:"scanned"`
+	Eligible  int   `json:"eligible"`
+	Evaluated int   `json:"evaluated"`
+	From      int64 `json:"from"`
+	To        int64 `json:"to"`
 }
 
 // New builds the matcher service.
@@ -135,8 +153,10 @@ func (s *Service) SetClientPrompts(ctx context.Context, clientID string, prompts
 	}
 	s.mu.Lock()
 	s.clients[clientID] = clean
+	s.clientVersion++
 	s.rebuildPromptsLocked()
 	s.mu.Unlock()
+	s.maybeBackfill(context.WithoutCancel(ctx))
 }
 
 // ClearClientPrompts removes a disconnected client's prompt set so the
@@ -150,6 +170,7 @@ func (s *Service) ClearClientPrompts(ctx context.Context, clientID string) {
 	}
 	s.mu.Lock()
 	delete(s.clients, clientID)
+	s.clientVersion++
 	s.rebuildPromptsLocked()
 	s.mu.Unlock()
 }
@@ -157,44 +178,38 @@ func (s *Service) ClearClientPrompts(ctx context.Context, clientID string) {
 // Refresh loads all clients' prompts and the saved alerts. It is cheap enough
 // to call every few seconds.
 func (s *Service) Refresh(ctx context.Context) {
+	s.mu.Lock()
+	version := s.clientVersion
+	s.mu.Unlock()
 	kv := s.keyValue(ctx)
 	clients := make(map[string][]string)
+	loaded := false
 	if kv != nil {
-		keysCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		keys, err := kv.Keys(keysCtx)
-		cancel()
-		if err == nil {
-			for _, key := range keys {
-				if !strings.HasPrefix(key, "prompts.") {
-					continue
-				}
-				getCtx, getCancel := context.WithTimeout(ctx, 750*time.Millisecond)
-				e, err := kv.Get(getCtx, key)
-				getCancel()
-				if err != nil {
-					continue
-				}
-				var rec promptsRecord
-				if json.Unmarshal(e.Value(), &rec) != nil || rec.ClientID == "" {
-					continue
-				}
+		scanCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := s.window(scanCtx, "prompts.", func(e jetstream.KeyValueEntry) {
+			var rec promptsRecord
+			if json.Unmarshal(e.Value(), &rec) == nil && rec.ClientID != "" {
 				clients[rec.ClientID] = cleanPrompts(rec.Prompts)
 			}
-		}
+		})
+		cancel()
+		loaded = err == nil
 	}
 	var alerts []alert.Alert
 	if s.alerts != nil {
 		alerts = s.alerts.List(ctx)
 	}
 	s.mu.Lock()
-	s.clients = clients
+	if version == s.clientVersion && loaded {
+		s.clients = clients
+	}
 	s.alertsList = alerts
 	s.rebuildPromptsLocked()
 	prompts := append([]string(nil), s.prompts...)
 	s.last = s.now()
 	s.mu.Unlock()
-	s.ensurePromptVectors(ctx, prompts)
 	s.maybeBackfill(ctx)
+	s.ensurePromptVectors(ctx, prompts)
 }
 
 func (s *Service) rebuildPromptsLocked() {
@@ -216,7 +231,10 @@ func (s *Service) rebuildPromptsLocked() {
 // service lock so a slow TEI call cannot stall article scoring. A failure
 // leaves the prompts on the lexical path.
 func (s *Service) ensurePromptVectors(ctx context.Context, prompts []string) {
-	if !s.embedder.Enabled() {
+	s.mu.Lock()
+	retry := s.embedRetryAfter
+	s.mu.Unlock()
+	if !s.embedder.Enabled() || s.now().Before(retry) {
 		return
 	}
 	s.mu.Lock()
@@ -232,8 +250,15 @@ func (s *Service) ensurePromptVectors(ctx context.Context, prompts []string) {
 		if end > len(missing) {
 			end = len(missing)
 		}
-		vecs, err := s.embedder.Embed(ctx, missing[start:end])
+		embedCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		vecs, err := s.embedder.Embed(embedCtx, missing[start:end])
+		cancel()
 		if err != nil {
+			if ctx.Err() == nil {
+				s.mu.Lock()
+				s.embedRetryAfter = s.now().Add(10 * time.Second)
+				s.mu.Unlock()
+			}
 			s.log.Debug("matcher: prompt embedding unavailable; lexical prefilter", "err", err)
 			return
 		}
@@ -274,16 +299,9 @@ func (s *Service) ArticleScores(ctx context.Context, a *dorv1.Article) (map[stri
 	}
 	s.mu.Lock()
 	prompts := append([]string(nil), s.prompts...)
-	last := s.last
 	s.mu.Unlock()
 	if len(prompts) == 0 {
 		return nil, nil
-	}
-	if s.now().Sub(last) > 5*time.Second {
-		s.Refresh(ctx)
-		s.mu.Lock()
-		prompts = append([]string(nil), s.prompts...)
-		s.mu.Unlock()
 	}
 	text := strings.TrimSpace(a.Title + ". " + a.Lede)
 	vec := s.articleVector(ctx, a.Id, text)
@@ -300,7 +318,7 @@ func (s *Service) ArticleScores(ctx context.Context, a *dorv1.Article) (map[stri
 				continue
 			}
 		} else {
-			pre = lexical(prompt, text)
+			pre = lexicalCoverage(prompt, text)
 			if pre < 0.12 {
 				continue
 			}
@@ -329,152 +347,204 @@ func (s *Service) ArticleScores(ctx context.Context, a *dorv1.Article) (map[stri
 }
 
 // StoryAlerts re-checks every enabled alert when a story changes.
-func (s *Service) StoryAlerts(ctx context.Context, story *dorv1.Story) []alert.Hit {
+func (s *Service) StoryAlerts(ctx context.Context, story *dorv1.Story) ([]alert.Hit, error) {
 	if story == nil || story.Id == "" || story.SourceCount < 1 {
-		return nil
+		return nil, nil
 	}
 	s.mu.Lock()
 	alerts := append([]alert.Alert(nil), s.alertsList...)
-	last := s.last
 	s.mu.Unlock()
-	if s.now().Sub(last) > 5*time.Second {
-		s.Refresh(ctx)
-		s.mu.Lock()
-		alerts = append([]alert.Alert(nil), s.alertsList...)
-		s.mu.Unlock()
-	}
 	var hits []alert.Hit
 	for _, a := range alerts {
-		if !a.Enabled || int(story.SourceCount) < a.MinSources {
+		if !a.Enabled || int(story.SourceCount) < a.MinSources || (a.Region != "" && !storyRegion(story, a.Region)) {
 			continue
 		}
-		if a.Region != "" && !storyRegion(story, a.Region) {
+		if s.alerts != nil && s.alerts.IsMuted(ctx, a.ID, story.Id) {
 			continue
 		}
+		generation := uint64(0)
+		base := int(story.SourceCount)
+		previous := false
 		if s.alerts != nil {
-			if s.alerts.IsMuted(ctx, a.ID, story.Id) {
-				continue
+			prev, ok, err := s.alerts.HitState(ctx, a.ID, story.Id)
+			if err != nil {
+				return nil, err
 			}
-		}
-		match, answered := s.jevMatch(ctx, s.storyInput(ctx, story), a.Prompt, a.Strictness)
-		if !answered {
-			// Embedding/lexical fallback. Alerts are never emitted on an
-			// approximate match; they wait for jev rather than risk a false
-			// notification.
-			continue
-		}
-		if match < a.Strictness {
-			continue
-		}
-		level := "new"
-		var prevSource int
-		if s.alerts != nil {
-			if prev, ok := s.alerts.HitState(ctx, a.ID, story.Id); ok {
-				prevSource = prev.SourceCount
-				if int(story.SourceCount) < prevSource*2 {
+			if ok {
+				previous = true
+				generation = prev.Generation + 1
+				base = prev.BaseSources
+				if base <= 0 {
+					base = max(1, prev.SourceCount>>min(prev.Generation, 32))
+				}
+				if generation > 32 || uint64(base)<<generation > uint64(story.SourceCount) {
 					continue
 				}
-				level = "escalated"
 			}
 		}
-		hit := alert.Hit{
-			AlertID:     a.ID,
-			StoryID:     story.Id,
-			Level:       level,
-			FiredAt:     s.now().UTC(),
-			Title:       story.Title,
-			Prompt:      a.Prompt,
-			SourceCount: int(story.SourceCount),
+		input := s.storyInput(ctx, story)
+		score, answered := s.jevMatch(ctx, input, a.Prompt, a.Strictness)
+		if !answered {
+			score = s.approxMatch(ctx, input, a.Prompt, a.Strictness)
 		}
-		hits = append(hits, hit)
+		if score < a.Strictness {
+			continue
+		}
+		for {
+			level := "new"
+			if previous {
+				level = "escalated"
+			}
+			hits = append(hits, alert.Hit{AlertID: a.ID, StoryID: story.Id, Level: level, Generation: generation, BaseSources: base,
+				FiredAt: s.now().UTC(), Title: story.Title, Prompt: a.Prompt, SourceCount: int(story.SourceCount), Approx: !answered})
+			if !previous || generation >= 32 || uint64(base)<<(generation+1) > uint64(story.SourceCount) {
+				break
+			}
+			generation++
+		}
 	}
-	return hits
+	return hits, nil
 }
 
 // RecordHit persists a hit only after the alert delta has been published. If
 // the publish fails, the ordered story consumer retries and can re-evaluate;
 // recording first would make the retry look like a duplicate and lose the
 // notification.
-func (s *Service) RecordHit(ctx context.Context, hit alert.Hit) {
+func (s *Service) RecordHit(ctx context.Context, hit alert.Hit) error {
 	if s.alerts != nil {
-		s.alerts.RecordHit(ctx, hit)
+		return s.alerts.RecordHit(ctx, hit)
 	}
+	return nil
 }
 
 // Backtest evaluates a draft alert against the last 24 h of stories.
 func (s *Service) Backtest(ctx context.Context, prompt string, minSources int, region string, strictness float64) BacktestResult {
-	start := s.now()
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	if strictness <= 0 || strictness > 1 {
-		strictness = 0.80
+		strictness = .80
 	}
 	if minSources <= 0 {
 		minSources = 1
 	}
-	kv := s.keyValue(ctx)
+	end := s.now().Unix()
+	cutoff := s.now().Add(-24 * time.Hour).Unix()
+	res := BacktestResult{Stories: []BacktestStory{}, Approx: s.decider == nil, WindowResult: WindowResult{From: cutoff, To: end}}
 	var stories []*dorv1.Story
-	if kv != nil {
-		keysCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		keys, err := kv.Keys(keysCtx)
-		cancel()
-		if err == nil {
-			cutoff := s.now().Add(-24 * time.Hour).Unix()
-			for _, key := range keys {
-				if !strings.HasPrefix(key, live.StoryPrefix) || strings.HasPrefix(key, live.StoryMetaPrefix) || strings.HasPrefix(key, live.StoryTextPrefix) {
-					continue
-				}
-				id := strings.TrimPrefix(key, live.StoryPrefix)
-				st, ok := live.LoadStory(ctx, kv, id)
-				if !ok || int(st.SourceCount) < minSources {
-					continue
-				}
-				if st.FirstSeen > 0 && st.FirstSeen < cutoff && st.UpdatedAt < cutoff {
-					continue
-				}
-				stories = append(stories, st)
-				if len(stories) >= 200 {
-					break
-				}
-			}
+	err := s.window(ctx, live.StoryPrefix, func(e jetstream.KeyValueEntry) {
+		res.Scanned++
+		var st dorv1.Story
+		if proto.Unmarshal(e.Value(), &st) != nil {
+			res.Partial = true
+			return
 		}
+		at := max(st.FirstSeen, st.UpdatedAt)
+		if at == 0 {
+			at = e.Created().Unix()
+		}
+		if at < cutoff || at > end || int(st.SourceCount) < minSources || (region != "" && !storyRegion(&st, region)) {
+			return
+		}
+		res.Eligible++
+		stories = append(stories, &st)
+	})
+	if err != nil {
+		res.Partial = true
 	}
-	res := BacktestResult{Stories: []BacktestStory{}}
+	sort.Slice(stories, func(i, j int) bool {
+		return max(stories[i].FirstSeen, stories[i].UpdatedAt) > max(stories[j].FirstSeen, stories[j].UpdatedAt)
+	})
+	s.ensurePromptVectors(ctx, []string{prompt})
 	for _, st := range stories {
-		if region != "" && !storyRegion(st, region) {
-			continue
+		if ctx.Err() != nil {
+			res.Partial = true
+			break
 		}
-		score, answered := s.jevMatch(ctx, storyInput(st), prompt, strictness)
+		input := s.storyInput(ctx, st)
+		score, answered := s.jevMatch(ctx, input, prompt, strictness)
 		if !answered {
 			res.Approx = true
-			continue
+			score = s.approxMatch(ctx, input, prompt, strictness)
 		}
+		if ctx.Err() != nil {
+			res.Partial = true
+			break
+		}
+		res.Evaluated++
 		if score < strictness {
 			continue
 		}
-		res.Stories = append(res.Stories, BacktestStory{
-			StoryID:     st.Id,
-			Title:       st.Title,
-			SourceCount: int(st.SourceCount),
-			Score:       score,
-		})
-		if len(res.Stories) >= 20 {
-			break
+		res.WouldFire++
+		if len(res.Stories) < 20 {
+			res.Stories = append(res.Stories, BacktestStory{StoryID: st.Id, Title: st.Title, SourceCount: int(st.SourceCount), Score: score, Approx: !answered})
 		}
 	}
-	res.WouldFire = len(res.Stories)
 	res.TookMS = time.Since(start).Milliseconds()
 	return res
 }
 
+// window streams a prefix-filtered snapshot, including every page, rather
+// than truncating a bucket-wide key list. The deadline bounds work explicitly.
+func (s *Service) window(ctx context.Context, prefix string, visit func(jetstream.KeyValueEntry)) error {
+	kv := s.keyValue(ctx)
+	if kv == nil {
+		return fmt.Errorf("matcher: live state unavailable")
+	}
+	w, err := kv.Watch(ctx, prefix+">", jetstream.IgnoreDeletes())
+	if err != nil {
+		return err
+	}
+	defer w.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case e, ok := <-w.Updates():
+			if !ok {
+				return fmt.Errorf("matcher: window scan interrupted")
+			}
+			if e == nil {
+				return nil
+			}
+			visit(e)
+		}
+	}
+}
+
+// approxMatch requires strong prompt coverage or high semantic similarity.
+// Lexical evidence lowers the semantic cutoff; these scores are not probabilities.
+func (s *Service) approxMatch(ctx context.Context, in decide.Story, prompt string, strictness float64) float64 {
+	text := strings.TrimSpace(in.Title + " " + in.Brief + " " + in.Place + " " + in.Category)
+	coverage := lexicalCoverage(prompt, text)
+	s.ensurePromptVectors(ctx, []string{prompt})
+	s.mu.Lock()
+	pv := s.promptVecs[prompt]
+	s.mu.Unlock()
+	score := coverage
+	if len(pv) > 0 {
+		vec := s.articleVector(ctx, "story:"+in.ID+":"+promptSignature([]string{text}), text)
+		semantic := cosine(pv, vec)
+		if semantic >= max(.88, strictness) || (coverage >= .25 && semantic >= max(.82, strictness)) {
+			score = max(score, semantic)
+		}
+	}
+	if score < max(.80, strictness) {
+		return 0
+	}
+	return score
+}
+
 // PublishScores sends one MatchScore for the publisher to fold into a wire
 // row. A repeated evaluation with identical scores dedupes in JetStream.
-func (s *Service) PublishScores(ctx context.Context, articleID string, scores map[string]float32, approx []string) {
+func (s *Service) PublishScores(ctx context.Context, articleID string, scores map[string]float32, approx []string) error {
 	if articleID == "" || len(scores) == 0 {
-		return
+		return nil
 	}
 	msg := &dorv1.MatchScore{ArticleId: articleID, Scores: scores, Approx: approx, UpdatedAt: s.now().Unix()}
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
-		return
+		return err
 	}
 	id := scoreID(articleID, scores, approx)
 	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -483,6 +553,7 @@ func (s *Service) PublishScores(ctx context.Context, articleID string, scores ma
 	if err != nil {
 		s.log.Debug("matcher: publish score failed", "article", articleID, "err", err)
 	}
+	return err
 }
 
 // BackfillNew evaluates recent articles for prompts that just arrived. It is
@@ -490,54 +561,153 @@ func (s *Service) PublishScores(ctx context.Context, articleID string, scores ma
 // still remembers.
 func (s *Service) backfill(ctx context.Context) {
 	s.mu.Lock()
-	if s.backfilling || len(s.prompts) == 0 {
+	if len(s.prompts) == 0 {
 		s.mu.Unlock()
+		return
+	}
+	if s.backfilling {
+		s.backfillPending = true
+		cancel := s.backfillCancel
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		return
 	}
 	s.backfilling = true
 	s.mu.Unlock()
 	go func() {
-		defer func() {
+		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		for {
+			passCtx, passCancel := context.WithCancel(runCtx)
 			s.mu.Lock()
-			s.backfilling = false
+			prompts := append([]string(nil), s.prompts...)
+			s.backfillCancel = passCancel
+			s.backfillPending = false
 			s.mu.Unlock()
-		}()
-		s.backfillOnce(ctx)
+			s.ensurePromptVectors(passCtx, prompts)
+			s.backfillOnce(passCtx)
+			passCancel()
+			s.mu.Lock()
+			s.backfillCancel = nil
+			if !s.backfillPending || runCtx.Err() != nil {
+				s.backfilling = false
+				s.backfillPending = false
+				s.mu.Unlock()
+				return
+			}
+			s.mu.Unlock()
+		}
 	}()
 }
 
 func (s *Service) backfillOnce(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	result := WindowResult{From: s.now().Add(-time.Hour).Unix(), To: s.now().Unix()}
+	var articles []*dorv1.Article
+	err := s.window(ctx, live.ArticlePrefix, func(e jetstream.KeyValueEntry) {
+		result.Scanned++
+		var a dorv1.Article
+		if proto.Unmarshal(e.Value(), &a) != nil {
+			result.Partial = true
+			return
+		}
+		at := a.PublishedAt
+		if at == 0 {
+			at = e.Created().Unix()
+		}
+		if at < result.From || at > result.To {
+			return
+		}
+		result.Eligible++
+		articles = append(articles, &a)
+	})
+	if err != nil {
+		result.Partial = true
+	}
+	sort.Slice(articles, func(i, j int) bool { return articles[i].PublishedAt > articles[j].PublishedAt })
+	for _, a := range articles {
+		if ctx.Err() != nil {
+			result.Partial = true
+			break
+		}
+		scores, approx := s.ArticleScores(ctx, a)
+		if len(scores) > 0 {
+			if err := s.PublishScores(ctx, a.Id, scores, approx); err != nil {
+				result.Partial = true
+			}
+		}
+		if ctx.Err() != nil {
+			result.Partial = true
+			break
+		}
+		result.Evaluated++
+	}
+	s.mu.Lock()
+	s.backfillResult = result
+	if result.Partial {
+		s.lastBackfill = time.Time{}
+	} else {
+		s.lastBackfill = s.now()
+	}
+	s.mu.Unlock()
+	// Shared coverage metadata is available even when this matcher runs outside the gateway process.
+	if kv := s.keyValue(ctx); kv != nil {
+		data, _ := json.Marshal(result)
+		reportCtx, reportCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_, _ = kv.Put(reportCtx, "matcher.backfill", data)
+		reportCancel()
+	}
+	s.log.Info("matcher: backfill completed", "partial", result.Partial, "scanned", result.Scanned, "eligible", result.Eligible, "evaluated", result.Evaluated)
+}
+
+// BackfillStatus reports coverage of the last completed one-hour backfill.
+func (s *Service) BackfillStatus() WindowResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.backfillResult
+}
+
+// WatchPrompts makes registrations from other gateway processes live without
+// waiting for the periodic alert refresh. Reconnecting replays current keys.
+func (s *Service) WatchPrompts(ctx context.Context) error {
 	kv := s.keyValue(ctx)
 	if kv == nil {
-		return
+		return fmt.Errorf("matcher: live state unavailable")
 	}
-	keysCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	keys, err := kv.Keys(keysCtx)
-	cancel()
+	w, err := kv.Watch(ctx, "prompts.>")
 	if err != nil {
-		return
+		return err
 	}
-	cutoff := s.now().Add(-time.Hour).Unix()
-	count := 0
-	for _, key := range keys {
-		if !strings.HasPrefix(key, live.ArticlePrefix) {
-			continue
-		}
-		id := strings.TrimPrefix(key, live.ArticlePrefix)
-		article, ok := live.LoadArticle(ctx, kv, id)
-		if !ok {
-			continue
-		}
-		if article.PublishedAt > 0 && article.PublishedAt < cutoff {
-			continue
-		}
-		scores, approx := s.ArticleScores(ctx, article)
-		if len(scores) > 0 {
-			s.PublishScores(ctx, id, scores, approx)
-		}
-		count++
-		if count >= 300 {
-			break
+	defer w.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case e, ok := <-w.Updates():
+			if !ok {
+				return fmt.Errorf("matcher: prompt watcher interrupted")
+			}
+			if e == nil {
+				continue
+			}
+			var rec promptsRecord
+			s.mu.Lock()
+			if e.Operation() == jetstream.KeyValuePut && json.Unmarshal(e.Value(), &rec) == nil && rec.ClientID != "" {
+				s.clients[rec.ClientID] = cleanPrompts(rec.Prompts)
+			} else if e.Operation() != jetstream.KeyValuePut {
+				for id := range s.clients {
+					if "prompts."+sanitize(id) == e.Key() {
+						delete(s.clients, id)
+					}
+				}
+			}
+			s.clientVersion++
+			s.rebuildPromptsLocked()
+			s.mu.Unlock()
+			s.maybeBackfill(ctx)
 		}
 	}
 }
@@ -553,8 +723,21 @@ func (s *Service) articleVector(ctx context.Context, id, text string) []float32 
 	if !s.embedder.Enabled() {
 		return nil
 	}
-	vecs, err := s.embedder.Embed(ctx, []string{text})
+	s.mu.Lock()
+	retry := s.embedRetryAfter
+	s.mu.Unlock()
+	if s.now().Before(retry) {
+		return nil
+	}
+	embedCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	vecs, err := s.embedder.Embed(embedCtx, []string{text})
+	cancel()
 	if err != nil || len(vecs) == 0 {
+		if ctx.Err() == nil {
+			s.mu.Lock()
+			s.embedRetryAfter = s.now().Add(10 * time.Second)
+			s.mu.Unlock()
+		}
 		return nil
 	}
 	s.mu.Lock()
@@ -572,7 +755,9 @@ func (s *Service) jevMatch(ctx context.Context, story decide.Story, prompt strin
 	if s.decider == nil {
 		return 0, false
 	}
-	resp, err := s.decider.Decide(ctx, decide.MatchRequest(story, prompt))
+	providerCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	resp, err := s.decider.Decide(providerCtx, decide.MatchRequest(story, prompt))
 	if err != nil {
 		return 0, false
 	}
@@ -725,14 +910,31 @@ func lexical(a, b string) float64 {
 	return float64(shared) / math.Sqrt(float64(len(as)*len(bs)))
 }
 
+func lexicalCoverage(prompt, text string) float64 {
+	query, words := tokens(prompt), tokens(text)
+	if len(query) == 0 {
+		return 0
+	}
+	shared := 0
+	for t := range query {
+		if words[t] {
+			shared++
+		}
+	}
+	return float64(shared) / float64(len(query))
+}
+
 func tokens(s string) map[string]bool {
 	out := make(map[string]bool)
-	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-	}) {
-		if len(w) > 2 {
-			out[w] = true
+	stop := map[string]bool{"the": true, "and": true, "for": true, "with": true, "about": true, "from": true, "that": true, "this": true, "news": true, "stories": true, "are": true, "any": true, "please": true, "show": true, "new": true, "all": true, "where": true, "when": true}
+	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if len(w) <= 2 || stop[w] {
+			continue
 		}
+		if len(w) > 4 && strings.HasSuffix(w, "s") {
+			w = strings.TrimSuffix(w, "s")
+		}
+		out[w] = true
 	}
 	return out
 }

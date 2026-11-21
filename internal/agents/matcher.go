@@ -38,8 +38,7 @@ func NewMatcher(b *bus.Bus, metrics *Metrics, log *slog.Logger, svc *matcher.Ser
 				return Terminal(fmt.Errorf("matcher: article: %w", err))
 			}
 			scores, approx := svc.ArticleScores(ctx, &article)
-			svc.PublishScores(ctx, article.Id, scores, approx)
-			return nil
+			return svc.PublishScores(ctx, article.Id, scores, approx)
 		},
 	})
 	if err != nil {
@@ -57,26 +56,35 @@ func NewMatcher(b *bus.Bus, metrics *Metrics, log *slog.Logger, svc *matcher.Ser
 			if err := proto.Unmarshal(msg.Data, &story); err != nil {
 				return Terminal(fmt.Errorf("matcher: story: %w", err))
 			}
-			for _, hit := range svc.StoryAlerts(ctx, &story) {
+			hits, err := svc.StoryAlerts(ctx, &story)
+			if err != nil {
+				return fmt.Errorf("matcher: story alerts: %w", err)
+			}
+			for _, hit := range hits {
 				data, err := proto.MarshalOptions{Deterministic: true}.Marshal(&dorv1.AlertHit{
-					AlertId: hit.AlertID,
-					StoryId: hit.StoryID,
-					Level:   hit.Level,
-					FiredAt: hit.FiredAt.Unix(),
-					Title:   hit.Title,
-					Prompt:  hit.Prompt,
+					AlertId:     hit.AlertID,
+					StoryId:     hit.StoryID,
+					Level:       hit.Level,
+					FiredAt:     hit.FiredAt.Unix(),
+					Title:       hit.Title,
+					Prompt:      hit.Prompt,
+					Generation:  hit.Generation,
+					Approx:      hit.Approx,
+					SourceCount: uint32(hit.SourceCount),
 				})
 				if err != nil {
 					continue
 				}
 				pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				_, err = b.Publish(pubCtx, bus.SubjectMatchAlert, data,
-					bus.WithMsgID(fmt.Sprintf("alert:%s:%s:%s:%d", hit.AlertID, hit.StoryID, hit.Level, hit.SourceCount)))
+					bus.WithMsgID(fmt.Sprintf("alert:%s:%s:%s:%d", hit.AlertID, hit.StoryID, hit.Level, hit.Generation)))
 				cancel()
 				if err != nil {
 					return fmt.Errorf("matcher: publish alert: %w", err)
 				}
-				svc.RecordHit(ctx, hit)
+				if err := svc.RecordHit(ctx, hit); err != nil {
+					return fmt.Errorf("matcher: persist hit: %w", err)
+				}
 			}
 			return nil
 		},
@@ -112,6 +120,7 @@ func (m *matcherAgent) Start(ctx context.Context) error {
 	m.mu.Lock()
 	m.cancel = cancel
 	m.mu.Unlock()
+	m.svc.Refresh(runCtx)
 	if err := m.articles.Start(ctx); err != nil {
 		cancel()
 		return err
@@ -135,6 +144,21 @@ func (m *matcherAgent) Start(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				m.svc.Refresh(runCtx)
+			}
+		}
+	}()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for runCtx.Err() == nil {
+			if err := m.svc.WatchPrompts(runCtx); err != nil && runCtx.Err() == nil {
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-runCtx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}()

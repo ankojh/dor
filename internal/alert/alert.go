@@ -6,6 +6,7 @@ package alert
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,9 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/ankojh/dor/internal/bus"
@@ -27,16 +28,18 @@ var ErrNotFound = errors.New("alert: not found")
 
 // Alert is one saved prompt alert.
 type Alert struct {
-	ID         string    `json:"id"`
-	Prompt     string    `json:"prompt"`
-	MinSources int       `json:"min_sources"`
-	Region     string    `json:"region"`
-	Strictness float64   `json:"strictness"`
-	Channels   []string  `json:"channels"`
-	Enabled    bool      `json:"enabled"`
-	NtfyTopic  string    `json:"ntfy_topic,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	Prompt        string    `json:"prompt"`
+	MinSources    int       `json:"min_sources"`
+	Region        string    `json:"region"`
+	Strictness    float64   `json:"strictness"`
+	Channels      []string  `json:"channels"`
+	Enabled       bool      `json:"enabled"`
+	DailyDigest   bool      `json:"daily_digest"`
+	DigestHourUTC int       `json:"digest_hour_utc"`
+	NtfyTopic     string    `json:"ntfy_topic,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Hit is one alert firing for a story. Level is "new" or "escalated".
@@ -48,16 +51,21 @@ type Hit struct {
 	Title       string    `json:"title"`
 	Prompt      string    `json:"prompt"`
 	SourceCount int       `json:"source_count,omitempty"`
+	BaseSources int       `json:"base_sources"`
+	Generation  uint64    `json:"generation"`
+	Approx      bool      `json:"approx"`
 }
 
 // Patch is a partial update from PATCH /api/alerts/{id}.
 type Patch struct {
-	Prompt     *string   `json:"prompt"`
-	MinSources *int      `json:"min_sources"`
-	Region     *string   `json:"region"`
-	Strictness *float64  `json:"strictness"`
-	Channels   *[]string `json:"channels"`
-	Enabled    *bool     `json:"enabled"`
+	Prompt        *string   `json:"prompt"`
+	MinSources    *int      `json:"min_sources"`
+	Region        *string   `json:"region"`
+	Strictness    *float64  `json:"strictness"`
+	Channels      *[]string `json:"channels"`
+	Enabled       *bool     `json:"enabled"`
+	DailyDigest   *bool     `json:"daily_digest"`
+	DigestHourUTC *int      `json:"digest_hour_utc"`
 }
 
 // PushRecord is one encrypted Web Push subscription blob.
@@ -69,12 +77,11 @@ type PushRecord struct {
 
 // Store persists alerts. KV is always present; Postgres is optional.
 type Store struct {
-	kv  jetstream.KeyValue
-	db  *store.Store
-	log *slog.Logger
-	now func() time.Time
-
-	mu sync.Mutex
+	kv       jetstream.KeyValue
+	delivery jetstream.KeyValue
+	db       *store.Store
+	log      *slog.Logger
+	now      func() time.Time
 }
 
 // New opens the store and reloads durable alerts into KV when Postgres is
@@ -90,7 +97,11 @@ func New(ctx context.Context, b *bus.Bus, db *store.Store, log *slog.Logger) (*S
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Store{kv: kv, db: db, log: log, now: time.Now}
+	delivery, err := b.KV(ctx, bus.KVBucketAlertDelivery)
+	if err != nil {
+		return nil, fmt.Errorf("alert: delivery bucket: %w", err)
+	}
+	s := &Store{kv: kv, delivery: delivery, db: db, log: log, now: time.Now}
 	if db != nil {
 		s.reload(ctx)
 	}
@@ -150,6 +161,9 @@ func (s *Store) keys(ctx context.Context, prefix string) []string {
 
 // Create validates and stores a new alert.
 func (s *Store) Create(ctx context.Context, a Alert) (Alert, error) {
+	if a.DigestHourUTC < 0 || a.DigestHourUTC > 23 {
+		return Alert{}, errors.New("alert: digest_hour_utc must be 0–23")
+	}
 	a.Prompt = strings.TrimSpace(a.Prompt)
 	if a.Prompt == "" {
 		return Alert{}, errors.New("alert: prompt is required")
@@ -217,6 +231,15 @@ func (s *Store) Update(ctx context.Context, id string, p Patch) (Alert, error) {
 			a.Channels = []string{"inapp"}
 		}
 	}
+	if p.DailyDigest != nil {
+		a.DailyDigest = *p.DailyDigest
+	}
+	if p.DigestHourUTC != nil {
+		if *p.DigestHourUTC < 0 || *p.DigestHourUTC > 23 {
+			return Alert{}, errors.New("alert: digest_hour_utc must be 0–23")
+		}
+		a.DigestHourUTC = *p.DigestHourUTC
+	}
 	if p.Enabled != nil {
 		a.Enabled = *p.Enabled
 	}
@@ -248,17 +271,33 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 
 // Get loads one alert.
 func (s *Store) Get(ctx context.Context, id string) (Alert, bool) {
+	a, ok, _ := s.Lookup(ctx, id)
+	return a, ok
+}
+
+// Lookup distinguishes a deleted alert from an unavailable configuration store.
+func (s *Store) Lookup(ctx context.Context, id string) (Alert, bool, error) {
 	var a Alert
-	if s.getKV(ctx, alertKey(id), &a) {
-		return a, true
+	e, err := s.kv.Get(ctx, alertKey(id))
+	if err == nil {
+		err = json.Unmarshal(e.Value(), &a)
+		return a, err == nil, err
+	}
+	if !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return Alert{}, false, err
 	}
 	if s.db != nil {
-		if a, err := s.getDB(ctx, id); err == nil {
-			_ = s.putKV(ctx, alertKey(id), a)
-			return a, true
+		a, err = s.getDB(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Alert{}, false, nil
 		}
+		if err != nil {
+			return Alert{}, false, err
+		}
+		_ = s.putKV(ctx, alertKey(id), a)
+		return a, true, nil
 	}
-	return Alert{}, false
+	return Alert{}, false, nil
 }
 
 // List returns all alerts, sorted by creation time.
@@ -282,52 +321,162 @@ func (s *Store) List(ctx context.Context) []Alert {
 	return out
 }
 
-// RecordHit stores a firing and its escalation state, best effort in Postgres.
-func (s *Store) RecordHit(ctx context.Context, h Hit) {
+// Identity is stable across redelivery and changes at every source-doubling generation.
+func (h Hit) Identity() string {
+	return identity(h.AlertID, h.StoryID, fmt.Sprint(h.Generation))
+}
+
+func identity(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// RecordHit retains every generation and advances the pair's state monotonically.
+func (s *Store) RecordHit(ctx context.Context, h Hit) error {
 	h.FiredAt = h.FiredAt.UTC()
-	_ = s.putKV(ctx, hitKey(h.AlertID, h.StoryID), h)
+	data, err := json.Marshal(h)
+	if err != nil {
+		return err
+	}
+	if _, err = s.delivery.Put(ctx, "hit."+h.Identity(), data); err != nil {
+		return err
+	}
+	key := "hitstate." + identity(h.AlertID, h.StoryID)
+	for {
+		e, err := s.delivery.Get(ctx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			_, err = s.delivery.Create(ctx, key, data)
+		} else if err == nil {
+			var previous Hit
+			if err = json.Unmarshal(e.Value(), &previous); err != nil {
+				return err
+			}
+			if previous.Generation >= h.Generation {
+				break
+			}
+			_, err = s.delivery.Update(ctx, key, data, e.Revision())
+		}
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
 	if s.db != nil {
 		if err := s.insertHitDB(ctx, h); err != nil {
-			s.log.Warn("alert: hit insert failed", "alert", h.AlertID, "story", h.StoryID, "err", err)
+			s.log.Warn("alert: hit mirror failed; generation retained in durable KV", "alert", h.AlertID, "generation", h.Generation, "err", err)
 		}
 	}
+	return nil
 }
 
-// HitState returns the last hit for a pair (dedupe/escalation).
-func (s *Store) HitState(ctx context.Context, alertID, storyID string) (Hit, bool) {
+// HitState returns the latest generation, including after process/KV hot-cache expiry.
+func (s *Store) HitState(ctx context.Context, alertID, storyID string) (Hit, bool, error) {
 	var h Hit
-	if s.getKV(ctx, hitKey(alertID, storyID), &h) {
-		return h, true
+	e, err := s.delivery.Get(ctx, "hitstate."+identity(alertID, storyID))
+	if err == nil {
+		if err = json.Unmarshal(e.Value(), &h); err != nil {
+			return Hit{}, false, err
+		}
+		return h, true, nil
 	}
+	if !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return Hit{}, false, err
+	}
+	// Migration 0004 knows the original source count, while old hot state may
+	// contain later escalations that the former DB primary key discarded.
+	var durable Hit
+	var durableOK bool
 	if s.db != nil {
-		if h, ok := s.hitStateDB(ctx, alertID, storyID); ok {
-			// Repopulate the hot copy so the next story change is a KV read.
-			_ = s.putKV(ctx, hitKey(alertID, storyID), h)
-			return h, true
+		durable, durableOK, err = s.hitStateDB(ctx, alertID, storyID)
+		if err != nil {
+			return Hit{}, false, err
 		}
 	}
-	return Hit{}, false
+	var legacy Hit
+	legacyOK := false
+	e, err = s.kv.Get(ctx, hitKey(alertID, storyID))
+	if err == nil {
+		if err = json.Unmarshal(e.Value(), &legacy); err != nil {
+			return Hit{}, false, err
+		}
+		legacyOK = true
+	} else if !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return Hit{}, false, err
+	}
+	recovered, ok := reconcileLegacyHit(durable, durableOK, legacy, legacyOK)
+	if !ok {
+		return Hit{}, false, nil
+	}
+	if err = s.RecordHit(ctx, recovered); err != nil {
+		return Hit{}, false, err
+	}
+	return recovered, true, nil
 }
 
-// Hits returns an alert's hits, newest first. alertID may be empty for all.
+// reconcileLegacyHit retains the DB baseline and the newest observed source
+// threshold. The old level-only DB key kept the first escalation; hot state
+// kept the latest. Neither may roll the other one backwards on upgrade.
+func reconcileLegacyHit(durable Hit, durableOK bool, legacy Hit, legacyOK bool) (Hit, bool) {
+	if !durableOK {
+		if !legacyOK {
+			return Hit{}, false
+		}
+		if legacy.Level == "escalated" && legacy.Generation == 0 {
+			legacy.Generation = 1
+		}
+		return legacy, true
+	}
+	base := durable.BaseSources
+	if base <= 0 {
+		base = max(1, durable.SourceCount>>min(durable.Generation, 32))
+	}
+	recovered := durable
+	if legacyOK && legacy.SourceCount >= durable.SourceCount {
+		recovered = legacy
+	}
+	recovered.BaseSources = base
+	recovered.Generation = max(durable.Generation, recovered.Generation)
+	if legacyOK {
+		recovered.Generation = max(recovered.Generation, legacy.Generation)
+	}
+	// Old DB rows also need normalization after their hot KV entry expired.
+	for generation := uint64(1); generation <= 32 && uint64(base)<<generation <= uint64(max(0, recovered.SourceCount)); generation++ {
+		recovered.Generation = max(recovered.Generation, generation)
+	}
+	if recovered.Generation > 0 {
+		recovered.Level = "escalated"
+	}
+	return recovered, true
+}
+
+// Hits returns all retained generations, newest first.
 func (s *Store) Hits(ctx context.Context, alertID string) []Hit {
+	seen := make(map[string]bool)
+	var out []Hit
 	if s.db != nil {
 		if hits, err := s.listHitsDB(ctx, alertID); err == nil {
-			return hits
+			for _, h := range hits {
+				seen[h.Identity()] = true
+				out = append(out, h)
+			}
 		}
 	}
-	var out []Hit
-	prefix := "alerthit."
-	for _, k := range s.keys(ctx, prefix) {
+	_ = s.walkDelivery(ctx, "hit.>", func(e jetstream.KeyValueEntry) error {
 		var h Hit
-		if !s.getKV(ctx, k, &h) {
-			continue
+		if json.Unmarshal(e.Value(), &h) == nil && (alertID == "" || h.AlertID == alertID) && !seen[h.Identity()] {
+			out = append(out, h)
+			seen[h.Identity()] = true
+			if s.db != nil {
+				_ = s.insertHitDB(ctx, h)
+			}
 		}
-		if alertID != "" && h.AlertID != alertID {
-			continue
-		}
-		out = append(out, h)
-	}
+		return nil
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].FiredAt.After(out[j].FiredAt) })
 	return out
 }
@@ -347,43 +496,6 @@ func (s *Store) IsMuted(ctx context.Context, alertID, storyID string) bool {
 	}
 	var v map[string]bool
 	return s.getKV(ctx, muteKey(alertID, storyID), &v) && v["muted"]
-}
-
-// AllowRate applies a per-alert minimum interval.
-func (s *Store) AllowRate(ctx context.Context, alertID string, min time.Duration) bool {
-	key := "alertrate." + alertID
-	var last int64
-	s.getKV(ctx, key, &last)
-	now := s.now().Unix()
-	if last > 0 && now-last < int64(min.Seconds()) {
-		return false
-	}
-	_ = s.putKV(ctx, key, now)
-	return true
-}
-
-// Attempts returns the current delivery attempt count for one hit.
-func (s *Store) Attempts(ctx context.Context, alertID, storyID string) int {
-	var n int
-	s.getKV(ctx, "alertattempt."+alertID+"."+storyID, &n)
-	return n
-}
-
-// BumpAttempt increments the delivery attempt counter for one hit.
-func (s *Store) BumpAttempt(ctx context.Context, alertID, storyID string) int {
-	key := "alertattempt." + alertID + "." + storyID
-	var n int
-	s.getKV(ctx, key, &n)
-	n++
-	_ = s.putKV(ctx, key, n)
-	return n
-}
-
-// ClearAttempt removes the attempt counter after a successful delivery.
-func (s *Store) ClearAttempt(ctx context.Context, alertID, storyID string) {
-	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-	defer cancel()
-	_ = s.kv.Delete(opCtx, "alertattempt."+alertID+"."+storyID)
 }
 
 // SavePush stores an encrypted subscription blob. Postgres keeps only the
@@ -412,53 +524,83 @@ func (s *Store) DeletePush(ctx context.Context, id string) {
 	}
 }
 
-// PushDelivered reports whether a subscription already received this exact
-// (alert, story, level). It keeps notifier retries from duplicating a push to
-// subscriptions that succeeded before a partial failure.
-func (s *Store) PushDelivered(ctx context.Context, alertID, storyID, level, subID string) bool {
-	var delivered map[string]bool
-	if !s.getKV(ctx, pushDeliveredKey(alertID, storyID, level), &delivered) {
-		return false
+// PushDelivered and MarkPushDelivered retain one receipt per generation/subscription.
+func (s *Store) PushDelivered(ctx context.Context, h Hit, subID string) (bool, error) {
+	done, err := s.ChannelDelivered(ctx, h.Identity(), "push."+subID)
+	if err != nil || done {
+		return done, err
 	}
-	return delivered[subID]
+	// Old receipts only identified new/first-escalation. They cannot suppress
+	// later generations, and cannot be interpreted as digest delivery receipts.
+	legacy := (h.Level == "new" && h.Generation == 0) || (h.Level == "escalated" && h.Generation == 1)
+	if !legacy {
+		return false, nil
+	}
+	e, err := s.kv.Get(ctx, "pushdelivered."+h.AlertID+"."+h.StoryID+"."+h.Level)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var receipts map[string]bool
+	if err = json.Unmarshal(e.Value(), &receipts); err != nil {
+		return false, err
+	}
+	if !receipts[subID] {
+		return false, nil
+	}
+	if err = s.MarkPushDelivered(ctx, h, subID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
-
-// MarkPushDelivered records one successful per-subscription delivery.
-func (s *Store) MarkPushDelivered(ctx context.Context, alertID, storyID, level, subID string) {
-	key := pushDeliveredKey(alertID, storyID, level)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var delivered map[string]bool
-	s.getKV(ctx, key, &delivered)
-	if delivered == nil {
-		delivered = make(map[string]bool)
-	}
-	delivered[subID] = true
-	_ = s.putKV(ctx, key, delivered)
+func (s *Store) MarkPushDelivered(ctx context.Context, h Hit, subID string) error {
+	return s.MarkChannelDelivered(ctx, h.Identity(), "push."+subID)
 }
 
 // PushSubscriptions returns the encrypted subscriptions, KV first and the
 // durable mirror when KV expired.
-func (s *Store) PushSubscriptions(ctx context.Context) []PushRecord {
+func (s *Store) PushSubscriptions(ctx context.Context) ([]PushRecord, error) {
 	var out []PushRecord
 	seen := make(map[string]bool)
-	for _, k := range s.keys(ctx, "pushsub.") {
-		var p PushRecord
-		if s.getKV(ctx, k, &p) {
+	w, err := s.kv.Watch(ctx, "pushsub.>", jetstream.IgnoreDeletes())
+	if err != nil {
+		return nil, err
+	}
+	defer w.Stop()
+scan:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case e, ok := <-w.Updates():
+			if !ok {
+				return nil, errors.New("alert: subscription scan interrupted")
+			}
+			if e == nil {
+				break scan
+			}
+			var p PushRecord
+			if err = json.Unmarshal(e.Value(), &p); err != nil {
+				return nil, err
+			}
 			out = append(out, p)
 			seen[p.ID] = true
 		}
 	}
 	if s.db != nil {
-		if records, err := s.pushSubscriptionsDB(ctx); err == nil {
-			for _, p := range records {
-				if !seen[p.ID] {
-					out = append(out, p)
-				}
+		records, err := s.pushSubscriptionsDB(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range records {
+			if !seen[p.ID] {
+				out = append(out, p)
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 func normalizeChannels(in []string) []string {
@@ -497,9 +639,6 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func alertKey(id string) string { return "alert." + id }
-func hitKey(a, s string) string { return "alerthit." + a + "." + s }
-func pushDeliveredKey(a, s, level string) string {
-	return "pushdelivered." + a + "." + s + "." + level
-}
+func alertKey(id string) string  { return "alert." + id }
+func hitKey(a, s string) string  { return "alerthit." + a + "." + s }
 func muteKey(a, s string) string { return "alertmute." + a + "." + s }

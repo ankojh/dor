@@ -48,6 +48,9 @@ const (
 	KVBucketBudgets   = "budgets"
 	KVBucketSpend     = "spend"
 	KVBucketLiveState = "live_state"
+	// Alert deliveries and receipts must survive outages longer than live-state TTL.
+	KVBucketAlertDelivery = "alert_delivery"
+	KVAlertDeliveryTTL    = 0
 
 	KVSeenTTL            = 48 * time.Hour
 	KVJoinsTTL           = 30 * time.Second
@@ -379,6 +382,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketBudgets, KVBudgetsTTL},
 		{KVBucketSpend, KVSpendTTL},
 		{KVBucketLiveState, KVLiveStateTTL},
+		{KVBucketAlertDelivery, KVAlertDeliveryTTL},
 		{KVBucketSourceHealth, KVSourceHealthTTL},
 		{KVBucketEvalPending, KVEvalPendingTTL},
 	}

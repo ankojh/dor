@@ -19,6 +19,7 @@ import {
   type WireRow,
 } from "../gen/dor/v1/dor_pb";
 import type { SourceHealth, WorkerCommand, WorkerMessage, WorkerStatus } from "./messages";
+import { mergeWireRow } from "../live/wire";
 
 const WIRE_LIMIT = 1000;
 const statusScope = globalThis as unknown as {
@@ -84,7 +85,14 @@ function wireKey(row: WireRow): string {
 
 function rememberWire(row: WireRow): void {
   const key = wireKey(row);
-  if (seenArticles.has(key)) return;
+  const existing = wire.find((candidate) => wireKey(candidate) === key);
+  if (existing) {
+    // article.clean arrives first; article.placed later adds story_id,
+    // category and join. Update the row in place instead of dropping it.
+    Object.assign(existing, mergeWireRow(existing, row));
+    lastWireAt = Math.max(lastWireAt ?? 0, Number(row.at));
+    return;
+  }
   seenArticles.add(key);
   wire.unshift(row);
   if (wire.length > WIRE_LIMIT) {
@@ -170,6 +178,8 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
       resetState();
       for (const story of snapshot.stories) stories.set(story.id, story);
       for (const link of snapshot.links) links.set(linkKey(link.a, link.b), link);
+      const recentWire = snapshot.recentWire;
+      for (const row of recentWire) rememberWire(row);
       lastSeq = Number(snapshot.seq);
       debug.snapshots = Number(debug.snapshots) + 1;
       debug.wires = wire.length;
@@ -179,6 +189,7 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
         builtAt: Number(snapshot.builtAt),
         stories: [...stories.values()],
         links: [...links.values()],
+        ...(recentWire.length > 0 ? { recentWire } : {}),
       });
       sendAck();
       postStatus("online");

@@ -32,6 +32,8 @@ export type LiveStory = {
   category: number;
   color: [number, number, number, number];
   parties: Array<{ lng: number; lat: number; label: string }>;
+  degree: number;
+  strongestLink: number;
 };
 
 export type LiveGlobeData = {
@@ -88,6 +90,8 @@ export function buildLiveGlobe(
       category,
       color: [...categoryColor(category), 255] as [number, number, number, number],
       parties: storyParties(story),
+      degree: 0,
+      strongestLink: 0,
     });
   }
 
@@ -146,6 +150,9 @@ export function buildLiveGlobe(
   const linkStrength: number[] = [];
   const linkWidth: number[] = [];
   const linkUnverified: number[] = [];
+  const linkDirection: number[] = [];
+  const linkConfidence: number[] = [];
+  const linkDistance: number[] = [];
   const linkByKey = new Map<string, number>();
   for (const link of realLinks) {
     const a = storyById.get(link.a);
@@ -161,7 +168,15 @@ export function buildLiveGlobe(
     linkStrength.push(Math.max(0, Math.min(1, link.strength)));
     const encoding = encodeArc(link.type, link.strength);
     linkWidth.push(encoding.widthPx);
-    linkUnverified.push((link as Link & { unverified?: boolean }).unverified ? 1 : 0);
+    linkUnverified.push(link.unverified ? 1 : 0);
+    linkDirection.push(link.dir);
+    linkConfidence.push(link.confidence);
+    linkDistance.push(
+      greatCircleLength(
+        [located[a]!.lng, located[a]!.lat],
+        [located[b]!.lng, located[b]!.lat],
+      ) / 1000,
+    );
   }
 
   const linkCount = linkA.length;
@@ -176,6 +191,9 @@ export function buildLiveGlobe(
     color: new Uint8Array(linkCount * 4),
     width: Float32Array.from(linkWidth),
     unverified: Uint8Array.from(linkUnverified),
+    direction: Uint8Array.from(linkDirection),
+    confidence: Float32Array.from(linkConfidence),
+    distanceKm: Float32Array.from(linkDistance),
   };
   for (let i = 0; i < linkCount; i++) {
     const encoding = encodeArc(linkType[i]!, linkStrength[i]!);
@@ -233,6 +251,16 @@ export function buildLiveGlobe(
     heat: entry.story.heat,
   }));
 
+  for (const entry of located) {
+    entry.degree = adjStart[entry.index + 1]! - adjStart[entry.index]!;
+  }
+  for (let i = 0; i < linkCount; i++) {
+    const strength = linkStrength[i]!;
+    const a = located[linkA[i]!]!;
+    const b = located[linkB[i]!]!;
+    a.strongestLink = Math.max(a.strongestLink, strength);
+    b.strongestLink = Math.max(b.strongestLink, strength);
+  }
   const arcs = buildArcArrays(located, linkA, linkB, linkType);
   const ripples = emptyRipples();
   const strengths = linkStrength.filter((strength) => strength >= 0.6).sort((a, b) => b - a);

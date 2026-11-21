@@ -13,7 +13,8 @@ export type GlobeConfig = {
   attribution: string;
 };
 
-export const DOR_ATTRIBUTION = "© OpenFreeMap · © OpenMapTiles · © OpenStreetMap contributors";
+export const DOR_ATTRIBUTION =
+  "© OpenFreeMap · © OpenMapTiles · © OpenStreetMap contributors · GDELT";
 
 export function loadGlobeConfig(): GlobeConfig {
   const env = import.meta.env as Record<string, string | undefined>;

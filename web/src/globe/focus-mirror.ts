@@ -41,6 +41,9 @@ export class FocusMirror {
   private readonly linkType: Uint8Array;
   private readonly linkStrength: Float32Array;
   private readonly linkUnverified: Uint8Array;
+  private readonly linkDirection: Uint8Array;
+  private readonly linkConfidence: Float32Array;
+  private readonly linkDistance: Float32Array;
   private readonly storyLng: Float64Array;
   private readonly storyLat: Float64Array;
   private readonly storyTitle: string[];
@@ -81,6 +84,12 @@ export class FocusMirror {
     this.linkStrength.set(init.links.strength);
     this.linkUnverified = new Uint8Array(this.linkCapacity);
     if (init.links.unverified) this.linkUnverified.set(init.links.unverified);
+    this.linkDirection = new Uint8Array(this.linkCapacity);
+    if (init.links.direction) this.linkDirection.set(init.links.direction);
+    this.linkConfidence = new Float32Array(this.linkCapacity);
+    if (init.links.confidence) this.linkConfidence.set(init.links.confidence);
+    this.linkDistance = new Float32Array(this.linkCapacity);
+    if (init.links.distanceKm) this.linkDistance.set(init.links.distanceKm);
     this.storyLng = new Float64Array(this.storyCapacity);
     this.storyLng.set(init.stories.lng);
     this.storyLat = new Float64Array(this.storyCapacity);
@@ -241,6 +250,9 @@ export class FocusMirror {
             place: this.storyPlace[other]!,
             type: this.linkType[link]!,
             strength: this.linkStrength[link]!,
+            direction: this.linkDirection[link]!,
+            confidence: this.linkConfidence[link]!,
+            distanceKm: this.linkDistance[link]!,
             unverified: this.linkUnverified[link] === 1,
           };
         })
@@ -321,6 +333,9 @@ export class FocusMirror {
       this.linkType[linkIndex] = type;
       this.linkStrength[linkIndex] = strength;
       this.linkUnverified[linkIndex] = 0;
+      this.linkDirection[linkIndex] = 0;
+      this.linkConfidence[linkIndex] = 0;
+      this.linkDistance[linkIndex] = 0;
       this.linkActive[linkIndex] = 1;
     } else {
       this.linkA[linkIndex] = 0;

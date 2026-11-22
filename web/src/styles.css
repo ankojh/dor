@@ -1826,7 +1826,8 @@ body {
   }
   .stage .br {
     right: 12px;
-    bottom: 12px;
+    /* Keep zoom/reset clear of a tall story sheet at the bottom. */
+    bottom: 56px;
   }
   .stage-empty {
     padding: 18px;
@@ -2923,21 +2924,6 @@ body {
   }
 }
 
-/* A11y: dimmed rows stay readable; opacity .45 failed WCAG contrast. */
-.wr.dim {
-  opacity: 1;
-}
-.wr.dim .wr-body {
-  background: rgba(255, 255, 255, 0.012);
-}
-.wr.dim .wr-body .title {
-  color: var(--text-2);
-}
-.wr.dim .wr-body time,
-.wr.dim .wr-body .ws,
-.wr.dim .wr-body .join {
-  color: #8a9bb5;
-}
 /* Selected rows sit on the brightest wire background; lift their meta text. */
 .wr.sel .wr-body time,
 .wr.sel .wr-body .ws,

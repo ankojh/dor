@@ -28,6 +28,10 @@ const (
 	// publisherWireHistory is the bounded cold-start wire history placed in
 	// every snapshot. It is not a replay of old deltas; rows carry no seq.
 	publisherWireHistory = 500
+	// maxReconciledWireRows bounds the extra wire deltas one story update can
+	// enqueue, so a wide story cannot build a flush batch past the payload
+	// budget. Later story updates reconcile any rows left over.
+	maxReconciledWireRows = 256
 
 	// Heat cooling and link eviction run from the expiry loop. Quiet stories
 	// cool visibly; a story that reaches its 48 h content TTL drops its links
@@ -458,7 +462,11 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 		}
 	}
 	if wire.StoryId != "" {
-		if story, ok := c.stories[wire.StoryId]; ok && story != nil {
+		// story.changed may be accepted into pending just before this placed
+		// article is handled; c.stories only catches up at the 250 ms flush.
+		// Read the pending story too so the row does not stay OTHER until the
+		// next story update (which can be minutes for a quiet story).
+		if story := c.storyForWireLocked(wire.StoryId); story != nil {
 			wire.Category = story.Category
 			wire.Degraded = story.Degraded
 			wire.Fallback = story.Fallback
@@ -475,13 +483,16 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 					}
 				}
 			}
-			if !wire.Located && len(story.Locations) > 0 {
+			if len(story.Locations) > 0 {
 				idx := int(story.Primary)
 				if idx < 0 || idx >= len(story.Locations) {
 					idx = 0
 				}
 				loc := story.Locations[idx]
-				if loc.Lat != 0 || loc.Lon != 0 {
+				if wire.Place == "" && loc.Name != "" {
+					wire.Place = loc.Name
+				}
+				if !wire.Located && (loc.Lat != 0 || loc.Lon != 0) {
 					wire.Lat = float64(loc.Lat)
 					wire.Lon = float64(loc.Lon)
 					wire.Located = true
@@ -511,6 +522,24 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	}
 	c.mu.Unlock()
 	c.enqueue("wire:"+a.Id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: wire}})
+}
+
+// storyForWireLocked returns the newest story for a wire row. Pending story
+// deltas are newer than the committed map until the next flush, so they take
+// precedence when present. c.mu must be held.
+func (c *publisherCore) storyForWireLocked(id string) *dorv1.Story {
+	if id == "" {
+		return nil
+	}
+	if story := c.stories[id]; story != nil {
+		return story
+	}
+	if delta := c.pending["story:"+id]; delta != nil {
+		if story := delta.GetStoryUpsert(); story != nil {
+			return story
+		}
+	}
+	return nil
 }
 
 func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) {
@@ -701,6 +730,9 @@ func (c *publisherCore) reconcileWireForStory(s *dorv1.Story) {
 		}
 		c.wireRows[id] = next
 		updates = append(updates, next)
+		if len(updates) >= maxReconciledWireRows {
+			break
+		}
 	}
 	c.mu.Unlock()
 	for _, row := range updates {

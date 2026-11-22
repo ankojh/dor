@@ -826,7 +826,10 @@ func (c *clusterer) applyJoinProvenance(story *storyState, place *dorv1.PlacedAr
 	if story == nil {
 		return
 	}
-	if class != nil {
+	if class != nil && class.GetCategory() == story.Story.GetCategory() {
+		// Provenance must describe the category actually displayed. Story
+		// keeps the first non-OTHER category; a higher-confidence class for a
+		// different category cannot relabel the displayed one.
 		if story.CategoryBackend == "" || class.GetConfidence() >= story.CategoryConfidence {
 			story.CategoryBackend = class.GetBackend()
 			story.CategoryConfidence = class.GetConfidence()

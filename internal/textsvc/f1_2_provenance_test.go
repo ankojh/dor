@@ -69,6 +69,12 @@ func TestF12FallbackStory(t *testing.T) {
 	if withSource.Title != "First source headline" {
 		t.Fatalf("title = %q, want the first source headline", withSource.Title)
 	}
+
+	editorStory := &dorv1.Story{Id: story.Id, Title: "Neutral editor title", TitleSource: "editor"}
+	fallback := fallbackStory(editorStory, []llm.Source{{Title: "Raw source headline"}}, 2, "now")
+	if fallback.Title != "Neutral editor title" {
+		t.Fatalf("fallback title = %q, want the applied editor title", fallback.Title)
+	}
 }
 
 type f12Completer struct {
@@ -123,7 +129,7 @@ func f12SeedStory(t *testing.T, ctx context.Context, kv jetstream.KeyValue, id s
 	}
 }
 
-func TestF12GenerateStoryWritesEditorTitleAndPublishes(t *testing.T) {
+func TestF12GenerateStoryWritesEditorTitleMarker(t *testing.T) {
 	b := textsvcTestBus(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -160,17 +166,18 @@ func TestF12GenerateStoryWritesEditorTitleAndPublishes(t *testing.T) {
 	if !ok {
 		t.Fatal("generated story missing from live_state")
 	}
-	if stored.Title != "Neutral editor headline" || stored.TitleSource != "editor" {
-		t.Fatalf("live story title = (%q,%q), want editor-owned neutral title", stored.Title, stored.TitleSource)
+	// textsvc does not own story.<id>; the clusterer applies the marker.
+	if stored.Title != "Working headline" || stored.TitleSource != "source" {
+		t.Fatalf("live story title = (%q,%q), want the cluster-owned source title untouched", stored.Title, stored.TitleSource)
 	}
 	marker, ok := live.LoadStoryTitle(ctx, kv, id)
 	if !ok || marker.Title != "Neutral editor headline" {
 		t.Fatalf("storytitle marker = (%+v,%v), want the editor title", marker, ok)
 	}
 
-	// story.changed must reach the publisher/browser from applyEditorTitle.
-	if got := f12SubjectMessages(t, ctx, b, bus.StoryChangedSubject(id)); got < 1 {
-		t.Fatalf("story.changed messages = %d, want at least 1", got)
+	// Marker-only: no story.changed from textsvc; the clusterer publishes.
+	if got := f12SubjectMessages(t, ctx, b, bus.StoryChangedSubject(id)); got != 0 {
+		t.Fatalf("story.changed messages = %d, want 0", got)
 	}
 
 	cached, ok := live.LoadStoryText(ctx, kv, id)
@@ -179,6 +186,50 @@ func TestF12GenerateStoryWritesEditorTitleAndPublishes(t *testing.T) {
 	}
 	if cached.Provenance != live.BriefGenerated || cached.Model != "test-opus" {
 		t.Fatalf("cached brief = %+v", cached)
+	}
+}
+
+// A cluster content update during the model call must not be reverted by the
+// editor-title path. textsvc writes only the marker; story.<id> stays newer.
+type f12RacingCompleter struct {
+	kv jetstream.KeyValue
+	id string
+}
+
+func (c *f12RacingCompleter) Complete(ctx context.Context, _ llm.Job) (llm.Result, error) {
+	live.PutStory(ctx, c.kv, &dorv1.Story{
+		Id: c.id, Title: "Working headline", TitleSource: "source",
+		Category: dorv1.Category_CATEGORY_DISASTER, SourceCount: 3, Heat: 0.9,
+		FirstSeen: time.Now().Add(-time.Hour).Unix(), UpdatedAt: time.Now().Unix(),
+		Locations: []*dorv1.Location{{PlaceId: "pahala", Name: "Pahala", Country: "US"}, {PlaceId: "hilo", Name: "Hilo", Country: "US"}},
+	})
+	return llm.Result{Text: `{"title":"Neutral editor headline","brief":"A brief."}`, Model: "test-opus"}, nil
+}
+
+func TestF12EditorTitleDoesNotRevertNewerStory(t *testing.T) {
+	b := textsvcTestBus(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	kv, err := b.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		t.Fatalf("live_state kv: %v", err)
+	}
+	const id = "story-f12-race"
+	f12SeedStory(t, ctx, kv, id)
+	svc := New(b, slog.New(slog.NewTextHandler(io.Discard, nil)), &f12RacingCompleter{kv: kv, id: id})
+	if _, ok := svc.GenerateStory(ctx, id); !ok {
+		t.Fatal("GenerateStory did not find the story")
+	}
+	got, ok := live.LoadStory(ctx, kv, id)
+	if !ok {
+		t.Fatal("story missing after editor title")
+	}
+	if got.SourceCount != 3 || len(got.Locations) != 2 || got.Heat != 0.9 {
+		t.Fatalf("editor title reverted newer story: sources=%d locations=%d heat=%v", got.SourceCount, len(got.Locations), got.Heat)
+	}
+	marker, ok := live.LoadStoryTitle(ctx, kv, id)
+	if !ok || marker.Title != "Neutral editor headline" {
+		t.Fatalf("marker = (%+v,%v), want the editor title", marker, ok)
 	}
 }
 

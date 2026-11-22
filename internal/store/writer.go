@@ -501,13 +501,23 @@ func (w *Writer) retryEnrichments(pending []pendingEnrichment) []pendingEnrichme
 		byID[p.record.ID] = p
 	}
 	for _, r := range retry {
+		// Keep the incremented attempts: flushEnrichments reports "missing"
+		// with a fresh attempt counter, and copying it back would reset the
+		// bound forever.
 		if p, ok := byID[r.record.ID]; ok {
-			p.attempts = r.attempts
 			waiting = append(waiting, p)
 		}
 	}
+	if len(waiting) > maxPendingEnrichments {
+		dropped := len(waiting) - maxPendingEnrichments
+		w.droppedBatch.Add(int64(dropped))
+		waiting = waiting[:maxPendingEnrichments]
+	}
 	return waiting
 }
+
+// maxPendingEnrichments caps malformed/absent articles waiting for retry.
+const maxPendingEnrichments = 8192
 
 func (w *Writer) flushStories(batch []StoryRecord) {
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {

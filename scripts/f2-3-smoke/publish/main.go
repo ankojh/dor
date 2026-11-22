@@ -18,10 +18,13 @@ import (
 )
 
 func main() {
-	url := flag.String("url", "nats://127.0.0.1:4222", "NATS URL")
+	url := flag.String("url", "", "NATS URL (required; no live default)")
 	id := flag.String("id", "f23-smoke", "raw article id suffix")
 	title := flag.String("title", "F2-3 smoketest wildfire evacuation in California", "article title")
 	flag.Parse()
+	if *url == "" {
+		fail("--url is required; this helper has no live NATS default")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

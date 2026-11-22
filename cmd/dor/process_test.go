@@ -25,10 +25,95 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// spawnedEnv drops ambient targets that could point a re-executed test binary
+// at the developer's live stack. Each caller must still pass an explicit
+// --db-url and --nats-listen; this only removes inherited defaults.
+func spawnedEnv(environ []string) []string {
+	// Drop every ambient DOR_* target and provider credential. The child gets
+	// only the arguments and the two explicit values spawnEnv appends, so a
+	// developer's live-stack shell cannot redirect a test.
+	blocked := map[string]bool{
+		"TYPESAFE_API_KEY":   true,
+		"OPENROUTER_API_KEY": true,
+		"ANTHROPIC_API_KEY":  true,
+	}
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if blocked[key] || strings.HasPrefix(key, "DOR_") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func spawnEnv(environ []string) []string {
+	return append(spawnedEnv(environ), "DOR_TEST_AS_MAIN=1", "DOR_DATABASE_URL=off")
+}
+
+func TestSpawnedEnvDropsAmbientLiveTargets(t *testing.T) {
+	environ := []string{
+		"DOR_DATABASE_URL=postgres://dor:dor@127.0.0.1:5433/dor?sslmode=disable",
+		"DOR_NATS_URL=nats://127.0.0.1:4222",
+		"DOR_NATS_STORE=/tmp/live",
+		"DOR_ADMIN_ADDR=127.0.0.1:8091",
+		"DOR_GATEWAY_ADDR=127.0.0.1:8080",
+		"PATH=/bin",
+		"DOR_TEST_AS_MAIN=1",
+	}
+	got := spawnedEnv(environ)
+	want := []string{"PATH=/bin"}
+	if len(got) != len(want) {
+		t.Fatalf("spawnedEnv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("spawnedEnv = %v, want %v", got, want)
+		}
+	}
+	for _, entry := range got {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "DOR_") {
+			t.Fatalf("spawnedEnv kept ambient DOR_* target %q", entry)
+		}
+	}
+}
+
+func TestSpawnDorEnvironmentAddsDatabaseOff(t *testing.T) {
+	environ := []string{
+		"DOR_DATABASE_URL=postgres://dor:dor@127.0.0.1:5433/dor",
+		"DOR_NATS_URL=nats://127.0.0.1:4222",
+		"DOR_NATS_STORE=/tmp/live",
+		"PATH=/bin",
+	}
+	got := spawnEnv(environ)
+
+	values := map[string][]string{}
+	for _, entry := range got {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = append(values[key], value)
+	}
+	if db := values["DOR_DATABASE_URL"]; len(db) != 1 || db[0] != "off" {
+		t.Fatalf("DOR_DATABASE_URL = %v, want exactly [off]", db)
+	}
+	if got := values["DOR_TEST_AS_MAIN"]; len(got) != 1 || got[0] != "1" {
+		t.Fatalf("DOR_TEST_AS_MAIN = %v, want [1]", got)
+	}
+	if got := values["PATH"]; len(got) != 1 || got[0] != "/bin" {
+		t.Fatalf("PATH = %v, want [/bin]", got)
+	}
+	for _, key := range []string{"DOR_NATS_URL", "DOR_NATS_STORE", "DOR_ADMIN_ADDR", "DOR_GATEWAY_ADDR"} {
+		if _, ok := values[key]; ok {
+			t.Fatalf("spawnEnv kept ambient target %s", key)
+		}
+	}
+}
+
 func spawnDor(t *testing.T, args ...string) (*exec.Cmd, <-chan map[string]any, *bytes.Buffer) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], append([]string{"run"}, args...)...)
-	cmd.Env = append(os.Environ(), "DOR_TEST_AS_MAIN=1")
+	cmd.Env = spawnEnv(os.Environ())
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
 	out, err := cmd.StdoutPipe()
@@ -84,6 +169,7 @@ func TestSignalsShutDownCleanly(t *testing.T) {
 				"--nats-store", t.TempDir(),
 				"--admin-addr", "",
 				"--agents", "echo",
+				"--db-url", "off",
 			)
 			running := waitLog(t, lines, "dor running")
 			if running["mode"] != "embedded" {
@@ -118,7 +204,7 @@ func TestSignalsShutDownCleanly(t *testing.T) {
 func TestBadAgentSelectionExitsNonZero(t *testing.T) {
 	cmd, _, stderr := spawnDor(t,
 		"--nats-listen", "127.0.0.1:0", "--nats-store", t.TempDir(),
-		"--admin-addr", "", "--agents", "nope",
+		"--admin-addr", "", "--agents", "nope", "--db-url", "off",
 	)
 	err := cmd.Wait()
 	if err == nil {

@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const (
+	// liveDatabase is the developer's real local Dor database. Test binaries
+	// must never connect to or migrate it by inheriting a default DSN.
+	liveDatabase = "dor"
+	// AllowTestLiveDBEnv is the explicit opt-in for a test that genuinely needs
+	// the live database. Normal tests must use a scratch database instead.
+	AllowTestLiveDBEnv = "DOR_ALLOW_TEST_LIVE_DB"
+)
+
+// isTestBinary reports whether this process was started by `go test`, including
+// the re-exec form where package main calls its own main() from a *.test binary.
+func isTestBinary() bool {
+	base := filepath.Base(os.Args[0])
+	return strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") ||
+		os.Getenv("DOR_TEST_AS_MAIN") == "1"
+}
 
 // Config is the Postgres connection and pool configuration.
 type Config struct {
@@ -42,6 +61,18 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	pc, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("store: parse database URL: %w", err)
+	}
+	// An omitted database path is resolved by Postgres to the user name. Treat
+	// that as the same live database instead of waiting for the server default.
+	dbName := pc.ConnConfig.Database
+	if dbName == "" {
+		dbName = pc.ConnConfig.User
+	}
+	if isTestBinary() && dbName == liveDatabase && os.Getenv(AllowTestLiveDBEnv) != "1" {
+		return nil, fmt.Errorf(
+			"store: refusing live database %q from a test binary; use a scratch database or set %s=1",
+			liveDatabase, AllowTestLiveDBEnv,
+		)
 	}
 	if cfg.MaxConns > 0 {
 		pc.MaxConns = cfg.MaxConns

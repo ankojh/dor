@@ -294,6 +294,14 @@ a free port itself before starting the server; do not pass port 0 straight to
 `server.Options`. Tests must not rely on Docker or network, and `go test -race
 -count=1 ./...` should stay green when packages run in parallel.
 
+Tests must never connect to the live developer stack. Postgres integration
+tests use `DOR_TEST_DATABASE_URL` with a scratch database; `store.Open` refuses
+the database name `dor` from a test binary unless `DOR_ALLOW_TEST_LIVE_DB=1` is
+set explicitly. Re-exec tests that spawn `dor run` pass `--db-url off` (or a
+scratch DSN), `--nats-listen 127.0.0.1:0`, and scrub inherited
+`DOR_DATABASE_URL`/`DOR_NATS_URL` targets so a developer's shell cannot redirect
+them at live services.
+
 ## Protobuf workflow
 
 - Source: `proto/dor/v1/dor.proto`, package `dor.v1`.

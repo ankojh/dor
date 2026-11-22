@@ -329,10 +329,10 @@ func TestUpsertArticlesStoriesSourcesAreIdempotent(t *testing.T) {
 		}},
 		ArticleIDs: []string{article.ID},
 	}
-	if err := s.UpsertStories(ctx, []StoryRecord{story}); err != nil {
+	if _, err := s.UpsertStories(ctx, []StoryRecord{story}); err != nil {
 		t.Fatalf("first story upsert: %v", err)
 	}
-	if err := s.UpsertStories(ctx, []StoryRecord{story}); err != nil {
+	if _, err := s.UpsertStories(ctx, []StoryRecord{story}); err != nil {
 		t.Fatalf("second story upsert: %v", err)
 	}
 	if got := scalarInt(t, s, ctx, `SELECT count(*) FROM stories WHERE id = $1`, story.ID); got != 1 {
@@ -359,7 +359,7 @@ func TestUpsertArticlesStoriesSourcesAreIdempotent(t *testing.T) {
 	storyUpdate := story
 	storyUpdate.Title = "Story title updated"
 	storyUpdate.SourceCount = 5
-	if err := s.UpsertStories(ctx, []StoryRecord{storyUpdate}); err != nil {
+	if _, err := s.UpsertStories(ctx, []StoryRecord{storyUpdate}); err != nil {
 		t.Fatalf("story update upsert: %v", err)
 	}
 	if got := scalarInt(t, s, ctx, `SELECT count(*) FROM stories WHERE id = $1`, story.ID); got != 1 {

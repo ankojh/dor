@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // This file adds the in-process Restart surface for the agents that compose
@@ -23,6 +24,7 @@ func (c *clusterer) Restart(ctx context.Context) error {
 	c.wg.Wait()
 	c.queuedMu.Lock()
 	c.queued = make(map[string]bool)
+	c.retryAt = make(map[string]time.Time)
 	c.queuedMu.Unlock()
 
 	if err := c.base.Restart(ctx); err != nil {

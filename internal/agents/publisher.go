@@ -460,6 +460,21 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	if wire.StoryId != "" {
 		if story, ok := c.stories[wire.StoryId]; ok && story != nil {
 			wire.Category = story.Category
+			wire.Degraded = story.Degraded
+			wire.Fallback = story.Fallback
+			wire.CategoryBackend = story.CategoryBackend
+			wire.CategoryConfidence = story.CategoryConfidence
+			wire.PlaceBackend = story.PlaceBackend
+			wire.PlaceDegraded = story.PlaceDegraded
+			wire.PlaceFallback = story.PlaceFallback
+			if wire.Country == "" {
+				for _, loc := range story.Locations {
+					if loc != nil && loc.Country != "" {
+						wire.Country = loc.Country
+						break
+					}
+				}
+			}
 			if !wire.Located && len(story.Locations) > 0 {
 				idx := int(story.Primary)
 				if idx < 0 || idx >= len(story.Locations) {

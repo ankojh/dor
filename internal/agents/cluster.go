@@ -1689,8 +1689,13 @@ func primaryCountry(story *dorv1.Story) string {
 	if idx < 0 || idx >= len(story.Locations) {
 		idx = 0
 	}
-	if loc := story.Locations[idx]; loc != nil {
+	if loc := story.Locations[idx]; loc != nil && loc.Country != "" {
 		return loc.Country
+	}
+	for _, loc := range story.Locations {
+		if loc != nil && loc.Country != "" {
+			return loc.Country
+		}
 	}
 	return ""
 }

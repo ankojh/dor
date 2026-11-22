@@ -285,7 +285,7 @@ export class LiveState {
       this.topology = true;
     }
     const old = this.entries[index];
-    const category = Math.max(0, Math.min(8, story.category));
+    const category = Math.max(0, Math.min(10, story.category));
     const color = [...categoryColor(category), 255] as LiveStory["color"];
     const entry: LiveStory = {
       index,

@@ -120,7 +120,7 @@ export function buildLiveGlobe(
     const location = storyLocation(story);
     if (!location) continue;
     const index = located.length;
-    const category = story.category >= 0 && story.category <= 8 ? story.category : 0;
+    const category = story.category >= 0 && story.category <= 10 ? story.category : 0;
     storyById.set(story.id, index);
     located.push({
       story: {

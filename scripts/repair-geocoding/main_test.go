@@ -202,8 +202,8 @@ func TestRepairAuditDefaultsReviewCandidatesToRemovalWithExplicitKeep(t *testing
 	statements := []string{
 		`INSERT INTO public.stories(id,title,primary_loc) VALUES ('story-review','Hyderabad Announces a New Policy','hyderabad-pk')`,
 		`INSERT INTO public.articles(id,story_id,title,lede,dateline) VALUES ('article-review','story-review','Hyderabad Announces a New Policy','','')`,
-		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
-		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6,'PK')`,
+		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6,'PK')`,
 	}
 	for _, statement := range statements {
 		if _, err := conn.Exec(ctx, statement); err != nil {
@@ -291,8 +291,8 @@ func seedReviewRemovalFixture(t *testing.T, ctx context.Context, conn *pgx.Conn)
 	statements := []string{
 		`INSERT INTO public.stories(id,title,primary_loc) VALUES ('story-review','Hyderabad Announces a New Policy','hyderabad-pk')`,
 		`INSERT INTO public.articles(id,story_id,title,lede,dateline) VALUES ('article-review','story-review','Hyderabad Announces a New Policy','','')`,
-		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
-		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6,'PK')`,
+		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6,'PK')`,
 	}
 	for _, statement := range statements {
 		if _, err := conn.Exec(ctx, statement); err != nil {
@@ -598,6 +598,14 @@ func prepareRepairDB(t *testing.T, ctx context.Context, dsn string) (*pgx.Conn, 
 	if _, err := conn.Exec(ctx, string(migration)); err != nil {
 		conn.Close(ctx)
 		t.Fatalf("apply migration 0006: %v", err)
+	}
+	// The original flow tests exercise location repair with already-populated
+	// country. The dedicated country tests seed empty values independently.
+	for _, table := range []string{"story_locations", "article_locations"} {
+		if _, err := conn.Exec(ctx, `UPDATE public.`+table+` SET country=CASE place_id WHEN 'paris' THEN 'FR' WHEN 'boston' THEN 'US' ELSE '' END`); err != nil {
+			conn.Close(ctx)
+			t.Fatalf("seed fixture countries: %v", err)
+		}
 	}
 	g := repairFixtureGazetteer(t)
 	return conn, g

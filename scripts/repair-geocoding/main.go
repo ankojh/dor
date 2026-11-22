@@ -29,14 +29,16 @@ type counts struct {
 	Flagged        int            `json:"flagged"`
 	Replotted      int            `json:"replotted"`
 	Downgraded     int            `json:"downgraded"`
+	CountryUpdated int            `json:"country_updated"`
 	Removed        int            `json:"removed"`
 	NeedsReview    int            `json:"needs_review"`
 	ReviewRemovals int            `json:"review_removals"`
 	Reasons        map[string]int `json:"reasons"`
 }
 type change struct {
-	row      location
-	decision geo.RepairDecision
+	row         location
+	decision    geo.RepairDecision
+	countryOnly string
 }
 type auditChange struct {
 	Table       string         `json:"table"`
@@ -290,14 +292,23 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 				}
 			}
 		}
+		countryOnly := ""
+		if d.Reason == "" && row.Country == "" {
+			if p, ok := g.ByID(row.PlaceID); ok && p.CountryCode != "" {
+				countryOnly = p.CountryCode
+				d = geo.RepairDecision{Reason: "country", Replacement: &p, Precision: geo.Resolution(row.Precision)}
+			}
+		}
 		if d.Reason == "" {
 			continue
 		}
-		changes = append(changes, change{row, d})
+		changes = append(changes, change{row: row, decision: d, countryOnly: countryOnly})
 		r.Changes = append(r.Changes, auditChange{row.Table, row.Owner, row.PlaceID, row.Name, d.Reason, d.Replacement, d.Precision})
 		c.Flagged++
 		c.Reasons[d.Reason]++
-		if d.Replacement == nil {
+		if countryOnly != "" {
+			c.CountryUpdated++
+		} else if d.Replacement == nil {
 			c.Removed++
 		} else if d.Reason == "precision" {
 			c.Downgraded++
@@ -314,6 +325,16 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 		return r, nil
 	}
 	for _, c := range changes {
+		if c.countryOnly != "" {
+			owner := "story_id"
+			if c.row.Table == "article_locations" {
+				owner = "article_id"
+			}
+			if _, err := tx.Exec(ctx, `UPDATE public.`+c.row.Table+` SET country=$1 WHERE `+owner+`=$2 AND place_id=$3 AND role=$4 AND country=''`, c.countryOnly, c.row.Owner, c.row.PlaceID, c.row.Role); err != nil {
+				return report{}, err
+			}
+			continue
+		}
 		if err := deleteLocation(ctx, tx, c.row); err != nil {
 			return report{}, err
 		}
@@ -322,6 +343,9 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 	// under another role, drop the replaced row instead of adding a duplicate.
 	deleted := map[ownerKey]map[string]bool{}
 	for _, c := range changes {
+		if c.countryOnly != "" {
+			continue
+		}
 		k := key(c.row)
 		if deleted[k] == nil {
 			deleted[k] = map[string]bool{}
@@ -340,6 +364,9 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 		present[k][row.PlaceID] = true
 	}
 	for _, c := range changes {
+		if c.countryOnly != "" {
+			continue
+		}
 		p := c.decision.Replacement
 		if p == nil {
 			continue
@@ -509,10 +536,10 @@ func applyLocation(ctx context.Context, tx pgx.Tx, row location, d geo.RepairDec
 	return err
 }
 
-// A refresh retains existing provenance, including unknown; a different place
-// obtains its country from the resolved gazetteer result.
+// Preserve a nonempty stored country on refresh; fill an unknown country from
+// the known place ID. A different place uses its own resolved country.
 func replacementCountry(row location, p *geo.Place) string {
-	if p.ID == row.PlaceID {
+	if p.ID == row.PlaceID && (row.Country != "" || p.CountryCode == "") {
 		return row.Country
 	}
 	return p.CountryCode

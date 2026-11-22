@@ -67,10 +67,11 @@ the release blocker:
   An uncertain outbox or PubAck is settled unchanged. Source consumers,
   positions and retained DELTA history are never reset or purged.
 
-`maintenance.Apply` is the orchestration entry point. It accepts the
-already-authorized copy-only DB callback and the in-process writer barrier.
-Nothing in this repository automatically invokes it; live application still
-requires a separate approval, a real quiesce, and an isolated rehearsal.
+`maintenance.Coordinator.Apply` is the orchestration entry point, wired through
+the explicit copy-only `--apply --maintenance-apply` command below. It requires
+the DB repair callback and runtime barrier evidence. Default audit/plan export
+does not invoke it. Live application still requires separate approval and
+successful review and rehearsal; this implementation has not been validated.
 
 ## Copy-only maintenance adapter
 
@@ -78,11 +79,12 @@ The audit command can run the complete protocol against an explicitly named
 non-`dor` copy:
 
 ```sh
-DOR_RUNTIME_ID=prod-1 DOR_GATEWAY_ID=gw-1 go run ./cmd/dor run ...
+# Start only an isolated copy configured with COPY_DATABASE_URL/COPY_NATS_URL.
+DOR_RUNTIME_ID=copy-1 DOR_GATEWAY_ID=copy-gw-1 go run ./cmd/dor run ...
 go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
   --nats "$COPY_NATS_URL" --apply --maintenance-apply \
   --allow-db COPY_DATABASE_NAME --confirm-candidates \
-  --expected-producer prod-1 --expected-gateway gw-1 \
+  --expected-producer copy-1 --expected-gateway copy-gw-1 \
   --expected-consumer ENRICH/publisher-enrich \
   --expected-consumer STORY/publisher-story \
   --exclusion-authority route-controller \
@@ -96,9 +98,10 @@ and `--plan-out` exports a deterministic plan. `--apply` without
 `--maintenance-apply` is the prior DB-only copy operation. The adapter:
 
 - verifies `current_database()` equals `--allow-db` and refuses `dor`;
-- pauses raw/enrichment/story/match/alert publishes and DB writer admissions in
-  every runtime that advertises `--expected-producer`, and requires each
-  producer/writer queue, in-flight flush and retry set to be empty;
+- closes external/raw ingress first, lets downstream enrichment/story/match/alert
+  work drain, then pauses durable consumer delivery and fences downstream/KV/DB
+  admission after in-flight work finishes; producer/writer queues, flushes and
+  retry sets must be empty;
 - requires every expected gateway to advertise a fresh
   `serving=false`/wire-tombstone-compatible lease and every expected producer
   runtime to close raw ingress first, then downstream output after the stable
@@ -135,8 +138,9 @@ and a completed run answers only the same request identity.
 Timestamp repair #4 remains a release/live-repair blocker. A successful audit or
 copy-only DB transaction is not a safe hot-state cutover. The accepted
 cross-store cutover direction is implemented as the `internal/maintenance`
-protocol described above; this command itself does not invoke it and no live
-apply is authorized. Functional closure requires these boundaries together:
+protocol described above and exposed through the explicit copy-only maintenance
+command. No live apply is authorized. Review and validation must establish
+these boundaries together before release:
 
 - A finite drain and fleet fence must bind producer tails, consumer pending and
   acknowledgement floors, durable joins, DB-writer queues, and exclusion of all
@@ -144,7 +148,8 @@ apply is authorized. Functional closure requires these boundaries together:
   does not prove this barrier.
 - A durable, revision-bound plan and resumable phase journal must bind the DB
   audit to the actual active KV/root before state and the identified copy.
-  The current report has candidates and a DB `committed` flag, not those bindings.
+  The standalone DB-only report does not supply those hot-state bindings; the
+  maintenance plan and phase journal carry them.
   Settle uncertain publisher Pending bytes unchanged before forward repair;
   never edit, discard or renumber the outbox.
 - Retained publisher state needs durable per-article suppression/time correction
@@ -163,7 +168,7 @@ apply is authorized. Functional closure requires these boundaries together:
 
 Retain DELTA history and source consumer positions. No source reset/purge,
 repair-time timestamp substitution, or old-checkpoint rollback is permitted.
-The `internal/maintenance` adapter implements these controls, but this script
-does not invoke it. Do not use either the script or the adapter to claim
-timestamp repair completion or authorize live application without the separate
-approval, rehearsal and fleet barrier.
+The `internal/maintenance` adapter and explicit copy-only command contain the
+implementation, which remains unvalidated. Do not claim timestamp repair
+completion or authorize live application without separate approval, review,
+rehearsal and the enforced fleet barrier.

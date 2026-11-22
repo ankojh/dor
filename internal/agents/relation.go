@@ -362,7 +362,7 @@ func (c *relationCore) restore(ctx context.Context) {
 	}
 	_ = lister.Stop()
 
-	linkLister, err := c.kv.ListKeysFiltered(ctx, "link.*")
+	linkLister, err := c.kv.ListKeysFiltered(ctx, "link.>")
 	if err != nil {
 		if !isKVNotFound(err) {
 			c.log.Warn("relation: restore links", "err", err)

@@ -210,7 +210,7 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 		if cached.Available && cached.Revision == revision {
 			return cached, true
 		}
-		if !cached.Available {
+		if !cached.Available && cached.Revision == revision {
 			if generated, err := time.Parse(time.RFC3339, cached.GeneratedAt); err == nil && s.now().Sub(generated) < time.Minute {
 				return cached, true
 			}

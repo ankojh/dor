@@ -415,7 +415,7 @@ func (c *clusterer) expireStories(ctx context.Context) {
 // removal deltas; this keeps the KV cache consistent even when the relation
 // judge is offline.
 func (c *clusterer) removeExpiredLinks(ctx context.Context, live jetstream.KeyValue, expired map[string]bool) {
-	lister, err := live.ListKeysFiltered(ctx, "link.*")
+	lister, err := live.ListKeysFiltered(ctx, "link.>")
 	if err != nil {
 		return
 	}

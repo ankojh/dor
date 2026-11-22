@@ -146,6 +146,10 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 			break
 		}
 	}
+	// Prompt scores and prompt strings belong to the client that set that
+	// prompt. Even a client with no filters receives a projected batch when
+	// another client's prompt data is present.
+	hasPrivate := batchHasPrivateWire(batch)
 
 	h.observeBatchLocked(batch)
 	for _, d := range batch.Deltas {
@@ -168,7 +172,7 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 		}
 		payload := data
 		if hasWire {
-			if f := c.filterState(); f.active() {
+			if f := c.filterState(); f.active() || hasPrivate {
 				filtered := filterDeltaBatch(batch, f, h.stories)
 				if filtered == nil {
 					continue
@@ -284,7 +288,7 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 				}
 				if snapshotNeeded {
 					payload := snapBytes
-					if f := c.filterState(); f.active() {
+					if f := c.filterState(); f.active() || snapshotHasPrivateWire(snap) {
 						if filtered := filterSnapshot(snap, f, h.stories); filtered != nil {
 							msg := &dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: filtered}}
 							payload, _ = proto.MarshalOptions{Deterministic: true}.Marshal(msg)
@@ -295,7 +299,7 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 				for start := 0; start < len(deltas); start += replayChunk {
 					end := min(start+replayChunk, len(deltas))
 					chunk := &dorv1.DeltaBatch{Deltas: deltas[start:end]}
-					if f := c.filterState(); f.active() {
+					if f := c.filterState(); f.active() || batchHasPrivateWire(chunk) {
 						chunk = filterDeltaBatch(chunk, f, h.stories)
 					}
 					if chunk != nil {

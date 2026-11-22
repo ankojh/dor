@@ -119,7 +119,8 @@ function sendFilters(): void {
 }
 
 function sendPrompts(): void {
-  if (activePrompts.length === 0) return;
+  // Always send, including an empty list: removing the last prompt must reach
+  // the matcher so it stops spending jev calls on a filter nobody watches.
   sendClient({
     case: "setPrompts",
     value: create(SetPromptsSchema, { prompts: activePrompts }),

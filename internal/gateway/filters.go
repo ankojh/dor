@@ -3,11 +3,81 @@ package gateway
 import (
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
+
+const (
+	// maxClientPrompts bounds one connection's prompt-filter set. The UI
+	// normally has one or two; the cap keeps a script from making the matcher
+	// evaluate an unbounded list.
+	maxClientPrompts = 8
+	// maxPromptRunes bounds one prompt. Longer prompts are truncated rather
+	// than rejected so a paste does not fail silently in the UI.
+	maxPromptRunes = 300
+)
+
+// boundPrompts trims, deduplicates and bounds a client's prompt list. It is
+// the single admission gate for prompt text entering the gateway and matcher.
+func boundPrompts(prompts []string) []string {
+	out := make([]string, 0, min(len(prompts), maxClientPrompts))
+	seen := make(map[string]bool, len(out))
+	for _, prompt := range prompts {
+		prompt = strings.TrimSpace(prompt)
+		if prompt == "" || seen[prompt] {
+			continue
+		}
+		if utf8.RuneCountInString(prompt) > maxPromptRunes {
+			runes := []rune(prompt)
+			prompt = strings.TrimSpace(string(runes[:maxPromptRunes]))
+		}
+		if prompt == "" || seen[prompt] {
+			continue
+		}
+		seen[prompt] = true
+		out = append(out, prompt)
+		if len(out) >= maxClientPrompts {
+			break
+		}
+	}
+	return out
+}
+
+// wireHasPrivate reports whether a wire row carries per-client prompt data.
+func wireHasPrivate(row *dorv1.WireRow) bool {
+	return row != nil && (len(row.PromptScores) > 0 || len(row.ApproxPrompts) > 0)
+}
+
+// batchHasPrivateWire reports whether any delta in a batch needs per-client
+// prompt projection, even for a client with no filters of its own.
+func batchHasPrivateWire(batch *dorv1.DeltaBatch) bool {
+	if batch == nil {
+		return false
+	}
+	for _, delta := range batch.Deltas {
+		if wireHasPrivate(delta.GetWire()) {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotHasPrivateWire reports whether a snapshot's recent wire carries
+// per-client prompt data.
+func snapshotHasPrivateWire(snap *dorv1.Snapshot) bool {
+	if snap == nil {
+		return false
+	}
+	for _, row := range snap.RecentWire {
+		if wireHasPrivate(row) {
+			return true
+		}
+	}
+	return false
+}
 
 // filterState is a client's live filter view, captured once per broadcast so a
 // SetFilters/SetPrompts racing the fan-out is applied atomically for that
@@ -220,9 +290,10 @@ func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string
 }
 
 // filterSnapshot returns a copy of the snapshot whose recent wire is filtered
-// for this client. It is nil when the snapshot is already suitable.
+// for this client and stripped of every other client's prompt data. It is nil
+// when there is no recent wire to project.
 func filterSnapshot(snap *dorv1.Snapshot, f filterState, stories map[string]*dorv1.Story) *dorv1.Snapshot {
-	if snap == nil || len(snap.RecentWire) == 0 || !f.active() {
+	if snap == nil || len(snap.RecentWire) == 0 {
 		return nil
 	}
 	out := proto.Clone(snap).(*dorv1.Snapshot)

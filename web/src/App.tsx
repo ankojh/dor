@@ -222,6 +222,12 @@ type BacktestResult = {
   error?: string;
 };
 
+// Must match the gateway's maxClientPrompts/maxPromptRunes and the matcher's
+// bounds so the chip the UI looks up scores by is the prompt the server
+// actually evaluated.
+const MAX_PROMPTS = 8;
+const MAX_PROMPT_CHARS = 300;
+
 const EMPTY_FILTERS: WireFilters = {
   categories: [],
   regions: [],
@@ -619,7 +625,10 @@ export function App() {
   };
 
   const updatePrompts = (next: string[]): void => {
-    const unique = [...new Set(next.map((prompt) => prompt.trim()).filter(Boolean))];
+    const bounded = next
+      .map((prompt) => Array.from(prompt.trim()).slice(0, MAX_PROMPT_CHARS).join("").trim())
+      .filter(Boolean);
+    const unique = [...new Set(bounded)].slice(0, MAX_PROMPTS);
     setPrompts(unique);
     worker?.postMessage({ type: "prompts", prompts: unique });
   };

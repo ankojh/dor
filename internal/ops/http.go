@@ -1,8 +1,12 @@
 package ops
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -17,10 +21,17 @@ import (
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/fetch"
+	"github.com/ankojh/dor/internal/httpguard"
 )
 
 //go:embed ops.html
 var opsPage []byte
+
+const (
+	opsCSRFCookie = "dor_ops_csrf"
+	opsCSRFHeader = "X-Dor-Ops-Token"
+	opsTokenTTL   = 12 * time.Hour
+)
 
 // GatewayInfo is the live gateway state the ops page shows. It is a callback so
 // the same HTTP surface can be mounted on the gateway and on the admin server.
@@ -47,6 +58,10 @@ type HTTP struct {
 	sourcesAt time.Time
 	reports   WrongLinksView
 	reportsAt time.Time
+
+	controlLimit *httpguard.Limiter
+	reportLimit  *httpguard.Limiter
+	opsSecret    [32]byte
 }
 
 // NewHTTP builds the backend ops surface.
@@ -54,28 +69,29 @@ func NewHTTP(b *bus.Bus, supervisor *Supervisor, log *slog.Logger) *HTTP {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &HTTP{Bus: b, Supervisor: supervisor, Logger: log}
+	h := &HTTP{
+		Bus:          b,
+		Supervisor:   supervisor,
+		Logger:       log,
+		controlLimit: httpguard.NewLimiter(10, 3),
+		reportLimit:  httpguard.NewLimiter(20, 5),
+	}
+	if _, err := rand.Read(h.opsSecret[:]); err != nil {
+		// Without a secret the CSRF token is forgeable. Refuse to serve the
+		// ops surface rather than silently weakening it.
+		panic("ops: generate session secret: " + err.Error())
+	}
+	return h
 }
 
-// Mount adds the ops routes to a mux.
+// Mount adds the ops routes to a mux. Cross-site callers are rejected by the
+// origin guard applied by the server that mounts these routes.
 func (h *HTTP) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ops", h.handlePage)
 	mux.HandleFunc("GET /api/ops", h.handleSnapshot)
-	mux.HandleFunc("POST /api/ops/control", h.handleControl)
-	mux.HandleFunc("POST /api/report-wrong-link", h.handleWrongLink)
+	mux.Handle("POST /api/ops/control", h.controlLimit.Middleware(http.HandlerFunc(h.handleControl)))
+	mux.Handle("POST /api/report-wrong-link", h.reportLimit.Middleware(http.HandlerFunc(h.handleWrongLink)))
 	mux.HandleFunc("GET /api/report/wrong-link", h.handleWrongLinkList)
-	mux.HandleFunc("OPTIONS /api/report/wrong-link", h.handleWrongLinkPreflight)
-}
-
-func allowCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-}
-
-func (h *HTTP) handleWrongLinkPreflight(w http.ResponseWriter, _ *http.Request) {
-	allowCORS(w)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 type opsResponse struct {
@@ -87,14 +103,83 @@ type opsResponse struct {
 	WrongLinks            WrongLinksView `json:"wrong_links"`
 }
 
-func (h *HTTP) handlePage(w http.ResponseWriter, _ *http.Request) {
+func (h *HTTP) handlePage(w http.ResponseWriter, r *http.Request) {
+	// The page carries the CSRF token. Only a same-origin navigation may read
+	// it; a sibling localhost origin allowed by the CORS list must not.
+	if origin := r.Header.Get("Origin"); origin != "" && !httpguard.SameOrigin(origin, r.Host) {
+		httpguard.Deny(w, http.StatusForbidden, "ops page is same-origin only")
+		return
+	}
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	token := ""
+	if cookie, err := r.Cookie(opsCSRFCookie); err == nil && h.validOpsToken(cookie.Value) {
+		token = cookie.Value
+	}
+	if token == "" {
+		var err error
+		token, err = h.newOpsToken()
+		if err != nil {
+			http.Error(w, "ops session unavailable", http.StatusInternalServerError)
+			return
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     opsCSRFCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(opsTokenTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil,
+	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(opsPage)
+	_, _ = w.Write(bytes.ReplaceAll(opsPage, []byte("__DOR_OPS_TOKEN__"), []byte(token)))
+}
+
+// newOpsToken issues "<nonce>.<hmac>" so a cookie planted by a sibling
+// localhost origin (cookies are shared across ports) still cannot be paired
+// with a header the attacker can forge.
+func (h *HTTP) newOpsToken() (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	nonce := hex.EncodeToString(raw[:])
+	return nonce + "." + h.signOpsToken(nonce), nil
+}
+
+func (h *HTTP) signOpsToken(nonce string) string {
+	mac := hmac.New(sha256.New, h.opsSecret[:])
+	_, _ = mac.Write([]byte(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (h *HTTP) validOpsToken(token string) bool {
+	nonce, signature, ok := strings.Cut(token, ".")
+	if !ok || len(nonce) != 64 || len(signature) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(nonce); err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(signature), []byte(h.signOpsToken(nonce))) == 1
+}
+
+// validOpsCSRF requires the token from the page's HttpOnly cookie to be
+// echoed in a request header. A foreign page cannot read either value, and a
+// same-origin page that could would already run with this origin's authority.
+func (h *HTTP) validOpsCSRF(r *http.Request) bool {
+	cookie, err := r.Cookie(opsCSRFCookie)
+	if err != nil || !h.validOpsToken(cookie.Value) {
+		return false
+	}
+	header := strings.TrimSpace(r.Header.Get(opsCSRFHeader))
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(header)) == 1
 }
 
 func (h *HTTP) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	allowCORS(w)
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	resp := opsResponse{
@@ -125,12 +210,20 @@ type controlRequest struct {
 
 func (h *HTTP) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if !httpguard.RequireJSON(w, r) {
+		return
+	}
+	if !h.validOpsCSRF(r) {
+		httpguard.Deny(w, http.StatusForbidden, "missing or invalid ops session; reload /ops")
+		return
+	}
 	if h.Supervisor == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "supervisor is not running in this process"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
@@ -185,13 +278,16 @@ type wrongLinkRequest struct {
 
 func (h *HTTP) handleWrongLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	allowCORS(w)
+	if !httpguard.RequireJSON(w, r) {
+		return
+	}
 	if h.Bus == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bus is not wired"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<10))
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
@@ -276,7 +372,6 @@ func (h *HTTP) handleWrongLinkList(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	w.Header().Set("Content-Type", "application/json")
-	allowCORS(w)
 	_ = json.NewEncoder(w).Encode(h.loadReports(ctx))
 }
 

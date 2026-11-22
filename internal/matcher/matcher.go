@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
@@ -824,16 +825,33 @@ func hintPlace(a *dorv1.Article) string {
 	return a.Dateline
 }
 
+// Prompt bounds mirror the gateway admission gate. The matcher is the last
+// line of defence: even a caller that bypasses the gateway cannot make it
+// evaluate an unbounded list or an arbitrarily large prompt.
+const (
+	maxPromptsPerClient = 8
+	maxPromptRunes      = 300
+)
+
 func cleanPrompts(in []string) []string {
 	seen := make(map[string]bool)
-	out := make([]string, 0, len(in))
+	out := make([]string, 0, min(len(in), maxPromptsPerClient))
 	for _, p := range in {
 		p = strings.TrimSpace(p)
-		if p == "" || len(p) > 1000 || seen[p] {
+		if p == "" || seen[p] {
+			continue
+		}
+		if utf8.RuneCountInString(p) > maxPromptRunes {
+			p = strings.TrimSpace(string([]rune(p)[:maxPromptRunes]))
+		}
+		if p == "" || seen[p] {
 			continue
 		}
 		seen[p] = true
 		out = append(out, p)
+		if len(out) >= maxPromptsPerClient {
+			break
+		}
 	}
 	sort.Strings(out)
 	return out

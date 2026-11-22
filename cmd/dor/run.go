@@ -26,6 +26,7 @@ import (
 	"github.com/ankojh/dor/internal/fetch"
 	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/httpguard"
 	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/push"
@@ -476,9 +477,14 @@ func runCommand(args []string) error {
 	var admin *http.Server
 	adminErr := make(chan error, 1)
 	if cfg.adminAddr != "" {
+		originPatterns := splitList(cfg.gatewayOrigins)
+		if len(originPatterns) == 0 {
+			originPatterns = gateway.DefaultOrigins
+		}
+		origins := httpguard.NewAllowlist(originPatterns)
 		admin = &http.Server{
 			Addr:              cfg.adminAddr,
-			Handler:           adminHandler(b, runner, metrics, opsHTTP),
+			Handler:           origins.Middleware(adminHandler(b, runner, metrics, opsHTTP)),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {

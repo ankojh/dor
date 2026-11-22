@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="dor-ops-token" content="__DOR_OPS_TOKEN__">
 <title>Dor · Ops</title>
 <style>
   :root {
@@ -217,8 +218,13 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), 4200);
   };
+  const opsToken = document.querySelector('meta[name="dor-ops-token"]')?.content || "";
   const post = async (path, body) => {
-    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Dor-Ops-Token": opsToken },
+      body: JSON.stringify(body || {}),
+    });
     const data = await res.json().catch(() => ({ ok: false, error: "invalid response" }));
     if (!res.ok || !data.ok) throw new Error(data.error || ("HTTP " + res.status));
     return data;

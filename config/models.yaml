@@ -31,8 +31,9 @@ jev:
     provisional: true
   # TypeSafe direct (docs.typesafe.ai, checked 2026-11-21). Same request and
   # answer shape as OpenRouter, but no id and no usage.cost, so cost is
-  # input_tokens x price. Output tokens are free. TYPESAFE_BASE_URL or
-  # DOR_JEV_BASE_URL overrides base_url.
+  # input_tokens x price. Output tokens are free. TYPESAFE_BASE_URL or a
+  # non-OpenRouter DOR_JEV_BASE_URL overrides base_url; an OpenRouter value is
+  # ignored here so a TypeSafe key never leaves TypeSafe's host.
   typesafe:
     model: jev-1.14.0
     base_url: https://api.typesafe.ai

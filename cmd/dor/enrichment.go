@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -140,10 +142,40 @@ func newJevClient(models dorconfig.Models, b decide.Budget, log *slog.Logger) (*
 		return client, models.Jev.Model, err
 	}
 	if key := firstEnv("TYPESAFE_API_KEY"); key != "" {
-		client, err := decide.NewTypeSafeClientFromModels(models, firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL"), key, b, log)
+		baseURL := firstEnv("TYPESAFE_BASE_URL")
+		if baseURL == "" {
+			// DOR_JEV_BASE_URL remains the legacy override for a TypeSafe
+			// proxy, but it must never redirect this key to OpenRouter.
+			if legacy := firstEnv("DOR_JEV_BASE_URL"); legacy != "" && !isOpenRouterEndpoint(legacy) {
+				baseURL = legacy
+			}
+		}
+		if baseURL == "" {
+			baseURL = models.Jev.TypeSafe.BaseURL
+		}
+		if isOpenRouterEndpoint(baseURL) {
+			return nil, "", fmt.Errorf("refusing to send TYPESAFE_API_KEY to OpenRouter (%s); set TYPESAFE_BASE_URL to the TypeSafe endpoint", baseURL)
+		}
+		client, err := decide.NewTypeSafeClientFromModels(models, baseURL, key, b, log)
 		return client, models.Jev.TypeSafe.Model, err
 	}
 	return nil, "", nil
+}
+
+// isOpenRouterEndpoint reports whether a jev base URL points at OpenRouter. A
+// TypeSafe key belongs only on TypeSafe's host; sending it to another provider
+// would leak the credential and could never authenticate.
+func isOpenRouterEndpoint(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
 }
 
 // newEnricher builds the Claude-feature backend from DOR_LLM_BACKENDS, a

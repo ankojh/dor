@@ -13,7 +13,6 @@ import (
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
 
@@ -27,7 +26,26 @@ const (
 	// burst.
 	clientRate  = 100.0
 	clientBurst = 50.0
+	// inboundRate and inboundBurst limit Hello, SetPrompts, Focus and GetText
+	// from one connection. Acks and filter updates are cheap and exempt.
+	inboundRate  = 8.0
+	inboundBurst = 16.0
+	// textRate and textBurst apply an additional, tighter budget to requests
+	// that can reach a paid text generator (Focus prefetch and GetText).
+	textRate  = 2.0
+	textBurst = 4.0
+	// maxGetTextIDs bounds one GetText message, and maxRequestIDLen bounds a
+	// story id or link endpoint in a request.
+	maxGetTextIDs   = 32
+	maxRequestIDLen = 200
 )
+
+// PromptSink is the matcher surface the gateway needs. *matcher.Service
+// implements it; tests use a recorder.
+type PromptSink interface {
+	SetClientPrompts(ctx context.Context, clientID string, prompts []string)
+	ClearClientPrompts(ctx context.Context, clientID string)
+}
 
 // client is one WebSocket connection with a bounded send queue and a write
 // goroutine. Reads and writes are independent so a slow reader cannot stall
@@ -35,7 +53,7 @@ const (
 type client struct {
 	hub     *hub
 	text    TextService
-	matcher *matcher.Service
+	matcher PromptSink
 	id      string
 	conn    *websocket.Conn
 	log     *slog.Logger
@@ -51,22 +69,31 @@ type client struct {
 	mu         sync.Mutex
 	tokens     float64
 	lastRefill time.Time
+	inTokens   float64
+	inRefill   time.Time
+	textTokens float64
+	textRefill time.Time
 	focus      string
 	filters    *dorv1.SetFilters
 	prompts    *dorv1.SetPrompts
 }
 
-func newClient(h *hub, text TextService, matcherSvc *matcher.Service, conn *websocket.Conn, log *slog.Logger) *client {
+func newClient(h *hub, text TextService, prompts PromptSink, conn *websocket.Conn, log *slog.Logger) *client {
+	now := time.Now()
 	return &client{
 		hub:        h,
 		text:       text,
-		matcher:    matcherSvc,
+		matcher:    prompts,
 		id:         newClientID(),
 		conn:       conn,
 		log:        log,
 		send:       make(chan []byte, clientQueue),
 		tokens:     clientBurst,
-		lastRefill: time.Now(),
+		lastRefill: now,
+		inTokens:   inboundBurst,
+		inRefill:   now,
+		textTokens: textBurst,
+		textRefill: now,
 	}
 }
 
@@ -141,6 +168,10 @@ func (c *client) writeLoop(ctx context.Context) {
 func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 	switch body := msg.Body.(type) {
 	case *dorv1.ClientMessage_Hello:
+		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) {
+			c.log.Debug("gateway: hello throttled", "client", c.id)
+			return
+		}
 		last := uint64(0)
 		if body.Hello != nil {
 			last = body.Hello.LastSeq
@@ -156,41 +187,87 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 		c.filters = body.SetFilters
 		c.mu.Unlock()
 	case *dorv1.ClientMessage_SetPrompts:
+		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) {
+			c.log.Debug("gateway: set_prompts throttled", "client", c.id)
+			return
+		}
+		prompts := []string(nil)
+		if body.SetPrompts != nil {
+			prompts = boundPrompts(body.SetPrompts.Prompts)
+		}
 		c.mu.Lock()
-		c.prompts = body.SetPrompts
+		c.prompts = &dorv1.SetPrompts{Prompts: prompts}
 		c.mu.Unlock()
 		if c.matcher != nil {
-			prompts := []string(nil)
-			if body.SetPrompts != nil {
-				for _, prompt := range body.SetPrompts.Prompts {
-					if prompt = strings.TrimSpace(prompt); prompt != "" {
-						prompts = append(prompts, prompt)
-					}
-				}
-			}
 			c.matcher.SetClientPrompts(ctx, c.id, prompts)
 		}
 	case *dorv1.ClientMessage_Focus:
-		if body.Focus != nil {
+		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) ||
+			!c.take(&c.textTokens, &c.textRefill, textRate, textBurst) {
+			c.log.Debug("gateway: focus throttled", "client", c.id)
+			return
+		}
+		if id := strings.TrimSpace(body.Focus.GetStoryId()); id != "" && len(id) <= maxRequestIDLen {
 			c.mu.Lock()
-			c.focus = body.Focus.StoryId
+			c.focus = id
 			c.mu.Unlock()
 			if c.text != nil {
-				c.text.PrefetchStory(body.Focus.StoryId)
+				c.text.PrefetchStory(id)
 			}
 		}
 	case *dorv1.ClientMessage_GetText:
+		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) ||
+			!c.take(&c.textTokens, &c.textRefill, textRate, textBurst) {
+			c.log.Debug("gateway: get_text throttled", "client", c.id)
+			return
+		}
 		if body.GetText != nil && c.text != nil {
+			seen := make(map[string]bool, maxGetTextIDs)
 			for _, id := range body.GetText.StoryIds {
+				if len(seen) >= maxGetTextIDs {
+					break
+				}
+				id = strings.TrimSpace(id)
+				if id == "" || len(id) > maxRequestIDLen || seen[id] {
+					continue
+				}
+				seen[id] = true
 				c.text.PrefetchStory(id)
 			}
+			links := 0
 			for _, key := range body.GetText.LinkKeys {
-				if key != nil {
-					c.text.PrefetchLink(key.A, key.B)
+				if links >= maxGetTextIDs || key == nil {
+					break
 				}
+				a, b := strings.TrimSpace(key.A), strings.TrimSpace(key.B)
+				if a == "" || b == "" || len(a) > maxRequestIDLen || len(b) > maxRequestIDLen {
+					continue
+				}
+				links++
+				c.text.PrefetchLink(a, b)
 			}
 		}
 	}
+}
+
+// take refills one token bucket and consumes a token. The bucket fields are
+// guarded by c.mu, which is also held briefly by filter snapshots.
+func (c *client) take(tokens *float64, refill *time.Time, rate, burst float64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if elapsed := now.Sub(*refill).Seconds(); elapsed > 0 {
+		*tokens += elapsed * rate
+		if *tokens > burst {
+			*tokens = burst
+		}
+		*refill = now
+	}
+	if *tokens < 1 {
+		return false
+	}
+	*tokens--
+	return true
 }
 
 // enqueue is nonblocking. It is called under hub.mu for broadcasts and resume.

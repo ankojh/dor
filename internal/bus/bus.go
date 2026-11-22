@@ -59,8 +59,12 @@ const (
 	KVBucketSession    = "session"
 	KVBucketSessionTTL = 0
 
-	KVSeenTTL            = 48 * time.Hour
-	KVJoinsTTL           = 30 * time.Second
+	KVSeenTTL = 48 * time.Hour
+	// KVJoinsTTL is zero: the clusterer acknowledges an enrichment message only
+	// after its join is durable, so the join must outlive a process stop or
+	// backlog. The clusterer deletes a join after its story and placed outputs
+	// commit, and removes orphaned join records on restart.
+	KVJoinsTTL           = 0
 	KVBudgetsTTL         = time.Hour
 	KVSpendTTL           = 48 * time.Hour
 	KVLiveStateTTL       = 48 * time.Hour

@@ -123,6 +123,10 @@ func (c *publisherCore) installCommitted(state *publication.State, pending *publ
 	c.pending, c.order, c.waiters = map[string]*dorv1.Delta{}, nil, nil
 	c.inflight = nil
 	c.placed = map[string]bool{}
+	c.cooledAt = make(map[string]int64, len(c.stories))
+	for id := range c.stories {
+		c.cooledAt[id] = c.now().UnixNano()
+	}
 	if pending != nil {
 		for id, v := range pending.Revisions {
 			c.revisions[id] = v

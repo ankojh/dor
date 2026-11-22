@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,14 @@ const (
 	// publisherWireHistory is the bounded cold-start wire history placed in
 	// every snapshot. It is not a replay of old deltas; rows carry no seq.
 	publisherWireHistory = 500
+
+	// Heat cooling and link eviction run from the expiry loop. Quiet stories
+	// cool visibly; a story that reaches its 48 h content TTL drops its links
+	// from the snapshot in the same tick.
+	publisherHeatHalfLife = 6 * time.Hour
+	publisherHeatGrace    = 2 * time.Minute
+	publisherHeatFloor    = 0.05
+	publisherCoolMinDrop  = 0.01
 )
 
 // NewPublisher builds the publisher. Its three consumers bind ENRICH, STORY and ALERT separately; a JetStream
@@ -360,6 +369,10 @@ type publisherCore struct {
 	committedRevisions map[string]uint64
 	scores             map[string]*dorv1.MatchScore
 	placed             map[string]bool
+	// cooledAt is the process-local time Heat was last emitted for a story.
+	// Cooling accumulates against this, not against UpdatedAt, so repeated
+	// ticks do not re-apply the same decay.
+	cooledAt map[string]int64
 }
 
 func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
@@ -378,6 +391,7 @@ func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
 		committedRevisions: make(map[string]uint64),
 		scores:             make(map[string]*dorv1.MatchScore),
 		placed:             make(map[string]bool),
+		cooledAt:           make(map[string]int64),
 		capacity:           make(chan struct{}),
 	}
 }
@@ -478,10 +492,14 @@ func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) 
 			return
 		case <-ticker.C:
 			c.expireStories(c.now())
+			c.coolStories(c.now())
 		}
 	}
 }
 
+// expireStories drops a story at its 48 h content TTL and cascades every link
+// that touches it. Both the story and its links leave the next snapshot, and
+// connected clients receive an explicit removal delta.
 func (c *publisherCore) expireStories(now time.Time) {
 	c.mu.Lock()
 	ids := make([]string, 0)
@@ -493,9 +511,107 @@ func (c *publisherCore) expireStories(now time.Time) {
 			ids = append(ids, id)
 		}
 	}
+	if len(ids) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	expired := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		expired[id] = true
+	}
+	type pair struct{ a, b string }
+	var links []pair
+	for key, link := range c.links {
+		if link == nil {
+			continue
+		}
+		if expired[link.A] || expired[link.B] {
+			links = append(links, pair{a: link.A, b: link.B})
+			delete(c.links, key)
+		}
+	}
 	c.mu.Unlock()
 	for _, id := range ids {
 		c.enqueue("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+	}
+	for _, l := range links {
+		a, b := l.a, l.b
+		if a > b {
+			a, b = b, a
+		}
+		c.enqueue("link:"+a+"|"+b, &dorv1.Delta{Body: &dorv1.Delta_LinkRemove{
+			LinkRemove: &dorv1.LinkKey{A: a, B: b},
+		}})
+	}
+	c.mu.Lock()
+	for _, id := range ids {
+		delete(c.cooledAt, id)
+	}
+	c.mu.Unlock()
+}
+
+// coolStories decays quiet story heat. UpdatedAt is not touched: expiry stays
+// anchored to the last content change. A story with a story upsert already
+// pending is skipped so a fresh update always wins.
+func (c *publisherCore) coolStories(now time.Time) {
+	c.mu.Lock()
+	if !c.restored || len(c.stories) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	inflight := make(map[string]bool)
+	if c.inflight != nil {
+		for _, d := range c.inflight.deltas {
+			if s := d.GetStoryUpsert(); s != nil {
+				inflight[s.Id] = true
+			}
+		}
+	}
+	type cooling struct {
+		id  string
+		hot *dorv1.Story
+	}
+	batch := make([]cooling, 0, 32)
+	for id, story := range c.stories {
+		if story == nil || story.Heat <= publisherHeatFloor || story.UpdatedAt <= 0 {
+			continue
+		}
+		if _, pending := c.pending["story:"+id]; pending || inflight[id] {
+			continue
+		}
+		if now.Sub(time.Unix(story.UpdatedAt, 0)) < publisherHeatGrace {
+			continue
+		}
+		last := c.cooledAt[id]
+		if last == 0 {
+			c.cooledAt[id] = now.UnixNano()
+			continue
+		}
+		dt := now.Sub(time.Unix(0, last))
+		if dt <= 0 {
+			continue
+		}
+		factor := math.Exp(-dt.Hours() * math.Ln2 / publisherHeatHalfLife.Hours())
+		heat := float32(float64(story.Heat) * factor)
+		if float64(story.Heat)-float64(heat) < publisherCoolMinDrop {
+			continue
+		}
+		if heat < publisherHeatFloor {
+			heat = 0
+		}
+		clone := proto.Clone(story).(*dorv1.Story)
+		clone.Heat = heat
+		batch = append(batch, cooling{id: id, hot: clone})
+		if len(batch) >= 200 {
+			break
+		}
+	}
+	for _, item := range batch {
+		c.cooledAt[item.id] = now.UnixNano()
+	}
+	c.mu.Unlock()
+	for _, item := range batch {
+		c.enqueue("story:"+item.id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: item.hot}})
 	}
 }
 

@@ -292,9 +292,11 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 	c.seq = snap.Seq
 	c.pending, c.order, c.waiters = make(map[string]*dorv1.Delta), nil, nil
 	c.stories, c.links, c.wireRows = make(map[string]*dorv1.Story), make(map[string]*dorv1.Link), make(map[string]*dorv1.WireRow)
+	c.cooledAt = make(map[string]int64)
 	c.wire, c.wireOrder = nil, nil
 	for _, story := range snap.Stories {
 		c.stories[story.Id] = story
+		c.cooledAt[story.Id] = c.now().UnixNano()
 	}
 	for _, link := range snap.Links {
 		c.links[link.A+"|"+link.B] = link
@@ -580,9 +582,11 @@ func (c *publisherCore) applyDeltaLocked(d *dorv1.Delta) {
 	case *dorv1.Delta_StoryUpsert:
 		if s := body.StoryUpsert; s != nil {
 			c.stories[s.Id] = s
+			c.cooledAt[s.Id] = c.now().UnixNano()
 		}
 	case *dorv1.Delta_StoryExpire:
 		delete(c.stories, body.StoryExpire)
+		delete(c.cooledAt, body.StoryExpire)
 	case *dorv1.Delta_LinkUpsert:
 		if l := body.LinkUpsert; l != nil {
 			c.links[l.A+"|"+l.B] = l

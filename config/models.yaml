@@ -15,10 +15,8 @@ version: 1
 
 jev:
   model: typesafe/jev-1.14
-  # OpenRouter is the supported live path. TypeSafe direct is NOT implemented:
-  # a TYPESAFE_API_KEY needs DOR_JEV_BASE_URL, DOR_JEV_PATH and
-  # DOR_JEV_REQUEST_SHAPE=openrouter-decisions, and fails early otherwise. The
-  # direct /v1/systemone shape is unknown and is not guessed.
+  # OpenRouter is used for DOR_JEV_API_KEY and OPENROUTER_API_KEY. A
+  # TYPESAFE_API_KEY on its own goes to the typesafe block below.
   base_url: https://openrouter.ai
   path: /api/alpha/decisions
   timeout: 30s
@@ -31,6 +29,17 @@ jev:
     input_per_mtok: 0.10
     output_per_mtok: 0.00
     provisional: true
+  # TypeSafe direct (docs.typesafe.ai, checked 2026-11-21). Same request and
+  # answer shape as OpenRouter, but no id and no usage.cost, so cost is
+  # input_tokens x price. Output tokens are free. TYPESAFE_BASE_URL or
+  # DOR_JEV_BASE_URL overrides base_url.
+  typesafe:
+    model: jev-1.14.0
+    base_url: https://api.typesafe.ai
+    path: /v1/systemone
+    price:
+      input_per_mtok: 0.042
+      output_per_mtok: 0.00
 
 claude:
   haiku_model: claude-haiku-5-5

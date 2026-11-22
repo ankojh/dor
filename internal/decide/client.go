@@ -38,6 +38,9 @@ type ClientConfig struct {
 	MaxBackoff time.Duration
 	// Price estimates spend before the call. Live cost comes from usage.cost.
 	Price config.Price
+	// CostFromPrice prices the reported tokens with Price for hosts that
+	// return no usage.cost (TypeSafe direct).
+	CostFromPrice bool
 	// Priority labels every call for the shed order.
 	Priority budget.Priority
 	// HTTPClient is optional; a timeout-bound client is created when nil.
@@ -135,6 +138,27 @@ func NewClientFromModels(m config.Models, baseURL, apiKey string, b Budget) (*Cl
 		MinBackoff: m.Jev.MinBackoff.Std(),
 		MaxBackoff: m.Jev.MaxBackoff.Std(),
 		Price:      m.Jev.Price,
+	}, b)
+}
+
+// NewTypeSafeClientFromModels builds a client for TypeSafe's own host from
+// the jev.typesafe block. baseURL overrides the file.
+func NewTypeSafeClientFromModels(m config.Models, baseURL, apiKey string, b Budget) (*Client, error) {
+	ts := m.Jev.TypeSafe
+	if baseURL == "" {
+		baseURL = ts.BaseURL
+	}
+	return NewClient(ClientConfig{
+		BaseURL:       baseURL,
+		Path:          ts.Path,
+		APIKey:        apiKey,
+		Model:         ts.Model,
+		Timeout:       m.Jev.Timeout.Std(),
+		MaxRetries:    m.Jev.MaxRetries,
+		MinBackoff:    m.Jev.MinBackoff.Std(),
+		MaxBackoff:    m.Jev.MaxBackoff.Std(),
+		Price:         ts.Price,
+		CostFromPrice: true,
 	}, b)
 }
 
@@ -249,6 +273,9 @@ func (c *Client) Decide(ctx context.Context, req Request) (Response, error) {
 		resp.Latency = c.now().Sub(startTotal)
 		resp.LastAttemptLatency = lastAttempt
 		resp.Attempts = attempt + 1
+		if c.cfg.CostFromPrice && resp.Usage.CostUSD == 0 {
+			resp.Usage.CostUSD = c.cfg.Price.Cost(resp.Usage.InputTokens, resp.Usage.OutputTokens)
+		}
 		usage := budget.Usage{
 			CostUSD:      resp.Usage.CostUSD,
 			InputTokens:  resp.Usage.InputTokens,

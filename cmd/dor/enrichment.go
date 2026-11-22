@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,27 +58,16 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	}
 	manager := newBudgetManager(ctx, b, budgetCfg, log)
 
-	if key := firstEnv("DOR_JEV_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"); key != "" {
-		client, err := decide.NewClientFromModels(models, os.Getenv("DOR_JEV_BASE_URL"), key, manager)
-		if err != nil {
-			log.Warn("jev client unavailable", "err", err)
-		} else {
-			deps.Decider = client
-			log.Info("jev client enabled", "model", models.Jev.Model)
-		}
-	}
-	if key := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); key != "" {
-		client, err := llm.NewFromConfig(models, key, os.Getenv("DOR_CLAUDE_BASE_URL"), manager)
-		if err != nil {
-			log.Warn("claude client unavailable", "err", err)
-		} else {
-			deps.Enricher = client
-			log.Info("claude enricher enabled", "haiku", models.Claude.HaikuModel)
-		}
+	if client, model, err := newJevClient(models, manager); err != nil {
+		log.Warn("jev client unavailable", "err", err)
+	} else if client != nil {
+		deps.Decider = client
+		log.Info("jev client enabled", "model", model)
 	}
 	var completer textsvc.Completer
-	if deps.Enricher != nil {
-		completer = deps.Enricher
+	if enricher := newEnricher(models, manager, log); enricher != nil {
+		deps.Enricher = enricher
+		completer = enricher
 	}
 	deps.Text = textsvc.New(b, log, completer)
 
@@ -139,6 +129,92 @@ func seedSources(ctx context.Context, st *store.Store, path string, log *slog.Lo
 		return
 	}
 	log.Info("sources seeded", "path", path, "count", len(records))
+}
+
+// newJevClient picks the jev host from the key that is set. DOR_JEV_API_KEY
+// and OPENROUTER_API_KEY go to OpenRouter (or DOR_JEV_BASE_URL); a
+// TYPESAFE_API_KEY on its own goes to TypeSafe's host. No key is (nil, nil).
+func newJevClient(models dorconfig.Models, b decide.Budget) (*decide.Client, string, error) {
+	if key := firstEnv("DOR_JEV_API_KEY", "OPENROUTER_API_KEY"); key != "" {
+		client, err := decide.NewClientFromModels(models, os.Getenv("DOR_JEV_BASE_URL"), key, b)
+		return client, models.Jev.Model, err
+	}
+	if key := firstEnv("TYPESAFE_API_KEY"); key != "" {
+		client, err := decide.NewTypeSafeClientFromModels(models, firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL"), key, b)
+		return client, models.Jev.TypeSafe.Model, err
+	}
+	return nil, "", nil
+}
+
+// newEnricher builds the Claude-feature backend from DOR_LLM_BACKENDS, a
+// comma-separated fallback order of api, claude-cli and codex-cli. Unset
+// means "api" when ANTHROPIC_API_KEY is set and nothing otherwise. Backends
+// that cannot start are logged and skipped; nil means no backend.
+func newEnricher(models dorconfig.Models, b llm.Budget, log *slog.Logger) llm.Completer {
+	order := strings.TrimSpace(os.Getenv("DOR_LLM_BACKENDS"))
+	if order == "" {
+		order = "api"
+	}
+	concurrency, _ := strconv.Atoi(os.Getenv("DOR_LLM_CLI_CONCURRENCY"))
+	var backends []llm.Backend
+	for _, name := range strings.Split(order, ",") {
+		name = strings.TrimSpace(name)
+		var (
+			c   llm.Completer
+			err error
+		)
+		switch name {
+		case "":
+			continue
+		case "api":
+			key := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+			if key == "" {
+				if os.Getenv("DOR_LLM_BACKENDS") != "" {
+					log.Warn("llm backend skipped: ANTHROPIC_API_KEY is not set", "backend", name)
+				}
+				continue
+			}
+			c, err = llm.NewFromConfig(models, key, os.Getenv("DOR_CLAUDE_BASE_URL"), b)
+		case string(llm.CLIClaude):
+			c, err = llm.NewCLI(llm.CLIConfig{
+				Kind:        llm.CLIClaude,
+				HaikuModel:  models.Claude.HaikuModel,
+				OpusModel:   models.Claude.OpusModel,
+				Effort:      models.Claude.Effort,
+				Timeout:     models.Claude.Timeout.Std(),
+				Concurrency: concurrency,
+				Logger:      log,
+			})
+		case string(llm.CLICodex):
+			c, err = llm.NewCLI(llm.CLIConfig{
+				Kind:        llm.CLICodex,
+				HaikuModel:  envOr("DOR_CODEX_MODEL", "gpt-6-luna"),
+				OpusModel:   envOr("DOR_CODEX_OPUS_MODEL", "gpt-6-sol"),
+				Effort:      models.Claude.Effort,
+				Timeout:     models.Claude.Timeout.Std(),
+				Concurrency: concurrency,
+				Logger:      log,
+			})
+		default:
+			log.Warn("llm backend skipped: unknown name (want api, claude-cli or codex-cli)", "backend", name)
+			continue
+		}
+		if err != nil {
+			log.Warn("llm backend unavailable", "backend", name, "err", err)
+			continue
+		}
+		backends = append(backends, llm.Backend{Name: name, Completer: c})
+	}
+	switch len(backends) {
+	case 0:
+		return nil
+	case 1:
+		log.Info("claude enricher enabled", "backend", backends[0].Name, "haiku", models.Claude.HaikuModel)
+		return backends[0].Completer
+	}
+	chain := llm.NewChain(log, backends...)
+	log.Info("claude enricher enabled", "backends", strings.Join(chain.Names(), " > "), "haiku", models.Claude.HaikuModel)
+	return chain
 }
 
 func firstEnv(keys ...string) string {

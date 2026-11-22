@@ -53,6 +53,18 @@ type JevModel struct {
 	MinBackoff Duration `yaml:"min_backoff"`
 	MaxBackoff Duration `yaml:"max_backoff"`
 	Price      Price    `yaml:"price"`
+	// TypeSafe is the direct endpoint used when the only jev key is a
+	// TYPESAFE_API_KEY. Timeout, retries and backoff are shared.
+	TypeSafe JevEndpoint `yaml:"typesafe"`
+}
+
+// JevEndpoint is one alternative jev host: its own pin, URL and price. The
+// request and response bodies are the same decisions shape.
+type JevEndpoint struct {
+	Model   string `yaml:"model"`
+	BaseURL string `yaml:"base_url"`
+	Path    string `yaml:"path"`
+	Price   Price  `yaml:"price"`
 }
 
 // ClaudeModel is the Claude client configuration. Both model ids are plain
@@ -89,6 +101,12 @@ func DefaultModels() Models {
 			MinBackoff: Duration(250 * time.Millisecond),
 			MaxBackoff: Duration(8 * time.Second),
 			Price:      Price{InputPerMTok: 0.10, Provisional: true},
+			TypeSafe: JevEndpoint{
+				Model:   "jev-1.14.0",
+				BaseURL: "https://api.typesafe.ai",
+				Path:    "/v1/systemone",
+				Price:   Price{InputPerMTok: 0.042},
+			},
 		},
 		Claude: ClaudeModel{
 			HaikuModel: "claude-haiku-5-5",
@@ -118,7 +136,7 @@ func LoadModels(path string) (Models, error) {
 	return m, nil
 }
 
-var pinnedVersion = regexp.MustCompile(`-\d+\.\d+$`)
+var pinnedVersion = regexp.MustCompile(`-\d+\.\d+(\.\d+)?$`)
 
 // ValidateModelPin rejects an empty model, the floating "latest" alias and
 // any model id without an explicit version suffix. A dated served snapshot is
@@ -146,6 +164,12 @@ func (m *Models) Validate() error {
 	}
 	if m.Jev.Path == "" {
 		return fmt.Errorf("jev.path is empty")
+	}
+	if err := ValidateModelPin(m.Jev.TypeSafe.Model); err != nil {
+		return fmt.Errorf("jev.typesafe.model: %w", err)
+	}
+	if m.Jev.TypeSafe.BaseURL == "" || m.Jev.TypeSafe.Path == "" {
+		return fmt.Errorf("jev.typesafe base_url and path must be set")
 	}
 	if m.Jev.Timeout <= 0 {
 		return fmt.Errorf("jev.timeout must be positive")

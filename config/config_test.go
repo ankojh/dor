@@ -164,13 +164,13 @@ func TestSaveThresholdsRejectsInvalid(t *testing.T) {
 }
 
 func TestValidateModelPin(t *testing.T) {
-	good := []string{"typesafe/jev-1.14", "x-2.0"}
+	good := []string{"typesafe/jev-1.14", "x-2.0", "jev-1.14.0"}
 	for _, m := range good {
 		if err := ValidateModelPin(m); err != nil {
 			t.Errorf("%q should be accepted: %v", m, err)
 		}
 	}
-	bad := []string{"", "  ", "~typesafe/jev-latest", "typesafe/jev-latest", "typesafe/jev", "typesafe/jev-1", "typesafe/LATEST-1.2", "typesafe/jev-1.14-20261014"}
+	bad := []string{"", "  ", "~typesafe/jev-latest", "typesafe/jev-latest", "typesafe/jev", "typesafe/jev-1", "typesafe/LATEST-1.2", "typesafe/jev-1.14-20261014", "jev-1.14.0.1"}
 	for _, m := range bad {
 		if err := ValidateModelPin(m); err == nil {
 			t.Errorf("%q should be rejected", m)

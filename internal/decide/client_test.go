@@ -526,6 +526,61 @@ func TestNewClientFromModels(t *testing.T) {
 	}
 }
 
+// TypeSafe direct returns no id and no usage.cost (live response captured
+// 2026-11-21), so cost is priced from input tokens.
+const typeSafeBody = `{"model":"jev-1.14.0","answers":{"category":{"type":"choice","choice":"politics","confidence":1.0,"probabilities":{"politics":1.0,"other":0.0}},"urgent":{"type":"noul","noul":0.89}},"usage":{"input_tokens":374,"output_tokens":72}}`
+
+func TestNewTypeSafeClientFromModels(t *testing.T) {
+	var gotPath, gotAuth, gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		_, _ = io.WriteString(w, typeSafeBody)
+	}))
+	defer srv.Close()
+	m := config.DefaultModels()
+	fb := &fakeBudget{}
+	c, err := NewTypeSafeClientFromModels(m, srv.URL, "ts-key", fb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Decide(context.Background(), simpleReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/systemone" || gotAuth != "Bearer ts-key" || gotModel != "jev-1.14.0" {
+		t.Errorf("path=%q auth=%q model=%q", gotPath, gotAuth, gotModel)
+	}
+	if resp.ID != "" || resp.Model != "jev-1.14.0" || resp.Answers["category"].Choice != "politics" {
+		t.Errorf("resp = %+v", resp)
+	}
+	want := 374 * 0.042 / 1e6
+	if diff := resp.Usage.CostUSD - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("cost = %v, want %v", resp.Usage.CostUSD, want)
+	}
+	if len(fb.records) != 1 || fb.records[0].Usage.CostUSD != resp.Usage.CostUSD {
+		t.Errorf("records = %+v", fb.records)
+	}
+	c2, err := NewTypeSafeClientFromModels(m, "", "ts-key", fb)
+	if err != nil || c2.cfg.BaseURL != "https://api.typesafe.ai" {
+		t.Errorf("base url = %q err=%v", c2.cfg.BaseURL, err)
+	}
+}
+
+func TestReportedCostIsNotRepriced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, okBody) }))
+	defer srv.Close()
+	c := newTestClient(t, srv.URL, &fakeBudget{}, func(cfg *ClientConfig) { cfg.CostFromPrice = true })
+	resp, err := c.Decide(context.Background(), simpleReq())
+	if err != nil || resp.Usage.CostUSD != 0.0000321 {
+		t.Errorf("cost = %v err=%v", resp.Usage.CostUSD, err)
+	}
+}
+
 func TestBudgetDenial(t *testing.T) {
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); _, _ = io.WriteString(w, okBody) }))

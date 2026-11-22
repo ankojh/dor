@@ -475,11 +475,24 @@ labelled items (N), not answered items.
 
 **Retries cover the whole 5xx range.** Both clients retry 429 and 500–599,
 including 524/529, plus per-attempt transport timeouts while the parent context
-is alive. A cancelled or expired parent is never retried. TypeSafe direct is not
-implemented: a `TYPESAFE_API_KEY` needs an explicit base URL, path and request
-shape (`openrouter-decisions`) and otherwise fails early; the direct
-`/v1/systemone` shape is not guessed. Push CI is mock-only and gets no secrets;
-only manual `workflow_dispatch` runs live.
+is alive. A cancelled or expired parent is never retried. In `make eval`, a
+`TYPESAFE_API_KEY` alone still fails early (see below for the runtime). Push CI
+is mock-only and gets no secrets; only manual `workflow_dispatch` runs live.
+
+**TypeSafe direct and subscription backends (runtime, 2026-11-21).** `dor run`
+sends a lone `TYPESAFE_API_KEY` to `https://api.typesafe.ai/v1/systemone` with
+model `jev-1.14.0` (the `jev.typesafe` block in `config/models.yaml`). A live
+call confirmed the body and answer shape match the OpenRouter decisions API;
+the response has no `id` and no `usage.cost`, so cost is input tokens × the
+documented $0.042/Mtok. Model pins now accept `x.y.z` because TypeSafe rejects
+`jev-1.14`. Claude features can run on subscriptions instead of an API key:
+`DOR_LLM_BACKENDS` orders `api`, `claude-cli` (`claude -p --json-schema`) and
+`codex-cli` (`codex exec --output-schema`) into a fallback chain
+(`internal/llm/chain.go`). CLI calls skip the dollar budget (they spend
+subscription quota) and are capped by `DOR_LLM_CLI_CONCURRENCY`; a backend that
+fails for an infrastructure reason cools down for 30 s, doubling to 10 min.
+Codex answers come from a different model family than the prompts were tuned
+on and have not been evaluated.
 ## Globe renderer (M0·2, 2026-11-20; fixup 1)
 
 **Custom WebGL layer on the MapLibre GL JS v5 globe.** The first decision note

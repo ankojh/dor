@@ -68,8 +68,10 @@ type Deps struct {
 
 	// Decider is shared by the plotter, classifier and relation judge. Nil
 	// means the deterministic fallbacks (never a fake model answer).
-	Decider  decide.Decider
-	Enricher *llm.Client
+	Decider decide.Decider
+	// Enricher is the Claude API client, a subscription CLI backend or a
+	// fallback chain of them. Nil means the deterministic fallbacks.
+	Enricher llm.Completer
 	// Text is the brief/why service. Nil gets a fallback-only instance.
 	Text       *textsvc.Service
 	Thresholds config.Thresholds

@@ -292,11 +292,7 @@ export type StoryCommand =
   | { type: "story"; action: "remove"; index: number };
 
 export type WorkerCommand =
-  | FrameCommand
-  | FocusCommand
-  | StreamCommand
-  | LinkCommand
-  | StoryCommand;
+  FrameCommand | FocusCommand | StreamCommand | LinkCommand | StoryCommand;
 export type WorkerResponse = FakeInit | StreamPatch | FocusPatch;
 
 /** Collects the transferable buffers of a response. */

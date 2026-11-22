@@ -8,20 +8,16 @@
  */
 import type { Link, Story } from "../gen/dor/v1/dor_pb";
 import { Role } from "../gen/dor/v1/dor_pb";
-import {
-  categoryColor,
-  encodeArc,
-  type FocusState,
-  FOCUS_AMBIENT,
-} from "./encoding";
-import {
-  greatCirclePoint,
-  lngLatToMercator,
-  splitMercator,
-  type Vec2,
-} from "./mercator";
+import { categoryColor, encodeArc, type FocusState, FOCUS_AMBIENT } from "./encoding";
+import { greatCirclePoint, lngLatToMercator, splitMercator, type Vec2 } from "./mercator";
 import { RIPPLE_CAPACITY } from "./ripples";
-import { ARC_SEGMENTS, type FakeInit, type HudStory, type TetherRing, type TetherSegment } from "../worker/fake/protocol";
+import {
+  ARC_SEGMENTS,
+  type FakeInit,
+  type HudStory,
+  type TetherRing,
+  type TetherSegment,
+} from "../worker/fake/protocol";
 
 export type LiveStory = {
   story: Story;
@@ -172,10 +168,8 @@ export function buildLiveGlobe(
     linkDirection.push(link.dir);
     linkConfidence.push(link.confidence);
     linkDistance.push(
-      greatCircleLength(
-        [located[a]!.lng, located[a]!.lat],
-        [located[b]!.lng, located[b]!.lat],
-      ) / 1000,
+      greatCircleLength([located[a]!.lng, located[a]!.lat], [located[b]!.lng, located[b]!.lat]) /
+        1000,
     );
   }
 

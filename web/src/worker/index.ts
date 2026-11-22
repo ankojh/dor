@@ -199,7 +199,8 @@ function linkKey(a: string, b: string): string {
 
 async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
   debug.raw = Number(debug.raw) + 1;
-  const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
+  const bytes =
+    data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
   let message;
   try {
     message = fromBinary(ServerMessageSchema, bytes);
@@ -277,7 +278,10 @@ function scheduleReconnect(immediate = false): void {
 
 function connect(): void {
   if (stopped) return;
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+  ) {
     return;
   }
   postStatus(reconnectAttempt > 0 ? "reconnecting" : "connecting");
@@ -334,14 +338,18 @@ async function pollHealth(): Promise<void> {
     };
     const list = Array.isArray(payload.sources) ? payload.sources : [];
     const stateOf = (source: NonNullable<typeof payload.sources>[number]): string =>
-      (source.health?.state ?? source.status ?? (source.ok === false ? "down" : "ok")).toLowerCase();
+      (
+        source.health?.state ??
+        source.status ??
+        (source.ok === false ? "down" : "ok")
+      ).toLowerCase();
     const sourcesOk = list.filter((source) => stateOf(source) === "ok").length;
     const sourcesTotal = payload.count ?? list.length ?? payload.source_count ?? 0;
     health = {
       ok:
         sourcesTotal > 0
           ? sourcesOk === sourcesTotal
-          : payload.ok ?? (payload.status ? payload.status === "ok" : null),
+          : (payload.ok ?? (payload.status ? payload.status === "ok" : null)),
       sourcesOk,
       sourcesTotal,
       detail:
@@ -355,7 +363,14 @@ async function pollHealth(): Promise<void> {
   postStatus(socket?.readyState === WebSocket.OPEN ? "online" : "offline");
 }
 
-statusScope.postMessage({ type: "status", connection: "connecting", lastSeq: 0, lastWireAt: null, reconnectInMs: 0, health });
+statusScope.postMessage({
+  type: "status",
+  connection: "connecting",
+  lastSeq: 0,
+  lastWireAt: null,
+  reconnectInMs: 0,
+  health,
+});
 connect();
 void pollHealth();
 const healthTimer = setInterval(() => void pollHealth(), 15_000);

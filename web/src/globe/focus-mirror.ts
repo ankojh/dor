@@ -352,7 +352,15 @@ export class FocusMirror {
   /** Apply a story insert/remove; structural, so it rebuilds once. */
   applyStoryDelta(
     index: number,
-    fields: { lng: number; lat: number; category: number; title: string; place: string; sources: number; heat: number },
+    fields: {
+      lng: number;
+      lat: number;
+      category: number;
+      title: string;
+      place: string;
+      sources: number;
+      heat: number;
+    },
     add: boolean,
   ): void {
     if (index < 0 || index >= this.storyCapacity) return;

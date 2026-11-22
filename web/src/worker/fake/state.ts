@@ -598,12 +598,7 @@ export class FakeWorld {
    * M2·4. The worker owns the index; the main thread applies the returned op
    * to its mirror, geometry buffers and textures.
    */
-  insertLink(
-    a: number,
-    b: number,
-    type: number,
-    strength: number,
-  ): LinkOp | null {
+  insertLink(a: number, b: number, type: number, strength: number): LinkOp | null {
     if (
       a === b ||
       a < 0 ||
@@ -909,7 +904,12 @@ export class FakeWorld {
     let tethers: TetherSegment[] = [];
     let tetherRings: TetherRing[] = [];
 
-    if (index !== null && index >= 0 && index < this.storyCapacity && this.storyActive[index] !== 0) {
+    if (
+      index !== null &&
+      index >= 0 &&
+      index < this.storyCapacity &&
+      this.storyActive[index] !== 0
+    ) {
       const ring1 = new Set<number>();
       const directLinks: number[] = [];
       for (let edge = this.adjStart[index]!; edge < this.adjStart[index + 1]!; edge++) {

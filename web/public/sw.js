@@ -10,7 +10,8 @@ self.addEventListener("push", (event) => {
   const title = payload.title || "Dor alert";
   const options = {
     body: payload.body || payload.prompt || "",
-    tag: payload.tag || `dor-alert:${payload.alert_id || "unknown"}:${payload.story_id || "unknown"}`,
+    tag:
+      payload.tag || `dor-alert:${payload.alert_id || "unknown"}:${payload.story_id || "unknown"}`,
     data: {
       url:
         payload.url ||

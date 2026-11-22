@@ -193,10 +193,7 @@ export class LiveGlobe {
     this.map.on("error", (event) => {
       const message = (event as { error?: Error }).error?.message ?? "";
       if (message && !message.includes("Failed to fetch")) console.warn(`map: ${message}`);
-      if (
-        !this.tileFailed &&
-        /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)
-      ) {
+      if (!this.tileFailed && /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)) {
         this.tileFailed = true;
         this.map.getContainer().classList.add("tile-failed");
         void this.addFallbackCities();
@@ -248,19 +245,7 @@ export class LiveGlobe {
           source: AREA_SOURCE,
           maxzoom: 12,
           paint: {
-            "circle-radius": [
-              "interpolate",
-              ["linear"],
-              ["zoom"],
-              0,
-              12,
-              4,
-              18,
-              8,
-              26,
-              14,
-              36,
-            ],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 0, 12, 4, 18, 8, 26, 14, 36],
             "circle-color": ["get", "color"],
             "circle-opacity": 0.07,
             "circle-stroke-color": ["get", "color"],
@@ -396,7 +381,13 @@ export class LiveGlobe {
     };
     this.map.on("mousedown", remember);
     this.map.on("touchstart", remember);
-    for (const eventName of ["mousedown", "touchstart", "wheel", "dragstart", "zoomstart"] as const) {
+    for (const eventName of [
+      "mousedown",
+      "touchstart",
+      "wheel",
+      "dragstart",
+      "zoomstart",
+    ] as const) {
       this.map.on(eventName, () => {
         this.lastInteractionAt = Date.now();
       });
@@ -416,10 +407,7 @@ export class LiveGlobe {
         this.lastPick !== null &&
         this.lastPickPoint !== null &&
         now - this.lastPickAt < 1000 &&
-        Math.hypot(
-          this.lastPickPoint.x - event.point.x,
-          this.lastPickPoint.y - event.point.y,
-        ) < 8;
+        Math.hypot(this.lastPickPoint.x - event.point.x, this.lastPickPoint.y - event.point.y) < 8;
       const arc = this.findArcAt(event.point.x, event.point.y);
       if (arc !== null) {
         const info = this.linkInfo(arc);
@@ -499,11 +487,11 @@ export class LiveGlobe {
   }
 
   private rebuild(stories: Story[], links: Link[], flyToFocus: boolean): void {
-    const visible = this.storyFilter ? stories.filter((story) => this.matchesStory(story)) : stories;
+    const visible = this.storyFilter
+      ? stories.filter((story) => this.matchesStory(story))
+      : stories;
     const visibleIds = new Set(visible.map((story) => story.id));
-    const visibleLinks = links.filter(
-      (link) => visibleIds.has(link.a) && visibleIds.has(link.b),
-    );
+    const visibleLinks = links.filter((link) => visibleIds.has(link.a) && visibleIds.has(link.b));
     const data = buildLiveGlobe(visible, visibleLinks);
     this.data = data;
     this.layer.setInit(data.init);
@@ -606,7 +594,9 @@ export class LiveGlobe {
   private async addFallbackCities(): Promise<void> {
     if (this.map.getSource("dor-fallback-cities")) return;
     try {
-      const apiBase = ((import.meta.env as Record<string, string | undefined>).VITE_API_URL || "").replace(/\/$/, "");
+      const apiBase = (
+        (import.meta.env as Record<string, string | undefined>).VITE_API_URL || ""
+      ).replace(/\/$/, "");
       const response = await fetch(`${apiBase}/api/places?limit=20`);
       if (!response.ok) return;
       const payload = (await response.json()) as {
@@ -716,7 +706,11 @@ export class LiveGlobe {
       })
       .filter((feature): feature is NonNullable<typeof feature> => feature !== null);
     source.setData({ type: "FeatureCollection", features });
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", this.labelsVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      this.labelsVisible ? "visible" : "none",
+    );
   }
 
   private clearLinkLabels(): void {
@@ -826,7 +820,10 @@ export class LiveGlobe {
       return;
     }
     const cell = zoom < 2 ? 18 : 8;
-    const buckets = new Map<string, { count: number; lng: number; lat: number; category: number }>();
+    const buckets = new Map<
+      string,
+      { count: number; lng: number; lat: number; category: number }
+    >();
     for (const entry of this.data.stories) {
       const key = `${Math.floor(entry.lng / cell)}:${Math.floor(entry.lat / cell)}`;
       const bucket = buckets.get(key) ?? { count: 0, lng: 0, lat: 0, category: entry.category };
@@ -852,7 +849,8 @@ export class LiveGlobe {
       for (let i = 0; i <= 6; i++) {
         const angle = (i / 6) * Math.PI * 2;
         ring.push([
-          centerLng + (radius * Math.cos(angle)) / Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)),
+          centerLng +
+            (radius * Math.cos(angle)) / Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)),
           centerLat + radius * Math.sin(angle),
         ]);
       }
@@ -960,9 +958,15 @@ export class LiveGlobe {
   };
 
   // ---- Public controls -------------------------------------------------
-  zoomIn(): void { this.map.zoomIn(); }
-  zoomOut(): void { this.map.zoomOut(); }
-  resetView(): void { this.camera.flyTo(DEFAULT_VIEW); }
+  zoomIn(): void {
+    this.map.zoomIn();
+  }
+  zoomOut(): void {
+    this.map.zoomOut();
+  }
+  resetView(): void {
+    this.camera.flyTo(DEFAULT_VIEW);
+  }
 
   flyTo(center: [number, number], zoom: number): void {
     this.camera.flyTo({ center, zoom, bearing: 0, pitch: 0 });
@@ -983,7 +987,11 @@ export class LiveGlobe {
     if (!this.ready) return;
     if (!visible) this.clearLinkLabels();
     else this.updateLinkLabels();
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", visible && this.labelsVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      visible && this.labelsVisible ? "visible" : "none",
+    );
   }
 
   setTethersVisible(visible: boolean): void {
@@ -1004,7 +1012,11 @@ export class LiveGlobe {
     this.labelsVisible = visible;
     this.labels.setVisible(visible);
     if (!this.ready) return;
-    this.map.setLayoutProperty(LINK_LABEL_LAYER, "visibility", visible && this.linesVisible ? "visible" : "none");
+    this.map.setLayoutProperty(
+      LINK_LABEL_LAYER,
+      "visibility",
+      visible && this.linesVisible ? "visible" : "none",
+    );
   }
 
   setStrengthFloor(floor: number): void {
@@ -1041,7 +1053,9 @@ export class LiveGlobe {
     return true;
   }
 
-  get focus(): FocusDetails | null { return this.focused; }
+  get focus(): FocusDetails | null {
+    return this.focused;
+  }
 
   get view(): GlobeView {
     const center = this.map.getCenter();
@@ -1164,8 +1178,7 @@ function destinationPoint(
   const lat1 = (lat * Math.PI) / 180;
   const lon1 = (lon * Math.PI) / 180;
   const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(angular) +
-      Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing),
+    Math.sin(lat1) * Math.cos(angular) + Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing),
   );
   const lon2 =
     lon1 +
@@ -1190,7 +1203,9 @@ function toRippleUpdate(slot: RippleSlotState, category: number): StreamPatch["r
   const toRad = Math.PI / 180;
   const x = (slot.lng + 180) / 360;
   const clamped = Math.max(-85.05112878, Math.min(85.05112878, slot.lat));
-  const y = 0.5 - Math.log((1 + Math.sin(clamped * toRad)) / (1 - Math.sin(clamped * toRad))) / (4 * Math.PI);
+  const y =
+    0.5 -
+    Math.log((1 + Math.sin(clamped * toRad)) / (1 - Math.sin(clamped * toRad))) / (4 * Math.PI);
   const hiX = Math.round(x * 8192) / 8192;
   const hiY = Math.round(y * 8192) / 8192;
   return {

@@ -151,11 +151,7 @@ export class GlobeGpuData {
     this.gl = gl;
     this.storyCount = init.storyCount;
     this.linkCount = init.linkCount;
-    this.storyCapacity = Math.max(
-      2048,
-      this.storyCount + 1024,
-      init.storyCapacity ?? 0,
-    );
+    this.storyCapacity = Math.max(2048, this.storyCount + 1024, init.storyCapacity ?? 0);
     this.linkCapacity = Math.max(1024, this.linkCount + 512, init.linkCapacity ?? 0);
     this.arcSegments = init.arcSegments;
     this.storyPool = new CapacityPool(this.storyCapacity, this.storyCount);
@@ -461,7 +457,13 @@ export class GlobeGpuData {
     );
   }
 
-  private uploadArcTexel(index: number, state: number, prev: number, at: number, strength: number): void {
+  private uploadArcTexel(
+    index: number,
+    state: number,
+    prev: number,
+    at: number,
+    strength: number,
+  ): void {
     const texel = texelOf(index, this.linkTexWidth);
     const pixel = this.arcPixel;
     pixel[0] = state;

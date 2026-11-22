@@ -331,8 +331,12 @@ export function App() {
   const [cmdPlaces, setCmdPlaces] = createSignal<
     Array<{ id: string; name: string; lat: number; lon: number; country: string }>
   >([]);
-  const [nearMe, setNearMe] = createSignal<Array<{ storyId: string; title: string; km: number }>>([]);
-  const [nearMeState, setNearMeState] = createSignal<"idle" | "loading" | "ready" | "denied">("idle");
+  const [nearMe, setNearMe] = createSignal<Array<{ storyId: string; title: string; km: number }>>(
+    [],
+  );
+  const [nearMeState, setNearMeState] = createSignal<"idle" | "loading" | "ready" | "denied">(
+    "idle",
+  );
   const pendingWire: WireItem[] = [];
   const seen = new Set<string>();
   const briefCache = new Map<string, StoryText>();
@@ -529,7 +533,7 @@ export function App() {
     const rows = wireRows();
     if (rows.length === 0) return new Array(36).fill(0);
     const end = now();
-    const binMs = 24 * 60 * 60 * 1000 / 36;
+    const binMs = (24 * 60 * 60 * 1000) / 36;
     const bins = new Array(36).fill(0);
     for (const item of rows) {
       const at = Number(item.row.at) * 1000 || item.receivedAt;
@@ -708,11 +712,8 @@ export function App() {
     setNearMeState("loading");
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const nearby = liveGlobe?.nearbyStories(
-          position.coords.latitude,
-          position.coords.longitude,
-          12,
-        ) ?? [];
+        const nearby =
+          liveGlobe?.nearbyStories(position.coords.latitude, position.coords.longitude, 12) ?? [];
         setNearMe(
           nearby.map(({ entry, km }) => ({
             storyId: entry.story.id,
@@ -740,12 +741,19 @@ export function App() {
     if (storyId) params.set("story", storyId);
     if (liveGlobe) {
       const view = liveGlobe.view;
-      params.set("view", `${view.center[0].toFixed(3)},${view.center[1].toFixed(3)},${view.zoom.toFixed(2)}`);
+      params.set(
+        "view",
+        `${view.center[0].toFixed(3)},${view.center[1].toFixed(3)},${view.zoom.toFixed(2)}`,
+      );
     }
     if (threadOnly()) params.set("f", "thread");
     else if (globe().secondDegree) params.set("f", "second");
     const next = params.toString();
-    history.replaceState(null, "", `${location.pathname}${location.search}${next ? `#${next}` : ""}`);
+    history.replaceState(
+      null,
+      "",
+      `${location.pathname}${location.search}${next ? `#${next}` : ""}`,
+    );
   };
 
   const scheduleHash = (): void => {
@@ -924,7 +932,9 @@ export function App() {
 
   const dismissToast = (toast: AlertToast): void => {
     setAlertToasts((previous) =>
-      previous.filter((item) => !(item.alertId === toast.alertId && item.storyId === toast.storyId)),
+      previous.filter(
+        (item) => !(item.alertId === toast.alertId && item.storyId === toast.storyId),
+      ),
     );
   };
 
@@ -976,13 +986,21 @@ export function App() {
         "/api/push/key",
       );
       if (!key.available || !key.public_key) {
-        setPushState({ loading: false, available: false, reason: key.reason || "Push is not configured" });
+        setPushState({
+          loading: false,
+          available: false,
+          reason: key.reason || "Push is not configured",
+        });
         return;
       }
       const registration = await navigator.serviceWorker.register("/sw.js");
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
-        setPushState({ loading: false, available: false, reason: "Notification permission denied" });
+        setPushState({
+          loading: false,
+          available: false,
+          reason: "Notification permission denied",
+        });
         return;
       }
       const normalized = key.public_key.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
@@ -1015,7 +1033,11 @@ export function App() {
       const response = await fetch(
         `${API_BASE}/api/text?link_a=${encodeURIComponent(link.aId)}&link_b=${encodeURIComponent(link.bId)}`,
       );
-      const payload = (await response.json()) as { available?: boolean; why?: string; error?: string };
+      const payload = (await response.json()) as {
+        available?: boolean;
+        why?: string;
+        error?: string;
+      };
       const next: LinkWhy = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.why),
@@ -1216,7 +1238,9 @@ export function App() {
 
   const moveSelection = (delta: number): void => {
     const rows = displayRows()
-      .filter((row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article")
+      .filter(
+        (row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article",
+      )
       .map((row) => row.item);
     if (rows.length === 0) return;
     const current = rows.findIndex((item) => item.key === selectedArticle());
@@ -1391,7 +1415,11 @@ export function App() {
         <div class="right">
           <Show when={connection() !== "online"}>
             <span class="reconnect" title={health().detail}>
-              {connection() === "connecting" ? "CONNECTING" : connection() === "reconnecting" ? "RECONNECTING" : "OFFLINE"}
+              {connection() === "connecting"
+                ? "CONNECTING"
+                : connection() === "reconnecting"
+                  ? "RECONNECTING"
+                  : "OFFLINE"}
               {reconnectIn() !== null ? ` · ${Math.ceil(reconnectIn()! / 1000)}s` : ""}
             </span>
           </Show>
@@ -1434,7 +1462,13 @@ export function App() {
                   if (tab === "alerts") void loadAlerts();
                 }}
               >
-                {tab === "wire" ? "Wire" : tab === "threads" ? "Threads" : tab === "near" ? "Near me" : "Alerts"}
+                {tab === "wire"
+                  ? "Wire"
+                  : tab === "threads"
+                    ? "Threads"
+                    : tab === "near"
+                      ? "Near me"
+                      : "Alerts"}
               </button>
             )}
           </For>
@@ -1449,10 +1483,7 @@ export function App() {
               {rate() > 0 ? `${rate()} / min` : "— / min"}
             </span>
             <div class="seg" role="group" aria-label="Stream granularity">
-              <button
-                aria-pressed={!storiesOnly()}
-                onClick={() => setStoriesOnly(false)}
-              >
+              <button aria-pressed={!storiesOnly()} onClick={() => setStoriesOnly(false)}>
                 Every article
               </button>
               <button
@@ -1477,7 +1508,11 @@ export function App() {
             <div class="filter-drawer glass">
               <div class="filter-row">
                 <span class="cap">Category</span>
-                <span>{filters().categories.length === 0 ? "All" : `${filters().categories.length} active`}</span>
+                <span>
+                  {filters().categories.length === 0
+                    ? "All"
+                    : `${filters().categories.length} active`}
+                </span>
               </div>
               <label class="filter-field">
                 <span>Sources</span>
@@ -1587,7 +1622,9 @@ export function App() {
               </div>
               <div class="filter-actions">
                 <span class="cap">
-                  {filterPlace() ? `${filterPlace()!.name} · ${filters().radiusKm} km` : "No radius centre"}
+                  {filterPlace()
+                    ? `${filterPlace()!.name} · ${filters().radiusKm} km`
+                    : "No radius centre"}
                 </span>
                 <button
                   class="text-btn"
@@ -1640,7 +1677,9 @@ export function App() {
             </div>
           </Show>
           <label class="prompt">
-            <span class="spark" aria-hidden="true">✦</span>
+            <span class="spark" aria-hidden="true">
+              ✦
+            </span>
             <input
               type="text"
               value={promptInput()}
@@ -1702,7 +1741,9 @@ export function App() {
             when={displayRows().length > 0}
             fallback={
               <div class="wire-empty">
-                <span class="cap">{connection() === "online" ? "Listening" : "Gateway unavailable"}</span>
+                <span class="cap">
+                  {connection() === "online" ? "Listening" : "Gateway unavailable"}
+                </span>
                 <p>
                   {connection() === "online"
                     ? "Waiting for the first article. The wire fills as sources publish."
@@ -1722,7 +1763,8 @@ export function App() {
                     <div
                       class={`wr ${
                         display()?.kind === "article" &&
-                        selectedArticle() === (display() as { kind: "article"; item: WireItem }).item.key
+                        selectedArticle() ===
+                          (display() as { kind: "article"; item: WireItem }).item.key
                           ? "sel"
                           : ""
                       } ${
@@ -1732,14 +1774,17 @@ export function App() {
                           : ""
                       } ${
                         display()?.kind === "article" && focus()
-                          ? threadIds().has((display() as { kind: "article"; item: WireItem }).item.row.storyId)
+                          ? threadIds().has(
+                              (display() as { kind: "article"; item: WireItem }).item.row.storyId,
+                            )
                             ? "thread"
                             : "dim"
                           : ""
                       } ${
                         display()?.kind === "article" &&
                         prompts().length > 0 &&
-                        activeScore((display() as { kind: "article"; item: WireItem }).item.row) < 0.5
+                        activeScore((display() as { kind: "article"; item: WireItem }).item.row) <
+                          0.5
                           ? "dim"
                           : ""
                       }`}
@@ -1761,8 +1806,15 @@ export function App() {
                               if (item?.kind === "burst") expandBatch(item.key);
                             }}
                           >
-                            + {display()?.kind === "burst" ? (display() as { count: number }).count : 0} more from the{" "}
-                            {display()?.kind === "burst" ? (display() as { source: string }).source : "batch"} batch
+                            +{" "}
+                            {display()?.kind === "burst"
+                              ? (display() as { count: number }).count
+                              : 0}{" "}
+                            more from the{" "}
+                            {display()?.kind === "burst"
+                              ? (display() as { source: string }).source
+                              : "batch"}{" "}
+                            batch
                             {" · "}
                             <span class="expand">expand</span>
                           </button>
@@ -1794,7 +1846,12 @@ export function App() {
                               <span class="pl">
                                 {row.place || "—"}
                                 <Show when={prompts().length > 0 && activeScore(row) > 0}>
-                                  <span class="match-score" title={isApproxMatch(row) ? "Approximate match" : "Prompt match"}>
+                                  <span
+                                    class="match-score"
+                                    title={
+                                      isApproxMatch(row) ? "Approximate match" : "Prompt match"
+                                    }
+                                  >
                                     {isApproxMatch(row) ? "≈" : "·"} {activeScore(row).toFixed(2)}
                                   </span>
                                 </Show>
@@ -1881,12 +1938,14 @@ export function App() {
         <div class="hud-corners" />
         <div class="zoom-rail glass">
           <For
-            each={[
-              ["GLOBE", 1.55],
-              ["REGION", 6],
-              ["CITY", 11],
-              ["STREET", 15],
-            ] as const}
+            each={
+              [
+                ["GLOBE", 1.55],
+                ["REGION", 6],
+                ["CITY", 11],
+                ["STREET", 15],
+              ] as const
+            }
           >
             {([label, zoom]) => (
               <button
@@ -1904,7 +1963,9 @@ export function App() {
         </div>
         <div class="tl">
           <span class="cap">
-            {focus() ? `Focused · ${focus()!.hud.story.place.toUpperCase()}` : "Ambient · no selection"}
+            {focus()
+              ? `Focused · ${focus()!.hud.story.place.toUpperCase()}`
+              : "Ambient · no selection"}
           </span>
           <Show when={focus()}>
             <button class="back" onClick={clearFocus}>
@@ -2043,13 +2104,17 @@ export function App() {
         </Show>
         <Show when={globe().storyCount === 0}>
           <div class="stage-empty glass">
-            <span class="cap">{connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}</span>
+            <span class="cap">
+              {connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}
+            </span>
             <h3>Articles first. Stories next.</h3>
             <p>
-              The wire is live now. The globe fills when the classifier publishes its first
-              located stories.
+              The wire is live now. The globe fills when the classifier publishes its first located
+              stories.
             </p>
-            <span class="mono">{wireRows().length} wire rows · {storyCount()} stories</span>
+            <span class="mono">
+              {wireRows().length} wire rows · {storyCount()} stories
+            </span>
           </div>
         </Show>
         <div class="bl glass">
@@ -2111,7 +2176,10 @@ export function App() {
           {(link) => (
             <div class="arc-popover glass">
               <div class="arc-popover-head">
-                <span class="cap" style={`color:${link().type === 0 ? "#ffc25c" : link().type === 1 ? "#ff6fd8" : "#5ef2ff"}`}>
+                <span
+                  class="cap"
+                  style={`color:${link().type === 0 ? "#ffc25c" : link().type === 1 ? "#ff6fd8" : "#5ef2ff"}`}
+                >
                   {typeName(link().type)} · {directionLabel(link())}
                 </span>
                 <button class="text-btn" onClick={() => setSelectedLink(null)}>
@@ -2121,9 +2189,15 @@ export function App() {
               <h3>{link().aTitle}</h3>
               <h4>→ {link().bTitle}</h4>
               <div class="facts">
-                <span><b>{link().strength.toFixed(2)}</b> strength</span>
-                <span><b>{link().confidence.toFixed(2)}</b> confidence</span>
-                <span><b>{link().distanceKm.toFixed(0)}</b> km</span>
+                <span>
+                  <b>{link().strength.toFixed(2)}</b> strength
+                </span>
+                <span>
+                  <b>{link().confidence.toFixed(2)}</b> confidence
+                </span>
+                <span>
+                  <b>{link().distanceKm.toFixed(0)}</b> km
+                </span>
                 <Show when={link().unverified}>
                   <span class="unverified">unverified</span>
                 </Show>
@@ -2187,7 +2261,8 @@ export function App() {
                         <div class="foot">
                           <span>{story.place}</span>
                           <span>
-                            strongest {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
+                            strongest{" "}
+                            {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
                           </span>
                         </div>
                       </button>
@@ -2212,22 +2287,18 @@ export function App() {
                 <h1>{details().story.title}</h1>
                 <div class="facts">
                   <span>
-                    first seen{" "}
-                    <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
+                    first seen <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
                   </span>
                   <span>
                     <b>{details().hud.story.sources}</b> sources
                   </span>
                   <span>
-                    updated{" "}
-                    <b>{relativeTime(Number(details().story.updatedAt), now())}</b>
+                    updated <b>{relativeTime(Number(details().story.updatedAt), now())}</b>
                   </span>
                 </div>
               </div>
               <div class="sec">
-                <span class="agentk">
-                  AGENT BRIEF · from {details().hud.story.sources} sources
-                </span>
+                <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
                 <Show
                   when={storyText()?.available}
                   fallback={
@@ -2269,8 +2340,8 @@ export function App() {
                     <div class="tierh">
                       <span class="cap">Sources</span>
                       <span class="cap">
-                        {detailsData().sources.length} feeds ·{" "}
-                        {detailsData().articles.length} recent
+                        {detailsData().sources.length} feeds · {detailsData().articles.length}{" "}
+                        recent
                       </span>
                     </div>
                     <Show
@@ -2338,7 +2409,8 @@ export function App() {
                               }}
                             >
                               <span class="k">
-                                {typeName(link.type)} {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {typeName(link.type)}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
                                 {link.unverified ? "unverified · " : ""}
                                 {link.place.toUpperCase()}
                               </span>
@@ -2421,7 +2493,9 @@ export function App() {
                       if (info) openLink(info);
                     }}
                   >
-                    <span>{typeName(link.type)} · {link.place}</span>
+                    <span>
+                      {typeName(link.type)} · {link.place}
+                    </span>
                     <b>{link.strength.toFixed(2)}</b>
                   </button>
                 )}
@@ -2455,7 +2529,9 @@ export function App() {
                   type="number"
                   min="0"
                   value={alertDraftMinSources()}
-                  onInput={(event) => setAlertDraftMinSources(Number(event.currentTarget.value) || 0)}
+                  onInput={(event) =>
+                    setAlertDraftMinSources(Number(event.currentTarget.value) || 0)
+                  }
                 />
               </label>
               <label class="filter-field">
@@ -2468,7 +2544,9 @@ export function App() {
               </label>
             </div>
             <label class="alert-strict">
-              <span>Strictness <b>{alertDraftStrictness().toFixed(2)}</b></span>
+              <span>
+                Strictness <b>{alertDraftStrictness().toFixed(2)}</b>
+              </span>
               <input
                 type="range"
                 min="0.5"
@@ -2531,10 +2609,7 @@ export function App() {
             </Show>
           </div>
           <div class="alert-list">
-            <Show
-              when={alertList().length > 0}
-              fallback={<span class="cap">No alerts yet</span>}
-            >
+            <Show when={alertList().length > 0} fallback={<span class="cap">No alerts yet</span>}>
               <For each={alertList()}>
                 {(alert) => (
                   <div class="alert-item">
@@ -2633,13 +2708,17 @@ export function App() {
           fallback={
             <>
               <div class="tlrow">
-                <span class="cap" style="width:78px">Last 24h</span>
+                <span class="cap" style="width:78px">
+                  Last 24h
+                </span>
                 <div class="bars">
                   <For each={timelineBars()}>{(height) => <i style={`height:${height}%`} />}</For>
                   <span class="win" />
                   <span class="now" />
                 </div>
-                <button class="chip" aria-pressed="true">● Live</button>
+                <button class="chip" aria-pressed="true">
+                  ● Live
+                </button>
               </div>
               <div class="ticks">
                 <span>−24h</span>
@@ -2652,7 +2731,9 @@ export function App() {
           }
         >
           <div class="tlrow">
-            <span class="cap" style="width:78px">This thread</span>
+            <span class="cap" style="width:78px">
+              This thread
+            </span>
             <div class="track">
               <For each={focusTimeline()}>
                 {(event) => (

@@ -27,9 +27,7 @@ export function mergeWireRow(existing: WireRow, incoming: WireRow): WireRow {
     at: Number(incoming.at) !== 0 ? incoming.at : existing.at,
     join: incoming.join === 1 || existing.join !== 1 ? incoming.join : existing.join,
     promptScores:
-      Object.keys(incoming.promptScores).length > 0
-        ? incoming.promptScores
-        : existing.promptScores,
+      Object.keys(incoming.promptScores).length > 0 ? incoming.promptScores : existing.promptScores,
   } as WireRow & WireExtra;
   const oldExtra = existing as WireRow & WireExtra;
   const newExtra = incoming as WireRow & WireExtra;

@@ -240,9 +240,7 @@ async function measureScenario(
     gestures[kind] = await endWindow(page);
     await page.waitForTimeout(500);
   }
-  await page.evaluate(() =>
-    (window as any).__dorSpike.map.jumpTo({ center: [6, 22], zoom: 1.55 }),
-  );
+  await page.evaluate(() => (window as any).__dorSpike.map.jumpTo({ center: [6, 22], zoom: 1.55 }));
   await page.waitForTimeout(600);
   await beginWindow(page, "zoomIn");
   zoomEvidence = await zoomInToStreet(page);

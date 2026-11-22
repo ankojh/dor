@@ -194,10 +194,7 @@ function binary(length: number, attributes: BinaryData["attributes"]): BinaryDat
   return { length, attributes };
 }
 
-function interleavePositions(
-  lng: ArrayLike<number>,
-  lat: ArrayLike<number>,
-): Float32Array {
+function interleavePositions(lng: ArrayLike<number>, lat: ArrayLike<number>): Float32Array {
   const out = new Float32Array(lng.length * 3);
   for (let i = 0; i < lng.length; i++) {
     out[i * 3] = lng[i]!;

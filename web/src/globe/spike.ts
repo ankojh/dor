@@ -397,14 +397,7 @@ async function boot(): Promise<void> {
       customLayer?.applyStoryOp(op);
     }
     for (const op of patch.linkOps ?? []) {
-      mirror?.applyLinkDelta(
-        op.index,
-        op.a,
-        op.b,
-        op.op === "add",
-        op.type,
-        op.strength,
-      );
+      mirror?.applyLinkDelta(op.index, op.a, op.b, op.op === "add", op.type, op.strength);
       customLayer?.applyLinkOp(op);
     }
     mirror?.applyStream(patch);

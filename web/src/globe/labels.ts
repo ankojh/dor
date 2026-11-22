@@ -57,7 +57,7 @@ export class StoryLabels {
           "text-allow-overlap": false,
           "text-optional": true,
           "text-padding": 4,
-          "text-variable-anchor": ["right", "left", "top", "bottom"],
+          "text-variable-anchor": ["top", "bottom", "left", "right"],
           "text-radial-offset": 1.1,
           "text-max-width": 14,
         },

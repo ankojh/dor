@@ -1575,6 +1575,78 @@ func TestFullCacheHistoricalRepairRetentionBoundaries(t *testing.T) {
 	}
 }
 
+func TestFullCacheLaPazSeatOfGovernmentCapital(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	laPaz, ok := g.ByID("3911925")
+	if !ok || laPaz.CountryCode != "BO" || laPaz.Feature != "PPLG" || !geo.ValidCoordinates(laPaz.Lat, laPaz.Lon) {
+		t.Fatalf("full cache must contain La Paz 3911925 as a valid BO seat of government: %+v found=%v", laPaz, ok)
+	}
+
+	t.Run("bare_la_paz", func(t *testing.T) {
+		placed := p.place(context.Background(), &dorv1.Article{Id: "la-paz-bare", Title: "La Paz announces a new policy"})
+		var found *dorv1.Location
+		for _, loc := range placed.Locations {
+			if loc.PlaceId == laPaz.ID {
+				found = loc
+			}
+		}
+		if found == nil {
+			t.Fatalf("bare La Paz should resolve to the BO seat of government 3911925, got %+v", placed.Locations)
+		}
+		if found.Precision != dorv1.Precision_PRECISION_CITY {
+			t.Fatalf("bare La Paz should resolve at city precision, got %+v", found)
+		}
+		candidate, ok := g.ByID(found.PlaceId)
+		if !ok || candidate.CountryCode != "BO" {
+			t.Fatalf("resolved La Paz must be a BO place, got %+v (known=%v)", found, ok)
+		}
+	})
+
+	t.Run("qualified_mexico", func(t *testing.T) {
+		placed := p.place(context.Background(), &dorv1.Article{Id: "la-paz-mexico", Title: "La Paz, Mexico announces a new policy"})
+		if len(placed.Locations) == 0 {
+			t.Fatalf("explicit Mexican jurisdiction should resolve La Paz in Mexico, got no locations")
+		}
+		foundMX := false
+		for _, loc := range placed.Locations {
+			candidate, ok := g.ByID(loc.PlaceId)
+			if !ok {
+				t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+				continue
+			}
+			if candidate.CountryCode == "BO" {
+				t.Errorf("explicit Mexican jurisdiction must never resolve to BO La Paz: %+v", loc)
+			}
+			if candidate.CountryCode == "MX" {
+				foundMX = true
+			}
+		}
+		if !foundMX {
+			t.Fatalf("explicit Mexican jurisdiction should resolve to a MX place, got %+v", placed.Locations)
+		}
+	})
+
+	t.Run("repair_canonical_not_deleted", func(t *testing.T) {
+		decision := g.RepairLocation(geo.StoredLocation{
+			PlaceID: laPaz.ID, Lat: float64(float32(laPaz.Lat)), Lon: float64(float32(laPaz.Lon)), Precision: geo.PrecisionOf(laPaz),
+		}, []geo.TextEvidence{{Title: "La Paz announces a new policy"}})
+		if decision.Reason != "" && (decision.Replacement == nil || decision.Replacement.ID != laPaz.ID) {
+			t.Fatalf("canonical La Paz must not be deleted for supported seat-of-government evidence, got %+v", decision)
+		}
+	})
+
+	t.Run("person_name_not_plotted", func(t *testing.T) {
+		placed := p.place(context.Background(), &dorv1.Article{Id: "la-paz-person", Title: "Maria La Paz announces a new book"})
+		for _, loc := range placed.Locations {
+			if loc.PlaceId == laPaz.ID {
+				t.Fatalf("La Paz in a person name must not resolve to the BO capital: %+v", placed.Locations)
+			}
+		}
+	})
+}
+
 var fullCachePlotGazetteers = struct {
 	sync.Mutex
 	byDir map[string]*geo.Gazetteer

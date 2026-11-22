@@ -420,7 +420,7 @@ func routeContextNearby(words []token, end int) bool {
 }
 
 func seatLike(p Place) bool {
-	return p.Feature == "PPLC" || strings.HasPrefix(p.Feature, "PPLA")
+	return p.Feature == "PPLC" || p.Feature == "PPLG" || strings.HasPrefix(p.Feature, "PPLA")
 }
 
 func sameJurisdiction(a, b Place) bool {
@@ -435,7 +435,7 @@ func sameSeatRegion(a, b Place) bool {
 	if a.CountryCode == "" || a.CountryCode != b.CountryCode || b.Feature != "ADM1" {
 		return false
 	}
-	if a.Feature != "PPLC" && !strings.HasPrefix(a.Feature, "PPLA") {
+	if !seatLike(a) {
 		return false
 	}
 	return expandedPlaceName(a.Name) == expandedPlaceName(b.Name)
@@ -473,7 +473,7 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 	if !conflict {
 		return true
 	}
-	return (p.Feature == "ADM1" || p.Feature == "PPLC" || strings.HasPrefix(p.Feature, "PPLA")) && population >= 5*largestOther
+	return (p.Feature == "ADM1" || seatLike(p)) && population >= 5*largestOther
 }
 
 // A multiword homonym resolves only to the exact canonical name of a capital
@@ -483,7 +483,7 @@ func (g *Gazetteer) dominatesHomonym(p, other Place, phrase string) bool {
 	if p.RegionAlias != "" || expandedPlaceName(p.Name) != expandedPlaceName(phrase) {
 		return false
 	}
-	if p.Feature != "ADM1" && p.Feature != "PPLC" && !strings.HasPrefix(p.Feature, "PPLA") {
+	if p.Feature != "ADM1" && !seatLike(p) {
 		return false
 	}
 	population, otherPopulation := g.majorPopulation(p), g.majorPopulation(other)

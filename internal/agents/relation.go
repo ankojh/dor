@@ -984,6 +984,13 @@ func (c *relationCore) decay(ctx context.Context, now time.Time) {
 			}
 		}
 	}
+	for key, rec := range c.removals {
+		if rec != nil && rec.Published && c.index[rec.A] == nil && c.index[rec.B] == nil {
+			delete(c.removals, key)
+			delete(c.dirtyRem, key)
+			evictedPairs = append(evictedPairs, key)
+		}
+	}
 	for key, l := range c.links {
 		if l == nil || l.link == nil {
 			delete(c.links, key)
@@ -1274,6 +1281,9 @@ func (c *relationCore) authoritativeEntry(ctx context.Context, id string) *relat
 				e.updated = story.UpdatedAt
 			}
 			c.mu.Lock()
+			if cur := c.index[id]; cur != nil && cur.contentSeq == rec.ContentSeq && storyContentEqual(cur.story, e.story) {
+				e.story.Heat = cur.story.Heat
+			}
 			if cur := c.index[id]; cur == nil || cur.contentSeq <= rec.ContentSeq {
 				c.index[id] = e
 			}
@@ -1342,7 +1352,9 @@ func (c *relationCore) markStoryJudged(ctx context.Context, id string, seq uint6
 	}
 	c.mu.Lock()
 	if e := c.index[id]; e != nil && e.contentSeq == seq {
-		e.judgedSeq = seq
+		updated := *e
+		updated.judgedSeq = seq
+		c.index[id] = &updated
 	}
 	c.mu.Unlock()
 }
@@ -1541,6 +1553,22 @@ func (c *relationCore) linkExists(ctx context.Context, a, b string) bool {
 // only after every output succeeds, so a crash or failed publish leaves the
 // record recoverable.
 func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
+	// Capture the stream fence before checking either ledger. The server
+	// rejects an output if any link publication wins after this snapshot.
+	last, err := c.lastLinkSequence(ctx)
+	if err != nil {
+		return err
+	}
+	if rec.Outcome == "link" {
+		removal, removalRev, ok, err := c.loadRemovalRecord(ctx, relationRemovalKey(rec.A, rec.B))
+		if err != nil {
+			return err
+		}
+		if ok && removalRev > rev && removal.SeqA >= rec.SeqA && removal.SeqB >= rec.SeqB {
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			return nil
+		}
+	}
 	switch rec.Outcome {
 	case "none":
 		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
@@ -1580,7 +1608,13 @@ func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *rel
 			c.reschedule(rec.B)
 			return nil
 		}
-		if err := c.publishLink(ctx, tombstone, rec.SeqA, rec.SeqB, true); err != nil {
+		if err := c.publishLinkFenced(ctx, tombstone, rec.SeqA, rec.SeqB, true, last, rev); err != nil {
+			c.restoreNewerPairLink(ctx, rec.A, rec.B)
+			if current, seqErr := c.lastLinkSequence(ctx); seqErr == nil && current != last {
+				c.reschedule(rec.A)
+				c.reschedule(rec.B)
+				return nil
+			}
 			return err
 		}
 		c.mu.Lock()
@@ -1615,7 +1649,8 @@ func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *rel
 			c.reschedule(rec.B)
 			return nil
 		}
-		if err := c.publishLink(ctx, &link, rec.SeqA, rec.SeqB, false); err != nil {
+		if err := c.publishLinkFenced(ctx, &link, rec.SeqA, rec.SeqB, false, last, rev); err != nil {
+			c.restoreNewerPairLink(ctx, rec.A, rec.B)
 			return err
 		}
 		c.mu.Lock()
@@ -1664,6 +1699,40 @@ func (c *relationCore) publishLink(ctx context.Context, link *dorv1.Link, seqA, 
 		return fmt.Errorf("relation: publish link: %w", err)
 	}
 	return nil
+}
+
+// lastLinkSequence and the expected-subject-sequence header serialize link
+// output against other relation instances at the JetStream publish boundary.
+func (c *relationCore) lastLinkSequence(ctx context.Context) (uint64, error) {
+	stream, err := c.bus.StreamNamed(ctx, bus.StreamStory)
+	if err != nil {
+		return 0, err
+	}
+	msg, err := stream.GetLastMsgForSubject(ctx, bus.SubjectLinkChanged)
+	if errors.Is(err, jetstream.ErrMsgNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return msg.Sequence, nil
+}
+
+func (c *relationCore) publishLinkFenced(ctx context.Context, link *dorv1.Link, seqA, seqB uint64, remove bool, last, generation uint64) error {
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(link)
+	if err != nil {
+		return err
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	id := pairMessageID(link.A, link.B, seqA, seqB, remove)
+	if remove {
+		id = fmt.Sprintf("%s:%d", id, generation)
+	}
+	_, err = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data,
+		bus.WithMsgID(id),
+		bus.WithHeaders(map[string][]string{"Nats-Expected-Last-Subject-Sequence": {fmt.Sprint(last)}}))
+	return err
 }
 
 func pairMessageID(a, b string, seqA, seqB uint64, remove bool) string {
@@ -1783,9 +1852,12 @@ func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 	if err != nil {
 		return
 	}
-	if ok && rec.Published {
-		c.dropLocalLink(a, b)
-		return
+	if ok && rec.Published && rec.SeqA == seqA && rec.SeqB == seqB {
+		_, pairRev, pairOK, _ := c.loadPairRecord(ctx, relationPairKey(a, b))
+		if !pairOK || pairRev <= rev {
+			c.dropLocalLink(a, b)
+			return
+		}
 	}
 	if ok && (rec.SeqA > seqA || rec.SeqB > seqB) {
 		return
@@ -1864,7 +1936,7 @@ func (c *relationCore) storeRemovalRecord(ctx context.Context, key string, rec *
 		}
 		var current relationRemovalRecord
 		if json.Unmarshal(entry.Value(), &current) == nil {
-			if current.Published || current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
+			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB || (current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB) {
 				return entry.Revision(), false, nil
 			}
 		}
@@ -1886,6 +1958,10 @@ func (c *relationCore) rememberRemoval(key string, rec *relationRemovalRecord) {
 }
 
 func (c *relationCore) applyRemovalOutput(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64) error {
+	last, err := c.lastLinkSequence(ctx)
+	if err != nil {
+		return err
+	}
 	a, b := live.SortPair(rec.A, rec.B)
 	c.mu.Lock()
 	_, hasA := c.index[a]
@@ -1916,7 +1992,8 @@ func (c *relationCore) applyRemovalOutput(ctx context.Context, key string, rec *
 		c.reschedule(b)
 		return nil
 	}
-	if err := c.publishLink(ctx, tombstone, rec.SeqA, rec.SeqB, true); err != nil {
+	if err := c.publishLinkFenced(ctx, tombstone, rec.SeqA, rec.SeqB, true, last, rev); err != nil {
+		c.restoreNewerPairLink(ctx, a, b)
 		return err
 	}
 	c.dropLocalLink(a, b)
@@ -1932,8 +2009,21 @@ func (c *relationCore) restoreNewerPairLink(ctx context.Context, a, b string) {
 	if c.kv == nil {
 		return
 	}
-	rec, _, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
-	if err != nil || !ok || rec.Outcome != "link" || !rec.Published || len(rec.Link) == 0 {
+	rec, pairRev, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if err != nil {
+		return
+	}
+	removal, removalRev, removed, removalErr := c.loadRemovalRecord(ctx, relationRemovalKey(a, b))
+	if removalErr != nil {
+		return
+	}
+	if removed && removal.Published && (!ok || (removalRev > pairRev && removal.SeqA >= rec.SeqA && removal.SeqB >= rec.SeqB)) {
+		x, y := live.SortPair(a, b)
+		live.PutLink(ctx, c.kv, &dorv1.Link{A: x, B: y, UpdatedAt: c.now().Unix()})
+		c.dropLocalLink(a, b)
+		return
+	}
+	if !ok || rec.Outcome != "link" || !rec.Published || len(rec.Link) == 0 {
 		return
 	}
 	var link dorv1.Link

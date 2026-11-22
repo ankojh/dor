@@ -74,12 +74,16 @@ func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
 		control.PlanHash = ""
 		control.FleetEpoch++
 		control.Phase = PhaseDraining
+		control.IngressClosed = true
+		control.DownstreamFenced = false
+		control.WriterClosed = false
 		if err := ResetJournal(ctx, c.kv); err != nil {
 			return err
 		}
 	}
 	control.FenceActive = true
 	control.Required = true
+	control.IngressClosed = true
 	control.Phase = PhaseDraining
 	control.UpdatedAt = c.now().UnixNano()
 	if reason != "" {
@@ -89,31 +93,82 @@ func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
 }
 
 // AwaitFleetExclusion waits for floor-aware gateways to acknowledge the fence.
-func (c *Coordinator) AwaitFleetExclusion(ctx context.Context, expected, excluded []string, evidence string, timeout time.Duration) error {
+func (c *Coordinator) AwaitFleetExclusion(ctx context.Context, proof ExclusionProof, timeout time.Duration) error {
 	if c.leases == nil {
 		return errors.New("maintenance: gateway lease bucket unavailable")
 	}
-	if strings.TrimSpace(evidence) == "" {
-		return errors.New("maintenance: explicit routing/process exclusion evidence is required")
+	if err := ValidateExclusionProof(proof); err != nil {
+		return err
 	}
 	control, _, err := ReadControl(ctx, c.kv)
 	if err != nil {
 		return err
 	}
-	control.ExclusionEvidence = evidence
+	control.ExclusionAuthority = proof.Authority
+	control.ExclusionEvidenceID = proof.EvidenceID
+	control.ExclusionGeneration = proof.Generation
+	control.ExclusionDigest = proof.Digest
 	control.UpdatedAt = c.now().UnixNano()
 	if err := UpdateControl(ctx, c.kv, control); err != nil {
 		return err
 	}
-	return AwaitGatewayExclusion(ctx, c.leases, expected, excluded, timeout)
+	return AwaitGatewayExclusion(ctx, c.leases, proof.Expected, proof.Excluded, timeout)
 }
 
-// AwaitProducerBarrier waits for the in-process producer/writer runtimes.
-func (c *Coordinator) AwaitProducerBarrier(ctx context.Context, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+// AwaitProducerAdmission waits for the staged ingress closure only. Downstream
+// consumers and writers remain active so the finite backlog can drain.
+func (c *Coordinator) AwaitProducerAdmission(ctx context.Context, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+	if c.producers == nil {
+		return nil, errors.New("maintenance: producer lease bucket unavailable")
+	}
+	return AwaitProducerAdmission(ctx, c.producers, expected, excluded, timeout)
+}
+
+// AwaitProducerFence waits for the full downstream closure and in-flight bar.
+func (c *Coordinator) AwaitProducerFence(ctx context.Context, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
 	if c.producers == nil {
 		return nil, errors.New("maintenance: producer lease bucket unavailable")
 	}
 	return AwaitProducerFence(ctx, c.producers, expected, excluded, timeout)
+}
+
+// AwaitProducerWriterClosed waits for the final DB writer admission closure.
+func (c *Coordinator) AwaitProducerWriterClosed(ctx context.Context, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+	if c.producers == nil {
+		return nil, errors.New("maintenance: producer lease bucket unavailable")
+	}
+	return AwaitProducerWriterClosed(ctx, c.producers, expected, excluded, timeout)
+}
+
+// CloseDownstream fences every downstream writer after the finite backlog
+// drain, before the publisher root is claimed. It does not require a plan.
+func (c *Coordinator) CloseDownstream(ctx context.Context) error {
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if !control.Blocked() {
+		return ErrFenced
+	}
+	control.IngressClosed = true
+	control.DownstreamFenced = true
+	control.UpdatedAt = c.now().UnixNano()
+	return UpdateControl(ctx, c.kv, control)
+}
+
+// CloseWriterAdmission closes new DB writer admissions after the downstream
+// in-flight operation barrier is empty. Existing accepted work stays queued.
+func (c *Coordinator) CloseWriterAdmission(ctx context.Context) error {
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if !control.Blocked() || !control.DownstreamShut() {
+		return ErrFenced
+	}
+	control.WriterClosed = true
+	control.UpdatedAt = c.now().UnixNano()
+	return UpdateControl(ctx, c.kv, control)
 }
 
 // FenceForRun binds the durable control and journal to one deterministic plan
@@ -136,6 +191,9 @@ func (c *Coordinator) FenceForRun(ctx context.Context, runID string) error {
 	control.Phase = PhaseFenced
 	control.Required = true
 	control.FenceActive = true
+	control.IngressClosed = true
+	control.DownstreamFenced = true
+	control.WriterClosed = true
 	control.UpdatedAt = c.now().UnixNano()
 	control.LastError = ""
 	if err := UpdateControl(ctx, c.kv, control); err != nil {
@@ -171,7 +229,11 @@ func (c *Coordinator) Release(ctx context.Context) error {
 	if c.store == nil {
 		return nil
 	}
-	return c.store.Release(ctx)
+	err := c.store.Release(ctx)
+	if err == nil {
+		c.store = nil
+	}
+	return err
 }
 
 // LoadState reads the committed publication state under the maintenance lease.
@@ -217,6 +279,7 @@ func (c *Coordinator) PersistPolicy(ctx context.Context, plan *Plan) (*WireTimeP
 	if hash != plan.PolicyHash {
 		return nil, errors.New("maintenance: policy hash does not match plan")
 	}
+	SetCurrentPolicy(policy)
 	if err := Advance(ctx, c.kv, plan.RunID, PhasePolicyPersisted, map[string]string{"policy_hash": hash}, "durable wire-time policy persisted", c.now()); err != nil {
 		return nil, err
 	}
@@ -717,6 +780,9 @@ func (c *Coordinator) AdmitFleet(ctx context.Context, runID string) error {
 	}
 	control.FenceActive = false
 	control.Required = true
+	control.IngressClosed = false
+	control.DownstreamFenced = false
+	control.WriterClosed = false
 	control.Phase = PhaseServing
 	control.FleetEpoch++
 	control.UpdatedAt = c.now().UnixNano()
@@ -762,7 +828,7 @@ type ApplyRequest struct {
 	ExpectedGateways  []string
 	ExcludedGateways  []string
 	ExpectedConsumers []string
-	RoutingEvidence   string
+	Exclusion         ExclusionProof
 	DrainTimeout      time.Duration
 }
 
@@ -812,8 +878,13 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		requestID = persisted
 		resumePlan = true
 	}
-	if strings.TrimSpace(req.RoutingEvidence) == "" {
-		err := errors.New("maintenance: routing/process exclusion evidence is required")
+	if err := ValidateExclusionProof(req.Exclusion); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if !sameStringSet(req.Exclusion.Expected, req.ExpectedGateways) || !sameStringSet(req.Exclusion.Excluded, req.ExcludedGateways) ||
+		!sameStringSet(req.Exclusion.ExpectedProducers, req.ExpectedProducers) || !sameStringSet(req.Exclusion.ExcludedProducers, req.ExcludedProducers) {
+		err := errors.New("maintenance: exclusion proof does not match expected/excluded participant inventory")
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
@@ -821,15 +892,31 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
-	if err := c.AwaitFleetExclusion(ctx, req.ExpectedGateways, req.ExcludedGateways, req.RoutingEvidence, timeout); err != nil {
+	if err := c.AwaitFleetExclusion(ctx, req.Exclusion, timeout); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
-	if _, err := c.AwaitProducerBarrier(ctx, req.ExpectedProducers, req.ExcludedProducers, timeout); err != nil {
+	if _, err := c.AwaitProducerAdmission(ctx, req.ExpectedProducers, req.ExcludedProducers, timeout); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
 	if err := c.Drain(ctx, &req, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.CloseDownstream(ctx); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if _, err := c.AwaitProducerFence(ctx, req.ExpectedProducers, req.ExcludedProducers, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.CloseWriterAdmission(ctx); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if _, err := c.AwaitProducerWriterClosed(ctx, req.ExpectedProducers, req.ExcludedProducers, timeout); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
@@ -921,6 +1008,9 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
+	if c.store != nil {
+		_ = c.Release(ctx)
+	}
 	return result, nil
 }
 
@@ -932,13 +1022,20 @@ func (c *Coordinator) Drain(ctx context.Context, req *ApplyRequest, timeout time
 	if ok && journal.Has(PhaseFenced) {
 		return nil
 	}
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if control.DownstreamShut() {
+		return nil
+	}
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
 	deadline := time.Now().Add(timeout)
 	var previous *DrainReport
 	for {
-		producers, perr := c.AwaitProducerBarrier(ctx, req.ExpectedProducers, req.ExcludedProducers, 10*time.Second)
+		producers, perr := c.AwaitProducerAdmission(ctx, req.ExpectedProducers, req.ExcludedProducers, 10*time.Second)
 		if perr != nil {
 			return perr
 		}
@@ -978,6 +1075,25 @@ func (c *Coordinator) Drain(ctx context.Context, req *ApplyRequest, timeout time
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	am := map[string]int{}
+	for _, v := range a {
+		am[v]++
+	}
+	for _, v := range b {
+		am[v]--
+	}
+	for _, n := range am {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // activePlanRequestID returns the persisted plan's request identity when a

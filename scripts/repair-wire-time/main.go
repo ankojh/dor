@@ -85,7 +85,9 @@ func run() error {
 	flag.Var(&expectedGateways, "expected-gateway", "gateway id that must be fenced (repeatable)")
 	flag.Var(&excludedGateways, "excluded-gateway", "gateway id explicitly excluded by external routing evidence (repeatable)")
 	flag.Var(&expectedConsumers, "expected-consumer", "durable consumer STREAM/name that must be present (repeatable)")
-	routingEvidence := flag.String("routing-evidence", "", "explicit proof that expected-but-absent participants are excluded from routing/processes")
+	exclusionAuthority := flag.String("exclusion-authority", "", "routing/process authority that excluded absent participants")
+	exclusionEvidence := flag.String("exclusion-evidence", "", "machine evidence id from the exclusion authority")
+	exclusionGeneration := flag.Uint64("exclusion-generation", 0, "monotonic exclusion generation from the authority")
 	drainTimeout := flag.Duration("drain-timeout", 2*time.Minute, "maximum time to wait for a stable finite backlog drain")
 	flag.Parse()
 	if *dbURL == "" {
@@ -117,8 +119,8 @@ func run() error {
 		if !*apply {
 			return errors.New("--maintenance-apply requires --apply")
 		}
-		if strings.TrimSpace(*routingEvidence) == "" || len(expectedProducers) == 0 || len(expectedGateways) == 0 || len(expectedConsumers) == 0 {
-			return errors.New("--maintenance-apply requires --routing-evidence and nonempty expected producer, gateway and consumer inventories")
+		if len(expectedProducers) == 0 || len(expectedGateways) == 0 || len(expectedConsumers) == 0 {
+			return errors.New("--maintenance-apply requires nonempty expected producer, gateway and consumer inventories")
 		}
 	}
 	out := report{Database: name, AsOf: asOf, IngestFirst: info.State.FirstSeq, IngestLast: info.State.LastSeq, Changes: changes, Warning: "Raw retention is limited; later refetch is not necessarily the original. Publisher snapshots, journal and derived state require a separate fenced reconciliation; no live cutover is authorized."}
@@ -151,6 +153,20 @@ func run() error {
 	}
 	audit := auditFromChanges(changes)
 	if *maintenanceApply {
+		exclusion := maintenance.ExclusionProof{
+			Version:           maintenance.ControlVersion,
+			Authority:         *exclusionAuthority,
+			EvidenceID:        *exclusionEvidence,
+			Generation:        *exclusionGeneration,
+			Expected:          expectedGateways,
+			Excluded:          excludedGateways,
+			ExpectedProducers: expectedProducers,
+			ExcludedProducers: excludedProducers,
+		}
+		exclusion.Digest = maintenance.ExclusionDigest(exclusion.Authority, exclusion.EvidenceID, exclusion.Generation, exclusion.Expected, exclusion.Excluded, exclusion.ExpectedProducers, exclusion.ExcludedProducers)
+		if err := maintenance.ValidateExclusionProof(exclusion); err != nil {
+			return err
+		}
 		coord, err := maintenance.NewCoordinator(ctx, b)
 		if err != nil {
 			return err
@@ -165,7 +181,7 @@ func run() error {
 			ExpectedGateways:  expectedGateways,
 			ExcludedGateways:  excludedGateways,
 			ExpectedConsumers: expectedConsumers,
-			RoutingEvidence:   *routingEvidence,
+			Exclusion:         exclusion,
 			DrainTimeout:      *drainTimeout,
 			AuditFunc: func(callCtx context.Context) (time.Time, []maintenance.AuditArticle, error) {
 				run, aerr := auditRetained(callCtx, db, b)

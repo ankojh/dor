@@ -318,7 +318,7 @@ func runCommand(args []string) error {
 					// Do not start accepting writes while a durable
 					// maintenance fence is already active.
 					if gateKV, gerr := b.KV(ctx, bus.KVBucketPublisher); gerr == nil {
-						if control, _, cerr := maintenance.ReadControl(ctx, gateKV); cerr == nil && control.Blocked() {
+						if control, _, cerr := maintenance.ReadControl(ctx, gateKV); cerr == nil && control.WriterShut() {
 							w.SetMaintenanceBlocked(true)
 						}
 					}

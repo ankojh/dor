@@ -159,11 +159,55 @@ type Bus struct {
 	closedCh   chan struct{}
 	closedOnce sync.Once
 
-	// ingestPaused stops new article.raw publishes at the shared transport
-	// boundary. ingestInflight counts one publish call at a time so a
-	// maintenance drain can prove no producer write is still in flight.
-	ingestPaused   atomic.Bool
-	ingestInflight atomic.Int64
+	// ingressGate blocks new article.raw producers; downstreamGate blocks
+	// enrichment/story/alert/match output and live_state/join mutations. The
+	// split is the staged drain: source admission closes first while the finite
+	// downstream backlog finishes.
+	ingress    pipelineGate
+	downstream pipelineGate
+}
+
+// pipelineGate admits an operation under a mutex, so closing the gate cannot
+// race a late admitted write. inflight remains visible until the operation
+// returns.
+type pipelineGate struct {
+	mu       sync.Mutex
+	closed   bool
+	inflight int64
+}
+
+func (g *pipelineGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.inflight++
+	return true
+}
+
+func (g *pipelineGate) leave() {
+	g.mu.Lock()
+	g.inflight--
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) open() {
+	g.mu.Lock()
+	g.closed = false
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) snapshot() (bool, int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed, g.inflight
 }
 
 // Connect starts the embedded server when opts.URL is empty, connects a NATS
@@ -742,51 +786,58 @@ type maintenanceKV struct {
 }
 
 func (k *maintenanceKV) PutString(ctx context.Context, key string, value string) (uint64, error) {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return 0, ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.PutString(ctx, key, value)
 }
 
 func (k *maintenanceKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return 0, ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.Create(ctx, key, value, opts...)
 }
 
 func (k *maintenanceKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return 0, ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.Put(ctx, key, value)
 }
 
 func (k *maintenanceKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return 0, ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.Update(ctx, key, value, revision)
 }
 
 func (k *maintenanceKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.Delete(ctx, key, opts...)
 }
 
 func (k *maintenanceKV) Purge(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.Purge(ctx, key, opts...)
 }
 
 func (k *maintenanceKV) PurgeDeletes(ctx context.Context, opts ...jetstream.KVPurgeOpt) error {
-	if k.bus.ingestPaused.Load() {
+	if !k.bus.downstream.enter() {
 		return ErrIngestPaused
 	}
+	defer k.bus.downstream.leave()
 	return k.KeyValue.PurgeDeletes(ctx, opts...)
 }
 
@@ -902,27 +953,50 @@ func WithHeaders(h nats.Header) PublishOption {
 // producer boundary. Callers should retry after the fence is released.
 var ErrIngestPaused = errors.New("bus: ingestion paused for maintenance")
 
-// PauseIngest stops new pipeline publishes (raw, enrichment, story, match,
-// alert). DELTA output and maintenance-only subjects remain available.
-func (b *Bus) PauseIngest() { b.ingestPaused.Store(true) }
+// PauseIngress closes external/raw producer admission. Downstream work remains
+// active for the staged finite drain.
+func (b *Bus) PauseIngress() { b.ingress.close() }
 
-// ResumeIngest releases the producer boundary after maintenance admission.
-func (b *Bus) ResumeIngest() { b.ingestPaused.Store(false) }
+// ResumeIngress releases raw producer admission.
+func (b *Bus) ResumeIngress() { b.ingress.open() }
 
-// IngestPaused reports the current producer pause state.
-func (b *Bus) IngestPaused() bool { return b.ingestPaused.Load() }
+// IngressPaused reports the current raw producer state.
+func (b *Bus) IngressPaused() bool { closed, _ := b.ingress.snapshot(); return closed }
 
-// IngestBarrier reports the raw producer state and retained INGEST bounds.
+// PauseDownstream closes enrichment/story/alert/match output and guarded
+// live_state/join mutations.
+func (b *Bus) PauseDownstream() { b.downstream.close() }
+
+// ResumeDownstream releases downstream writers.
+func (b *Bus) ResumeDownstream() { b.downstream.open() }
+
+// DownstreamPaused reports the downstream writer state.
+func (b *Bus) DownstreamPaused() bool { closed, _ := b.downstream.snapshot(); return closed }
+
+// IngestBarrier reports the staged producer state and retained INGEST bounds.
 type IngestBarrier struct {
-	Paused   bool   `json:"paused"`
-	Inflight int64  `json:"inflight"`
-	First    uint64 `json:"first"`
-	Last     uint64 `json:"last"`
+	Paused             bool   `json:"paused"`
+	Inflight           int64  `json:"inflight"`
+	IngressClosed      bool   `json:"ingress_closed"`
+	IngressInflight    int64  `json:"ingress_inflight"`
+	DownstreamClosed   bool   `json:"downstream_closed"`
+	DownstreamInflight int64  `json:"downstream_inflight"`
+	First              uint64 `json:"first"`
+	Last               uint64 `json:"last"`
 }
 
-// IngestBarrier samples the producer fence and the INGEST stream tail.
+// IngestBarrier samples the producer fences and the INGEST stream tail.
 func (b *Bus) IngestBarrier(ctx context.Context) (IngestBarrier, error) {
-	out := IngestBarrier{Paused: b.ingestPaused.Load(), Inflight: b.ingestInflight.Load()}
+	ingressClosed, ingressInflight := b.ingress.snapshot()
+	downstreamClosed, downstreamInflight := b.downstream.snapshot()
+	out := IngestBarrier{
+		Paused:             downstreamClosed,
+		Inflight:           ingressInflight + downstreamInflight,
+		IngressClosed:      ingressClosed,
+		IngressInflight:    ingressInflight,
+		DownstreamClosed:   downstreamClosed,
+		DownstreamInflight: downstreamInflight,
+	}
 	stream, err := b.StreamNamed(ctx, StreamIngest)
 	if err != nil {
 		return out, err
@@ -951,13 +1025,18 @@ func maintenancePausedSubject(subject string) bool {
 // not supply one a unique id is generated. Callers that can be retried must
 // supply a stable id namespaced by stage (for example "clean:<articleID>").
 func (b *Bus) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOption) (*jetstream.PubAck, error) {
-	pipeline := maintenancePausedSubject(subject)
-	if pipeline {
-		if b.ingestPaused.Load() {
+	ingress := subject == SubjectArticleRaw || subject == SubjectArticleRawPriority
+	downstream := !ingress && maintenancePausedSubject(subject)
+	if ingress {
+		if !b.ingress.enter() {
 			return nil, ErrIngestPaused
 		}
-		b.ingestInflight.Add(1)
-		defer b.ingestInflight.Add(-1)
+		defer b.ingress.leave()
+	} else if downstream {
+		if !b.downstream.enter() {
+			return nil, ErrIngestPaused
+		}
+		defer b.downstream.leave()
 	}
 	po := PublishOptions{}
 	for _, opt := range opts {

@@ -31,10 +31,11 @@ func (c *publisherCore) restore(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if control.Blocked() {
-		// A maintenance run must never race an old or restarted publisher. The
-		// gate is released only after the corrected snapshot and floor exist.
-		return fmt.Errorf("publisher: maintenance fence active (phase %s)", control.Phase)
+	if control.DownstreamShut() {
+		// A maintenance run must never race an old or restarted publisher
+		// after the downstream fence; during the ingress-only drain stage the
+		// publisher is still allowed to finish the finite backlog.
+		return fmt.Errorf("publisher: maintenance downstream fence active (phase %s)", control.Phase)
 	}
 	entry, getErr := kv.Get(ctx, publisherCheckpointKey)
 	var header struct {

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -163,13 +164,22 @@ func (n *normalizer) normalize(raw *dorv1.RawArticle) (*dorv1.Article, store.Art
 	publishedAt := time.Unix(published, 0).UTC()
 	lang := resolveLanguage(raw.Lang, title, lede)
 	id := articleIDFor(canonical, raw.Hints)
+	// Durable maintenance policy is authoritative at hot-write ingress too.
+	// A suppression tombstone must survive clean/placed redelivery and restart.
+	// The DB mirror keeps the observed time for suppression (so the audit row
+	// stays the source record) and the corrected original time for override.
+	policyAt := maintenance.ApplyCurrentPolicy(id, published)
+	recordAt := publishedAt
+	if policyAt >= 0 {
+		recordAt = time.Unix(policyAt, 0).UTC()
+	}
 	clean := &dorv1.Article{
 		Id:          id,
 		SourceId:    raw.SourceId,
 		Url:         canonical,
 		Title:       title,
 		Lede:        lede,
-		PublishedAt: published,
+		PublishedAt: policyAt,
 		Lang:        lang,
 		Dateline:    dateline,
 		Hints:       raw.Hints,
@@ -181,8 +191,8 @@ func (n *normalizer) normalize(raw *dorv1.RawArticle) (*dorv1.Article, store.Art
 		URL:         canonical,
 		Title:       title,
 		Lede:        lede,
-		PublishedAt: publishedAt,
-		CreatedAt:   publishedAt,
+		PublishedAt: recordAt,
+		CreatedAt:   recordAt,
 		Lang:        lang,
 		Dateline:    clean.Dateline,
 	}

@@ -64,12 +64,26 @@ type MaintenanceBarrier struct {
 	Errors             int64 `json:"errors"`
 }
 
-// SetMaintenanceBlocked is the runtime writer-admission fence. When set, no new
-// record is accepted, but already queued work continues to drain.
+// SetMaintenanceBlocked is the runtime writer-admission fence. When set, new
+// enqueues wait instead of returning false, so an already accepted consumer
+// operation is never dropped by the fence.
 func (w *Writer) SetMaintenanceBlocked(blocked bool) {
-	if w != nil {
-		w.maintenanceBlocked.Store(blocked)
+	if w == nil {
+		return
 	}
+	w.gateMu.Lock()
+	w.gateBlocked = blocked
+	w.gateCond.Broadcast()
+	w.gateMu.Unlock()
+}
+
+func (w *Writer) awaitAdmission() bool {
+	w.gateMu.Lock()
+	defer w.gateMu.Unlock()
+	for w.gateBlocked && !w.gateClosed {
+		w.gateCond.Wait()
+	}
+	return !w.gateClosed
 }
 
 // MaintenanceBarrier returns a snapshot of queued, in-flight and retry work.
@@ -80,6 +94,9 @@ func (w *Writer) MaintenanceBarrier() MaintenanceBarrier {
 	w.assignMu.Lock()
 	assignments := len(w.pendingAssign)
 	w.assignMu.Unlock()
+	w.gateMu.Lock()
+	blocked := w.gateBlocked
+	w.gateMu.Unlock()
 	return MaintenanceBarrier{
 		Queue:              len(w.queue),
 		StoryQueue:         len(w.storyQueue),
@@ -88,7 +105,7 @@ func (w *Writer) MaintenanceBarrier() MaintenanceBarrier {
 		PendingEnrichments: w.pendingEnrich.Load(),
 		PendingAssignments: assignments,
 		Flushing:           w.flushing.Load(),
-		Blocked:            w.maintenanceBlocked.Load(),
+		Blocked:            blocked,
 		DroppedQueue:       w.droppedQueue.Load(),
 		DroppedBatch:       w.droppedBatch.Load(),
 		DroppedStories:     w.droppedStories.Load(),
@@ -142,6 +159,11 @@ type Writer struct {
 	mu     sync.RWMutex
 	closed bool
 
+	gateMu      sync.Mutex
+	gateCond    *sync.Cond
+	gateClosed  bool
+	gateBlocked bool
+
 	assignMu      sync.Mutex
 	pendingAssign map[string]pendingAssignment
 	pendingOrder  []string
@@ -149,19 +171,18 @@ type Writer struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 
-	started            atomic.Bool
-	enqueued           atomic.Int64
-	droppedQueue       atomic.Int64
-	droppedBatch       atomic.Int64
-	batches            atomic.Int64
-	errors             atomic.Int64
-	enqueuedStories    atomic.Int64
-	droppedStories     atomic.Int64
-	storyBatches       atomic.Int64
-	unsettled          atomic.Int64
-	pendingEnrich      atomic.Int64
-	flushing           atomic.Int64
-	maintenanceBlocked atomic.Bool
+	started         atomic.Bool
+	enqueued        atomic.Int64
+	droppedQueue    atomic.Int64
+	droppedBatch    atomic.Int64
+	batches         atomic.Int64
+	errors          atomic.Int64
+	enqueuedStories atomic.Int64
+	droppedStories  atomic.Int64
+	storyBatches    atomic.Int64
+	unsettled       atomic.Int64
+	pendingEnrich   atomic.Int64
+	flushing        atomic.Int64
 }
 
 // NewWriter builds a writer over an open store.
@@ -188,7 +209,7 @@ func NewWriter(s *Store, opts WriterOptions) (*Writer, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Writer{
+	w := &Writer{
 		store:         s,
 		opts:          opts,
 		log:           opts.Logger,
@@ -198,7 +219,9 @@ func NewWriter(s *Store, opts WriterOptions) (*Writer, error) {
 		pendingAssign: make(map[string]pendingAssignment),
 		done:          make(chan struct{}),
 		ready:         make(chan struct{}),
-	}, nil
+	}
+	w.gateCond = sync.NewCond(&w.gateMu)
+	return w, nil
 }
 
 // Start launches the batch loop. It is safe to call once.
@@ -215,9 +238,12 @@ func (w *Writer) Enqueue(rec ArticleRecord) bool {
 	if w == nil {
 		return false
 	}
+	if !w.awaitAdmission() {
+		return false
+	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed || w.maintenanceBlocked.Load() {
+	if w.closed {
 		return false
 	}
 	select {
@@ -236,9 +262,12 @@ func (w *Writer) EnqueueStory(rec StoryRecord) bool {
 	if w == nil {
 		return false
 	}
+	if !w.awaitAdmission() {
+		return false
+	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed || w.maintenanceBlocked.Load() {
+	if w.closed {
 		return false
 	}
 	select {
@@ -278,9 +307,12 @@ func (w *Writer) enqueueAux(m auxMutation) bool {
 	if w == nil {
 		return false
 	}
+	if !w.awaitAdmission() {
+		return false
+	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed || w.maintenanceBlocked.Load() {
+	if w.closed {
 		return false
 	}
 	select {
@@ -300,6 +332,10 @@ func (w *Writer) Close(ctx context.Context) error {
 		return nil
 	}
 	w.closeOnce.Do(func() {
+		w.gateMu.Lock()
+		w.gateClosed = true
+		w.gateCond.Broadcast()
+		w.gateMu.Unlock()
 		w.mu.Lock()
 		w.closed = true
 		close(w.queue)

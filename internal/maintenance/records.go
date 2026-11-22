@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -100,20 +101,26 @@ var phaseRank = map[string]int{
 // serving exclusion; Phase journaling is diagnostic/resumable progress. A
 // nonempty Phase other than idle/serving blocks new gateway admission.
 type Control struct {
-	Version     int    `json:"version"`
-	Phase       string `json:"phase"`
-	Required    bool   `json:"required"`
-	FenceActive bool   `json:"fence_active"`
-	RunID       string `json:"run_id,omitempty"`
-	PlanHash    string `json:"plan_hash,omitempty"`
-	FleetEpoch  uint64 `json:"fleet_epoch"`
-	GlobalSeq   uint64 `json:"global_seq"`
-	RawSeq      uint64 `json:"raw_seq"`
-	UpdatedAt   int64  `json:"updated_at"`
-	LastError   string `json:"last_error,omitempty"`
-	// ExclusionEvidence is the operator's explicit proof that any expected
-	// participant not present in-band is excluded from routing/processes.
-	ExclusionEvidence string `json:"exclusion_evidence,omitempty"`
+	Version          int    `json:"version"`
+	Phase            string `json:"phase"`
+	Required         bool   `json:"required"`
+	FenceActive      bool   `json:"fence_active"`
+	IngressClosed    bool   `json:"ingress_closed"`
+	DownstreamFenced bool   `json:"downstream_fenced"`
+	WriterClosed     bool   `json:"writer_closed"`
+	RunID            string `json:"run_id,omitempty"`
+	PlanHash         string `json:"plan_hash,omitempty"`
+	FleetEpoch       uint64 `json:"fleet_epoch"`
+	GlobalSeq        uint64 `json:"global_seq"`
+	RawSeq           uint64 `json:"raw_seq"`
+	UpdatedAt        int64  `json:"updated_at"`
+	LastError        string `json:"last_error,omitempty"`
+	// Explicit external routing/process exclusion evidence. The digest binds
+	// the authority, evidence id, generation and exact expected/excluded sets.
+	ExclusionAuthority  string `json:"exclusion_authority,omitempty"`
+	ExclusionEvidenceID string `json:"exclusion_evidence_id,omitempty"`
+	ExclusionGeneration uint64 `json:"exclusion_generation,omitempty"`
+	ExclusionDigest     string `json:"exclusion_digest,omitempty"`
 }
 
 // Blocked reports whether the control record forbids serving.
@@ -127,6 +134,30 @@ func (c Control) Blocked() bool {
 	default:
 		return true
 	}
+}
+
+// IngressShut reports the staged source/raw closure.
+func (c Control) IngressShut() bool {
+	if !c.Blocked() {
+		return false
+	}
+	return c.IngressClosed || phaseRank[c.Phase] >= phaseRank[PhaseDraining]
+}
+
+// DownstreamShut reports the staged downstream writer closure.
+func (c Control) DownstreamShut() bool {
+	if !c.Blocked() {
+		return false
+	}
+	return c.DownstreamFenced || phaseRank[c.Phase] >= phaseRank[PhaseFenced]
+}
+
+// WriterShut reports the final DB-writer admission closure.
+func (c Control) WriterShut() bool {
+	if !c.Blocked() {
+		return false
+	}
+	return c.WriterClosed || phaseRank[c.Phase] >= phaseRank[PhaseFenced]
 }
 
 // FloorRequired reports whether a valid floor record is mandatory. Once any
@@ -373,6 +404,60 @@ func ApplyPolicy(p *WireTimePolicy, articleID string, at int64) int64 {
 		}
 	}
 	return at
+}
+
+// ExclusionProof is machine-readable evidence that expected-but-absent
+// participants were removed by an external routing/process authority. Digest
+// binds the exact sets; a free-text assertion is not accepted.
+type ExclusionProof struct {
+	Version           int      `json:"version"`
+	Authority         string   `json:"authority"`
+	EvidenceID        string   `json:"evidence_id"`
+	Generation        uint64   `json:"generation"`
+	Expected          []string `json:"expected"`
+	Excluded          []string `json:"excluded"`
+	ExpectedProducers []string `json:"expected_producers"`
+	ExcludedProducers []string `json:"excluded_producers"`
+	Digest            string   `json:"digest"`
+	At                int64    `json:"at"`
+}
+
+// ExclusionDigest returns the canonical evidence identity.
+func ExclusionDigest(authority, evidenceID string, generation uint64, expected, excluded, expectedProducers, excludedProducers []string) string {
+	exp := append([]string(nil), expected...)
+	sort.Strings(exp)
+	exc := append([]string(nil), excluded...)
+	sort.Strings(exc)
+	expP := append([]string(nil), expectedProducers...)
+	sort.Strings(expP)
+	excP := append([]string(nil), excludedProducers...)
+	sort.Strings(excP)
+	payload := struct {
+		Authority         string   `json:"authority"`
+		EvidenceID        string   `json:"evidence_id"`
+		Generation        uint64   `json:"generation"`
+		Expected          []string `json:"expected"`
+		Excluded          []string `json:"excluded"`
+		ExpectedProducers []string `json:"expected_producers"`
+		ExcludedProducers []string `json:"excluded_producers"`
+	}{Authority: authority, EvidenceID: evidenceID, Generation: generation, Expected: exp, Excluded: exc, ExpectedProducers: expP, ExcludedProducers: excP}
+	data, _ := CanonicalJSON(payload)
+	return hashBytes(data)
+}
+
+// ValidateExclusionProof checks that the proof is complete and its digest
+// matches the exact expected/excluded inventory.
+func ValidateExclusionProof(p ExclusionProof) error {
+	if p.Version != ControlVersion || strings.TrimSpace(p.Authority) == "" || strings.TrimSpace(p.EvidenceID) == "" {
+		return errors.New("maintenance: exclusion proof requires authority and evidence id")
+	}
+	if len(p.Expected) == 0 || len(p.ExpectedProducers) == 0 {
+		return errors.New("maintenance: exclusion proof requires gateway and producer inventory")
+	}
+	if p.Digest != ExclusionDigest(p.Authority, p.EvidenceID, p.Generation, p.Expected, p.Excluded, p.ExpectedProducers, p.ExcludedProducers) {
+		return errors.New("maintenance: exclusion proof digest mismatch")
+	}
+	return nil
 }
 
 // Journal records forward-only phases. Values are strings so JSON round trips

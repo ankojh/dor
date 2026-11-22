@@ -108,15 +108,20 @@ func ActiveGatewayLeases(ctx context.Context, kv jetstream.KeyValue) ([]GatewayL
 
 // ProducerLease is one fetch/write runtime's maintenance state.
 type ProducerLease struct {
-	Version        int            `json:"version"`
-	ID             string         `json:"id"`
-	Epoch          uint64         `json:"epoch"`
-	Paused         bool           `json:"paused"`
-	IngestInflight int64          `json:"ingest_inflight"`
-	IngestFirst    uint64         `json:"ingest_first"`
-	IngestLast     uint64         `json:"ingest_last"`
-	Writer         WriterCounters `json:"writer"`
-	At             int64          `json:"at"`
+	Version            int            `json:"version"`
+	ID                 string         `json:"id"`
+	Epoch              uint64         `json:"epoch"`
+	Healthy            bool           `json:"healthy"`
+	Error              string         `json:"error,omitempty"`
+	Paused             bool           `json:"paused"`
+	IngressClosed      bool           `json:"ingress_closed"`
+	DownstreamClosed   bool           `json:"downstream_closed"`
+	IngestInflight     int64          `json:"ingress_inflight"`
+	DownstreamInflight int64          `json:"downstream_inflight"`
+	IngestFirst        uint64         `json:"ingest_first"`
+	IngestLast         uint64         `json:"ingest_last"`
+	Writer             WriterCounters `json:"writer"`
+	At                 int64          `json:"at"`
 }
 
 // WriteProducerLease publishes one runtime heartbeat.
@@ -149,6 +154,19 @@ func WriteProducerLease(ctx context.Context, kv jetstream.KeyValue, lease Produc
 		}
 	}
 	return errors.New("maintenance: producer lease contention")
+}
+
+// DeleteProducerLease removes a runtime heartbeat after a failed refresh so an
+// old successful lease cannot be mistaken for a current barrier.
+func DeleteProducerLease(ctx context.Context, kv jetstream.KeyValue, id string) error {
+	if kv == nil || id == "" {
+		return nil
+	}
+	err := kv.Delete(ctx, id)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil
+	}
+	return err
 }
 
 // ActiveProducerLeases returns unexpired runtime heartbeats.
@@ -185,6 +203,63 @@ func ActiveProducerLeases(ctx context.Context, kv jetstream.KeyValue) ([]Produce
 // AwaitProducerFence requires every expected producer to report paused with no
 // in-flight ingest publish and no queued/in-flight/retry DB work. Missing or
 // unregistered IDs are excluded only by explicit operator evidence.
+// AwaitProducerAdmission closes external/raw admission while allowing the
+// finite downstream backlog to continue draining.
+func AwaitProducerAdmission(ctx context.Context, kv jetstream.KeyValue, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+	if kv == nil {
+		return nil, errors.New("maintenance: producer lease bucket unavailable")
+	}
+	if len(expected) == 0 {
+		return nil, errors.New("maintenance: expected producer inventory is required")
+	}
+	excludedSet := map[string]bool{}
+	for _, id := range excluded {
+		excludedSet[id] = true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		leases, err := ActiveProducerLeases(ctx, kv)
+		if err != nil {
+			return nil, err
+		}
+		byID := map[string]ProducerLease{}
+		for _, lease := range leases {
+			byID[lease.ID] = lease
+		}
+		blocked := []string{}
+		for _, id := range expected {
+			if excludedSet[id] {
+				continue
+			}
+			lease, ok := byID[id]
+			if !ok {
+				blocked = append(blocked, id+" missing")
+				continue
+			}
+			if !lease.Healthy {
+				blocked = append(blocked, id+" barrier unhealthy: "+lease.Error)
+				continue
+			}
+			if !lease.IngressClosed || lease.IngestInflight > 0 {
+				blocked = append(blocked, id+" ingress not closed")
+			}
+		}
+		if len(blocked) == 0 {
+			return leases, nil
+		}
+		if time.Now().After(deadline) {
+			return leases, fmt.Errorf("maintenance: ingress admission not fenced: %v", blocked)
+		}
+		select {
+		case <-ctx.Done():
+			return leases, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// AwaitProducerFence waits for downstream writers and guarded KV operations to
+// close and settle after the finite drain.
 func AwaitProducerFence(ctx context.Context, kv jetstream.KeyValue, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
 	if kv == nil {
 		return nil, errors.New("maintenance: producer lease bucket unavailable")
@@ -216,8 +291,16 @@ func AwaitProducerFence(ctx context.Context, kv jetstream.KeyValue, expected, ex
 				blocked = append(blocked, id+" missing")
 				continue
 			}
-			if !lease.Paused || lease.IngestInflight > 0 {
-				blocked = append(blocked, id+" not paused")
+			if !lease.Healthy {
+				blocked = append(blocked, id+" barrier unhealthy: "+lease.Error)
+				continue
+			}
+			if !lease.IngressClosed || lease.IngestInflight > 0 {
+				blocked = append(blocked, id+" ingress in flight")
+				continue
+			}
+			if !lease.DownstreamClosed || lease.DownstreamInflight > 0 {
+				blocked = append(blocked, id+" downstream in flight")
 				continue
 			}
 			if !lease.Writer.Verified {
@@ -257,6 +340,69 @@ func writerWork(w WriterCounters) int64 {
 		n++
 	}
 	return n
+}
+
+// AwaitProducerWriterClosed requires the final DB writer admission closure in
+// addition to the downstream/in-flight barrier.
+func AwaitProducerWriterClosed(ctx context.Context, kv jetstream.KeyValue, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+	if kv == nil {
+		return nil, errors.New("maintenance: producer lease bucket unavailable")
+	}
+	if len(expected) == 0 {
+		return nil, errors.New("maintenance: expected producer inventory is required")
+	}
+	excludedSet := map[string]bool{}
+	for _, id := range excluded {
+		excludedSet[id] = true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		leases, err := ActiveProducerLeases(ctx, kv)
+		if err != nil {
+			return nil, err
+		}
+		byID := map[string]ProducerLease{}
+		for _, lease := range leases {
+			byID[lease.ID] = lease
+		}
+		blocked := []string{}
+		for _, id := range expected {
+			if excludedSet[id] {
+				continue
+			}
+			lease, ok := byID[id]
+			if !ok {
+				blocked = append(blocked, id+" missing")
+				continue
+			}
+			if !lease.Healthy {
+				blocked = append(blocked, id+" barrier unhealthy: "+lease.Error)
+				continue
+			}
+			if !lease.Writer.Blocked {
+				blocked = append(blocked, id+" writer admission still open")
+				continue
+			}
+			if !lease.IngressClosed || !lease.DownstreamClosed || lease.IngestInflight > 0 || lease.DownstreamInflight > 0 {
+				blocked = append(blocked, id+" in-flight operation remains")
+				continue
+			}
+			if !lease.Writer.Verified || writerWork(lease.Writer) > 0 {
+				blocked = append(blocked, id+" writer work remains")
+			}
+		}
+		if len(blocked) == 0 {
+			return leases, nil
+		}
+		if time.Now().After(deadline) {
+			return leases, fmt.Errorf("maintenance: writer admission not closed: %v", blocked)
+		}
+		select {
+		case <-ctx.Done():
+			return leases, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // AwaitGatewayExclusion waits until every expected floor-aware gateway reports

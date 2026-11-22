@@ -85,7 +85,9 @@ go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
   --expected-producer prod-1 --expected-gateway gw-1 \
   --expected-consumer ENRICH/publisher-enrich \
   --expected-consumer STORY/publisher-story \
-  --routing-evidence "routing generation 42 closed; process supervisor stopped old replicas" \
+  --exclusion-authority route-controller \
+  --exclusion-evidence route-snapshot-42 \
+  --exclusion-generation 42 \
   --drain-timeout 5m
 ```
 
@@ -98,7 +100,10 @@ and `--plan-out` exports a deterministic plan. `--apply` without
   every runtime that advertises `--expected-producer`, and requires each
   producer/writer queue, in-flight flush and retry set to be empty;
 - requires every expected gateway to advertise a fresh
-  `serving=false`/wire-tombstone-compatible lease;
+  `serving=false`/wire-tombstone-compatible lease and every expected producer
+  runtime to close raw ingress first, then downstream output after the stable
+  finite drain; DB writer admission closes only after its queue/in-flight/retry
+  set is empty;
 - requires every expected durable consumer to be present and its pending and
   ack-pending count to be zero, with no pending durable joins;
 - drains until two consecutive samples are stable, then settles an uncertain
@@ -109,15 +114,20 @@ and `--plan-out` exports a deterministic plan. `--apply` without
 - records a durable DB outcome (`started`/`committed`) and verifies the
   transaction by readback, so a DB commit and journal interruption resume
   without replaying an ambiguous outcome;
-- reconciles hot article timestamps, persists the merged per-article policy,
-  publishes forward-only wire corrections/tombstones, writes the corrected
-  snapshot and activates the monotonic floor before admitting the fleet.
+- reconciles hot article timestamps, applies the merged policy at normalize and
+  cluster ingress so clean/placed redelivery preserves overrides/suppression,
+  persists the policy, publishes forward-only wire corrections/tombstones,
+  writes the corrected snapshot and activates the monotonic floor before
+  admitting the fleet.
 
 Expected participants that are stopped must be named with
-`--excluded-producer`/`--excluded-gateway` and backed by the explicit routing
-evidence string; a missing, paused-but-serving, incompatible or unregistered
-participant fails closed. The non-expiring control/floor/policy records survive
-repeated runs, and a completed run answers only the same request identity.
+`--excluded-producer`/`--excluded-gateway` and covered by a structured
+`ExclusionProof` (`--exclusion-authority`, `--exclusion-evidence`,
+`--exclusion-generation`); its digest binds the exact expected/excluded sets.
+A missing, paused-but-serving, incompatible or unregistered participant fails
+closed. Free-text routing assertions are not accepted. The non-expiring
+control/floor/policy records survive repeated runs, and a completed run answers
+only the same request identity.
 
 
 

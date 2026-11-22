@@ -237,8 +237,12 @@ func quiesceReasons(report *DrainReport) []string {
 				reasons = append(reasons, "producer "+id+" has no live lease")
 				continue
 			}
-			if !lease.Paused || lease.IngestInflight > 0 {
-				reasons = append(reasons, "producer "+id+" is not paused with zero in-flight")
+			if !lease.Healthy {
+				reasons = append(reasons, "producer "+id+" barrier is unhealthy: "+lease.Error)
+				continue
+			}
+			if !lease.IngressClosed || lease.IngestInflight > 0 {
+				reasons = append(reasons, "producer "+id+" ingress is not closed")
 			}
 			if !lease.Writer.Verified {
 				reasons = append(reasons, "producer "+id+" has no verified writer barrier")
@@ -310,7 +314,7 @@ func compareQuiesce(current, previous *DrainReport) {
 	}
 	for _, lease := range current.Producers {
 		if before, ok := prevProducers[lease.ID]; ok {
-			if before.IngestLast != lease.IngestLast || before.Paused != lease.Paused || before.IngestInflight != lease.IngestInflight {
+			if before.IngestLast != lease.IngestLast || before.Paused != lease.Paused || before.IngestInflight != lease.IngestInflight || before.Healthy != lease.Healthy || before.IngressClosed != lease.IngressClosed || before.DownstreamInflight != lease.DownstreamInflight {
 				current.Reasons = append(current.Reasons, "producer "+lease.ID+" state moved during the stability window")
 			}
 		}

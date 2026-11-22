@@ -683,6 +683,9 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	kv, ok := b.kv[bucket]
 	b.kvMu.Unlock()
 	if ok {
+		if bucket == KVBucketJoins {
+			return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+		}
 		return kv, nil
 	}
 	kv, err := b.js.KeyValue(ctx, bucket)
@@ -692,7 +695,51 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	b.kvMu.Lock()
 	b.kv[bucket] = kv
 	b.kvMu.Unlock()
+	if bucket == KVBucketJoins {
+		// The joins bucket must never use the library's PurgeDeletes: it
+		// snapshots markers and then purges each subject unconditionally,
+		// which can erase a join recreated after the snapshot.
+		return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+	}
 	return kv, nil
+}
+
+// safeJoinsKV replaces the destructive PurgeDeletes implementation with a
+// revision-fenced retirement. Each observed delete marker is removed with a
+// subject purge bounded at marker+1; a Put that arrives later has a higher
+// stream sequence and survives.
+type safeJoinsKV struct {
+	jetstream.KeyValue
+	bus    *Bus
+	bucket string
+}
+
+func (s *safeJoinsKV) PurgeDeletes(ctx context.Context, _ ...jetstream.KVPurgeOpt) error {
+	watcher, err := s.KeyValue.WatchAll(ctx)
+	if err != nil {
+		return err
+	}
+	var markers []jetstream.KeyValueEntry
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		if op := entry.Operation(); op == jetstream.KeyValueDelete || op == jetstream.KeyValuePurge {
+			markers = append(markers, entry)
+		}
+	}
+	_ = watcher.Stop()
+	stream, err := s.bus.JS().Stream(ctx, "KV_"+s.bucket)
+	if err != nil {
+		return err
+	}
+	for _, entry := range markers {
+		subject := "$KV." + s.bucket + "." + entry.Key()
+		if err := stream.Purge(ctx, jetstream.WithPurgeSubject(subject), jetstream.WithPurgeSequence(entry.Revision()+1)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close drains the client, waits for the closed callback, then shuts down the

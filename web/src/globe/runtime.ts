@@ -188,6 +188,10 @@ function formatKm(km: number): string {
   return km.toFixed(2);
 }
 
+function compactPlace(place: string): string {
+  return place.split(",")[0]?.trim() || place;
+}
+
 export class LiveGlobe {
   readonly map: MapLibreMap;
 
@@ -310,8 +314,8 @@ export class LiveGlobe {
     this.layer.setTethersVisible(this.tethersVisible);
     this.layer.setHeatVisible(this.heatVisible);
     this.layer.setQuality(this.quality);
-    this.labels.add();
     this.addAnnotations();
+    this.labels.add();
     this.setCoastlineVisible(this.coastlineVisible);
     this.ready = true;
     this.map.on("movestart", () => this.patches.setGestureActive(true));
@@ -433,11 +437,12 @@ export class LiveGlobe {
               48,
             ],
             "circle-color": ["get", "color"],
-            // D5: an area appears only once the view is past the story's
-            // precision; at globe zoom the same story is a normal dot.
-            "circle-opacity": ["case", [">=", ["zoom"], ["get", "areaZoom"]], 0.08, 0],
+            // D5: only features at/after their precision threshold are in the
+            // source (updateAreas filters by zoom), so no zoom expression is
+            // needed inside paint.
+            "circle-opacity": 0.18,
             "circle-stroke-color": ["get", "color"],
-            "circle-stroke-opacity": ["case", [">=", ["zoom"], ["get", "areaZoom"]], 0.26, 0],
+            "circle-stroke-opacity": 0.46,
             "circle-stroke-width": 1,
           },
         },
@@ -695,8 +700,8 @@ export class LiveGlobe {
       this.addCountryLayer(firstSymbol);
       this.addAreaLayer(firstSymbol);
       if (!this.map.getLayer(this.layer.id)) this.map.addLayer(this.layer, firstSymbol);
-      this.labels.add();
       this.addAnnotations();
+      this.labels.add();
       this.setCoastlineVisible(this.coastlineVisible);
     } catch (error) {
       console.warn(`globe: layer restore failed (${String(error)})`);
@@ -747,11 +752,12 @@ export class LiveGlobe {
   }
 
   private onMoveEnd(): void {
-    if (this.annotationsDirty) {
-      this.updateAreas();
-      this.annotationsDirty = false;
-    }
-    if (!this.focused) this.setAmbientLabels();
+    // Precision areas are zoom-gated in the source, so rebuild them on every
+    // settled view (not only when story metadata changed).
+    this.updateAreas();
+    this.annotationsDirty = false;
+    if (this.focused) this.setFocusLabels();
+    else this.setAmbientLabels();
     this.updateAggregates();
     this.updateEdgeMarkers();
     this.updateDistanceRings();
@@ -923,7 +929,8 @@ export class LiveGlobe {
       return;
     this.annotationsDirty = false;
     this.lastAnnotationAt = performance.now();
-    if (!this.focused) this.setAmbientLabels();
+    if (this.focused) this.setFocusLabels();
+    else this.setAmbientLabels();
     this.updateAreas();
     this.updateAggregates();
     this.updateEdgeMarkers();
@@ -986,6 +993,7 @@ export class LiveGlobe {
     this.updateDistanceRings();
     this.updateDistanceChips();
     this.updateCountryTint();
+    this.updateAggregates();
     this.updateEdgeMarkers();
     this.setAmbientLabels();
     this.options.onFocus?.(null);
@@ -1010,7 +1018,7 @@ export class LiveGlobe {
     } else {
       this.layer.applyTethers([], []);
     }
-    this.labels.setFocus(result.hud);
+    this.setFocusLabels(result.hud);
     if (fly && result.points.length > 0) this.camera.flyTo(this.camera.fitThread(result.points));
     const threadStoryIds = [...mirror.litStoryIndices]
       .map((storyIndex) => data.stories[storyIndex]?.story.id)
@@ -1038,6 +1046,7 @@ export class LiveGlobe {
     this.updateDistanceRings();
     this.updateDistanceChips();
     this.updateCountryTint();
+    this.updateAggregates();
     this.updateLinkLabels();
     this.updateEdgeMarkers();
     this.options.onFocus?.(this.focused);
@@ -1103,6 +1112,31 @@ export class LiveGlobe {
       });
     }
     this.labels.setAmbient(points);
+  }
+
+  /** Focus labels follow the zoom label budget, strongest links first. */
+  private setFocusLabels(hud = this.focused?.hud): void {
+    const data = this.data;
+    const focused = this.focused;
+    if (!data || !focused || !hud) return;
+    const zoom = this.map.getZoom();
+    const budget = zoom < 4 ? 6 : zoom < 8 ? 10 : 1;
+    const indices = new Set<number>();
+    const focusIndex = data.storyById.get(focused.storyId);
+    if (focusIndex !== undefined) indices.add(focusIndex);
+    for (const link of hud.links.slice(0, Math.max(0, budget - 1))) {
+      indices.add(link.storyIndex);
+    }
+    const labels = [...indices]
+      .map((index) => data.stories[index])
+      .filter((entry): entry is LiveStory => entry !== undefined)
+      .map((entry) => ({
+        lng: entry.lng,
+        lat: entry.lat,
+        category: entry.category,
+        place: entry.place,
+      }));
+    this.labels.setFocus({ ...hud, labels });
   }
 
   private updateLinkLabels(): void {
@@ -1214,10 +1248,12 @@ export class LiveGlobe {
     if (!this.ready || !this.data) return;
     const source = this.map.getSource(AREA_SOURCE) as GeoJSONSource | undefined;
     if (!source) return;
+    const zoom = this.map.getZoom();
     const features = this.data.stories
       .filter((entry) => {
         const location = entry.story.locations[entry.story.primary] ?? entry.story.locations[0];
-        return location !== undefined && location.precision <= 3;
+        if (location === undefined || location.precision > 3) return false;
+        return zoom >= (AREA_ZOOM[location.precision] ?? 3.8);
       })
       .map((entry) => {
         const location = entry.story.locations[entry.story.primary] ?? entry.story.locations[0]!;
@@ -1404,7 +1440,7 @@ export class LiveGlobe {
     const zoom = this.map.getZoom();
     const source = this.map.getSource(AGG_SOURCE) as GeoJSONSource | undefined;
     if (!source) return;
-    const show = zoom < 4.2 && (this.data?.stories.length ?? 0) > 0;
+    const show = !this.focused && zoom < 4.2 && (this.data?.stories.length ?? 0) > 0;
     this.map.setLayoutProperty(AGG_CIRCLE_LAYER, "visibility", "none");
     this.map.setLayoutProperty(AGG_COUNT_LAYER, "visibility", show ? "visible" : "none");
     this.map.setLayoutProperty(HEX_LAYER, "visibility", show ? "visible" : "none");
@@ -1499,6 +1535,10 @@ export class LiveGlobe {
       );
     };
     if (this.focused) {
+      if (zoom >= 8) {
+        this.edgeMarkers = [];
+        return;
+      }
       const linked: EdgeMarker[] = [];
       for (const link of this.focused.hud.links) {
         const entry = this.data.stories[link.storyIndex];
@@ -1506,7 +1546,7 @@ export class LiveGlobe {
         if (visible(entry.lng, entry.lat)) continue;
         linked.push({
           key: `link-${link.index}`,
-          label: `${link.place.toUpperCase()} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
+          label: `${compactPlace(link.place).toUpperCase()} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
           count: 1,
           center: [entry.lng, entry.lat],
           zoom: Math.max(5, this.map.getZoom()),

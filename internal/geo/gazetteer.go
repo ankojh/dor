@@ -908,6 +908,10 @@ func ambiguousNames() map[string]struct{} {
 		"commerce", "general", "independence", "liberty", "union", "salem",
 		"decatur", "north", "south", "east", "west", "central", "national",
 		"federal", "government", "president", "minister", "court", "bank",
+		// A generic administrative name in Portuguese/Spanish that exists as a
+		// first-level region in several countries (Brazil, Venezuela, Mexico).
+		// Bare use cannot choose one jurisdiction; qualification still resolves.
+		"distrito federal",
 		"market", "school", "university", "airport", "station", "park", "lake",
 		"river", "hill", "beach", "port", "new", "hope", "victory", "trinity",
 		"marathon", "from", "frome", "nis", "niš", "ini", "palmares", "uniao", "união", "big", "biga", "paul", "saint",

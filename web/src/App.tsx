@@ -3389,6 +3389,9 @@ export function App() {
                       {ntfyCopied() === alert.ntfy_topic ? "Copied" : "Copy"}
                     </button>
                     <small>{alert.prompt}</small>
+                    <span class="sr-only" role="status" aria-live="polite">
+                      {ntfyCopied() === alert.ntfy_topic ? "Topic copied" : ""}
+                    </span>
                   </div>
                 )}
               </For>

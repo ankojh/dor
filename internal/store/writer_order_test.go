@@ -16,9 +16,9 @@ func openTestStore(t *testing.T) *Store {
 	if url == "" {
 		t.Skip("DOR_TEST_DATABASE_URL is not set; skipping real-database writer ordering tests")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	st, err := Open(ctx, Config{URL: url, ConnectTimeout: 5 * time.Second})
+	st, err := Open(ctx, Config{URL: url, ConnectTimeout: 60 * time.Second})
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}

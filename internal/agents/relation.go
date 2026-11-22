@@ -996,11 +996,6 @@ func (c *relationCore) fadeLink(ctx context.Context, a, b string, revision uint6
 	c.upsertLinkLocked(ctx, link)
 }
 
-func (c *relationCore) lockForPairKey(key string) *sync.Mutex {
-	h := bus.StoryShard(key)*131 + 17
-	return &c.pairLocks[h%len(c.pairLocks)]
-}
-
 // tombstone removes a link whose endpoint left the index. It is safe when the
 // pair was never in this process's table.
 func (c *relationCore) tombstone(ctx context.Context, a, b string) {

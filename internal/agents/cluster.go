@@ -23,6 +23,7 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -1211,6 +1212,35 @@ func (c *clusterer) enqueueStore(st *storyState, article *dorv1.Article) {
 	}
 }
 
+// overlayEditorTitle keeps F1·2's editor-owned title across a cluster restart.
+// The cs checkpoint is authoritative for membership and identity, but it may
+// predate the editor's title. A storytitle.<id> marker (or the live story's
+// title_source=editor field) wins for display only; the next persist writes
+// the preserved title back into the checkpoint.
+func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValue, st *storyState) {
+	if st == nil || st.Story == nil {
+		return
+	}
+	if entry, err := kv.Get(ctx, "storytitle."+st.Story.Id); err == nil {
+		var marker struct {
+			Title string `json:"title"`
+		}
+		if json.Unmarshal(entry.Value(), &marker) == nil && strings.TrimSpace(marker.Title) != "" {
+			st.Story.Title = marker.Title
+			return
+		}
+	}
+	latest, ok := live.LoadStory(ctx, kv, st.Story.Id)
+	if !ok || latest == nil || latest.Title == "" {
+		return
+	}
+	if fd := latest.ProtoReflect().Descriptor().Fields().ByName("title_source"); fd != nil {
+		if latest.ProtoReflect().Get(fd).String() == "editor" {
+			st.Story.Title = latest.Title
+		}
+	}
+}
+
 func (c *clusterer) load(ctx context.Context) error {
 	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
 	if err != nil {
@@ -1278,6 +1308,7 @@ func (c *clusterer) load(ctx context.Context) error {
 			if st.ExpiresAt.IsZero() && st.UpdatedAt > 0 {
 				st.ExpiresAt = time.Unix(st.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
 			}
+			c.overlayEditorTitle(ctx, live, st)
 			committed := commits[s.Id]
 			for _, articleID := range st.ArticleIDs {
 				if committed != nil && committed[articleID] {
@@ -1357,6 +1388,7 @@ func (c *clusterer) load(ctx context.Context) error {
 					}
 				}
 			}
+			c.overlayEditorTitle(ctx, live, st)
 			c.stories[s.Id] = st
 			delete(commitKeys, s.Id)
 			// Upgrade legacy state to the authoritative checkpoint format.

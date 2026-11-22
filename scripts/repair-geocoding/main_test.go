@@ -286,6 +286,235 @@ func TestRepairAuditDefaultsReviewCandidatesToRemovalWithExplicitKeep(t *testing
 	}
 }
 
+func seedReviewRemovalFixture(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	statements := []string{
+		`INSERT INTO public.stories(id,title,primary_loc) VALUES ('story-review','Hyderabad Announces a New Policy','hyderabad-pk')`,
+		`INSERT INTO public.articles(id,story_id,title,lede,dateline) VALUES ('article-review','story-review','Hyderabad Announces a New Policy','','')`,
+		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+	}
+	for _, statement := range statements {
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed ambiguous historical location: %v", err)
+		}
+	}
+}
+
+func TestRepairDefaultReviewRemovalEndToEnd(t *testing.T) {
+	dsn := repairTestDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, g := prepareRepairDB(t, ctx, dsn)
+	defer conn.Close(ctx)
+	seedReviewRemovalFixture(t, ctx, conn)
+
+	proposed, err := repair(ctx, conn, g, false, nil)
+	if err != nil {
+		t.Fatalf("dry-run default review removal: %v", err)
+	}
+	if proposed.Status != "proposed" || proposed.Committed {
+		t.Fatalf("dry run must not claim commit: %+v", proposed)
+	}
+	for _, table := range []string{"story_locations", "article_locations"} {
+		if proposed.Tables[table].NeedsReview != 1 || proposed.Tables[table].ReviewRemovals != 1 {
+			t.Fatalf("default review policy must flag one removal in %s: %+v", table, proposed.Tables[table])
+		}
+	}
+	if len(proposed.Reviews) != 0 {
+		t.Fatalf("no review rows may be kept without an allowlist: %+v", proposed.Reviews)
+	}
+	wantRemoval := map[string]bool{
+		"story_locations|story-review|hyderabad-pk":     true,
+		"article_locations|article-review|hyderabad-pk": true,
+	}
+	for _, review := range proposed.ReviewRemovals {
+		if !wantRemoval[review.Table+"|"+review.Owner+"|"+review.PlaceID] {
+			t.Errorf("unexpected review removal: %+v", review)
+		}
+	}
+	reviewChanges := map[string]bool{}
+	for _, change := range proposed.Changes {
+		if change.Owner != "story-review" && change.Owner != "article-review" {
+			continue
+		}
+		if change.Reason != "review_required" || change.Replacement != nil {
+			t.Errorf("review candidate must be a review_required removal: %+v", change)
+		}
+		reviewChanges[change.Table+"|"+change.Owner] = true
+	}
+	if !reviewChanges["story_locations|story-review"] || !reviewChanges["article_locations|article-review"] {
+		t.Errorf("review removals must appear as destructive changes: %+v", proposed.Changes)
+	}
+	inBundle := map[string]bool{}
+	for _, story := range proposed.Bundle.Stories {
+		inBundle["story_locations|"+story.ID] = true
+	}
+	for _, article := range proposed.Bundle.Articles {
+		inBundle["article_locations|"+article.ID] = true
+	}
+	if !inBundle["story_locations|story-review"] || !inBundle["article_locations|article-review"] {
+		t.Errorf("review removals must be in the bundle: %+v", inBundle)
+	}
+	assertReviewRows(t, ctx, conn, 1)
+
+	committed, err := repair(ctx, conn, g, true, nil)
+	if err != nil {
+		t.Fatalf("apply default review removals: %v", err)
+	}
+	if !committed.Committed || committed.Tables["story_locations"].ReviewRemovals != 1 || committed.Tables["article_locations"].ReviewRemovals != 1 {
+		t.Fatalf("apply must commit review removals: %+v", committed)
+	}
+	assertReviewRows(t, ctx, conn, 0)
+	var primary string
+	if err := conn.QueryRow(ctx, `SELECT primary_loc FROM public.stories WHERE id='story-review'`).Scan(&primary); err != nil || primary != "" {
+		t.Fatalf("review removal must clear the story primary: primary=%q err=%v", primary, err)
+	}
+
+	second, err := repair(ctx, conn, g, false, nil)
+	if err != nil {
+		t.Fatalf("second dry-run after review removal: %v", err)
+	}
+	if second.Tables["story_locations"].Flagged != 0 || second.Tables["article_locations"].Flagged != 0 {
+		t.Fatalf("second dry-run should find no flagged rows: story=%+v article=%+v", second.Tables["story_locations"], second.Tables["article_locations"])
+	}
+	if len(second.Reviews) != 0 || len(second.ReviewRemovals) != 0 {
+		t.Fatalf("second dry-run should report no reviews, got reviews=%+v removals=%+v", second.Reviews, second.ReviewRemovals)
+	}
+}
+
+func TestRepairExplicitReviewAllowlistKeepsRows(t *testing.T) {
+	dsn := repairTestDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, g := prepareRepairDB(t, ctx, dsn)
+	defer conn.Close(ctx)
+	seedReviewRemovalFixture(t, ctx, conn)
+
+	allowKeep := map[string]bool{
+		"story_locations|story-review|hyderabad-pk":     true,
+		"article_locations|article-review|hyderabad-pk": true,
+	}
+	kept, err := repair(ctx, conn, g, false, allowKeep)
+	if err != nil {
+		t.Fatalf("dry-run with explicit review allowlist: %v", err)
+	}
+	if len(kept.Reviews) != 2 || len(kept.ReviewRemovals) != 0 {
+		t.Fatalf("explicit allowlist must keep review rows and skip removals: reviews=%+v removals=%+v", kept.Reviews, kept.ReviewRemovals)
+	}
+	for _, table := range []string{"story_locations", "article_locations"} {
+		if kept.Tables[table].ReviewRemovals != 0 {
+			t.Fatalf("explicit allowlist must not propose removals in %s: %+v", table, kept.Tables[table])
+		}
+	}
+	for _, change := range kept.Changes {
+		if change.Owner == "story-review" || change.Owner == "article-review" {
+			t.Errorf("kept review row must not be a destructive change: %+v", change)
+		}
+	}
+	for _, story := range kept.Bundle.Stories {
+		if story.ID == "story-review" {
+			t.Errorf("kept review row must not appear in the story bundle: %+v", story)
+		}
+	}
+	for _, article := range kept.Bundle.Articles {
+		if article.ID == "article-review" {
+			t.Errorf("kept review row must not appear in the article bundle: %+v", article)
+		}
+	}
+	assertReviewRows(t, ctx, conn, 1)
+}
+
+func TestLoadReviewAllowlistParsesExplicitEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allow.txt")
+	contents := "# reviewed rows only\n\nstory_locations|story-1|paris\narticle_locations|article-1|boston\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	allow, err := loadReviewAllowlist(path)
+	if err != nil {
+		t.Fatalf("load valid allowlist: %v", err)
+	}
+	if len(allow) != 2 || !allow["story_locations|story-1|paris"] || !allow["article_locations|article-1|boston"] {
+		t.Fatalf("allowlist must contain exactly the two explicit entries: %+v", allow)
+	}
+	if empty, err := loadReviewAllowlist(""); err != nil || len(empty) != 0 {
+		t.Fatalf("missing allowlist path should yield an empty map: %+v err=%v", empty, err)
+	}
+	for _, bad := range []string{
+		"stories|story-1|paris\n",
+		"story_locations|story-1\n",
+		"story_locations||paris\n",
+		"story_locations|story-1|paris|extra\n",
+	} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadReviewAllowlist(path); err == nil {
+			t.Errorf("invalid allowlist line %q should fail", strings.TrimSpace(bad))
+		}
+	}
+}
+
+func TestRepairDeduplicatesReplacementRole(t *testing.T) {
+	dsn := repairTestDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, g := prepareRepairDB(t, ctx, dsn)
+	defer conn.Close(ctx)
+	statements := []string{
+		`INSERT INTO public.stories(id,title,primary_loc) VALUES ('story-dedupe','Officials meet in Boston','old')`,
+		`INSERT INTO public.articles(id,story_id,title,lede,dateline) VALUES ('article-dedupe','story-dedupe','Officials meet in Boston','','')`,
+		`INSERT INTO public.story_locations VALUES ('story-dedupe','old','Unknown',0,0,2,0,.5)`,
+		`INSERT INTO public.story_locations VALUES ('story-dedupe','boston','Boston',42.36009979248047,-71.05889892578125,2,1,.6)`,
+		`INSERT INTO public.article_locations VALUES ('article-dedupe','old','Unknown',0,0,2,0,.4)`,
+		`INSERT INTO public.article_locations VALUES ('article-dedupe','boston','Boston',42.36009979248047,-71.05889892578125,2,1,.6)`,
+	}
+	for _, statement := range statements {
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed duplicate-role fixture: %v", err)
+		}
+	}
+
+	committed, err := repair(ctx, conn, g, true, nil)
+	if err != nil {
+		t.Fatalf("apply duplicate-role repair: %v", err)
+	}
+	if !committed.Committed {
+		t.Fatalf("duplicate-role repair must commit: %+v", committed)
+	}
+	for _, tc := range []struct{ table, ownerCol, owner string }{
+		{"story_locations", "story_id", "story-dedupe"},
+		{"article_locations", "article_id", "article-dedupe"},
+	} {
+		rows, err := conn.Query(ctx, `SELECT role FROM public.`+tc.table+` WHERE `+tc.ownerCol+`=$1 AND place_id='boston' ORDER BY role`, tc.owner)
+		if err != nil {
+			t.Fatalf("read %s boston roles: %v", tc.table, err)
+		}
+		var roles []int16
+		for rows.Next() {
+			var role int16
+			if err := rows.Scan(&role); err != nil {
+				rows.Close()
+				t.Fatalf("scan %s boston role: %v", tc.table, err)
+			}
+			roles = append(roles, role)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read %s boston roles: %v", tc.table, err)
+		}
+		if len(roles) != 1 || roles[0] != 1 {
+			t.Fatalf("%s must keep exactly one boston row at role 1 (no role-0 duplicate), got %v", tc.table, roles)
+		}
+	}
+	var primary string
+	if err := conn.QueryRow(ctx, `SELECT primary_loc FROM public.stories WHERE id='story-dedupe'`).Scan(&primary); err != nil || primary != "boston" {
+		t.Fatalf("duplicate-role repair must select boston as primary: primary=%q err=%v", primary, err)
+	}
+}
+
 func assertReviewRows(t *testing.T, ctx context.Context, conn *pgx.Conn, want int) {
 	t.Helper()
 	for _, table := range []string{"story_locations", "article_locations"} {

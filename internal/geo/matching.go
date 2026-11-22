@@ -594,14 +594,14 @@ func (g *Gazetteer) sameSeatRegion(a, b Place) bool {
 	if a.CountryCode == "" || a.CountryCode != b.CountryCode || b.Feature != "ADM1" || !seatLike(a) {
 		return false
 	}
-	if expandedPlaceName(a.Name) != expandedPlaceName(b.Name) {
-		return false
-	}
 	if a.AdminCode != "" && a.AdminCode == b.AdminCode {
 		return true
 	}
 	if normalize(a.Admin) == normalize(b.Name) {
 		return true
+	}
+	if expandedPlaceName(a.Name) != expandedPlaceName(b.Name) {
+		return false
 	}
 	// A national capital may stand in for the same-named region when it is not
 	// dwarfed by that region (this keeps Washington DC from equating to

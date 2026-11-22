@@ -1647,6 +1647,220 @@ func TestFullCacheLaPazSeatOfGovernmentCapital(t *testing.T) {
 	})
 }
 
+func TestFullCacheFalsePlaceNegatives(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	for _, tc := range []struct {
+		name, title, forbidden string
+		wantNoDot              bool
+	}{
+		{"paramount_studio", "Paramount Pictures Announces a New Film", "Paramount", false},
+		{"buffalo_bills", "Buffalo Bills sign a new quarterback", "Buffalo", false},
+		{"orlando_bloom", "Orlando Bloom joins the cast", "Orlando", false},
+		{"sydney_sweeney", "Sydney Sweeney stars in a new series", "Sydney", false},
+		{"nigel_farage", "Nigel Farage speaks at a rally", "Nigel", false},
+		{"elizabeth_holmes", "Elizabeth Holmes appeals her conviction", "Elizabeth", false},
+		{"elizabeth_warren", "Elizabeth Warren proposes a new bill", "Elizabeth", false},
+		{"spring_sale", "Spring sale starts tomorrow", "Spring", false},
+		{"sparks_council", "Sparks fly at city council meeting", "Sparks", false},
+		{"derby_day", "Derby day attracts thousands", "Derby", false},
+		{"manhattan_project", "Manhattan Project historian speaks", "Manhattan", false},
+		{"roman_empire", "Roman Empire exhibition opens", "Roman", false},
+		{"commonwealth_games", "Commonwealth Games begin in Glasgow", "Commonwealth", false},
+		{"ilocos_del_sur", "Floods hit Ilocos del Sur", "Sur", false},
+		{"lanao_del_sur", "Floods hit Lanao del Sur", "Sur", false},
+		{"agusan_del_sur", "Floods hit Agusan del Sur", "Sur", false},
+		{"brazil_central_bank", "Brazil's Central Bank raises rates", "Central", false},
+		{"nema_alert", "NEMA issues a new alert", "", true},
+		{"sig_results", "SIG reports quarterly results", "", true},
+		{"sergio_massa", "Sergio Massa announces a new plan", "Massa", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "false-place-" + tc.name, Title: tc.title})
+			if tc.wantNoDot {
+				if len(placed.Locations) != 0 {
+					t.Fatalf("organization acronym should not create a dot: %q -> %+v", tc.title, placed.Locations)
+				}
+				return
+			}
+			for _, loc := range placed.Locations {
+				place, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				if normalizePlotName(place.Name) == normalizePlotName(tc.forbidden) {
+					t.Fatalf("%q must not plot as the unrelated place %q: %+v", tc.title, place.Name, loc)
+				}
+			}
+		})
+	}
+}
+
+func TestFullCacheCapitalRecallAtCityPrecision(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	for _, tc := range []struct{ name, title, wantName, wantID, wantCountry string }{
+		{"delhi", "Delhi announces a new policy", "Delhi", "", "IN"},
+		{"lagos", "Lagos announces a new policy", "Lagos", "", "NG"},
+		{"gaza", "Gaza announces a new policy", "Gaza", "", "PS"},
+		{"moscow", "Moscow announces a new policy", "Moscow", "", "RU"},
+		{"jakarta", "Jakarta announces a new policy", "Jakarta", "", "ID"},
+		{"durban", "Durban announces a new policy", "Durban", "", "ZA"},
+		{"recife", "Recife announces a new policy", "Recife", "", "BR"},
+		{"shenzhen", "Shenzhen announces a new policy", "Shenzhen", "", "CN"},
+		{"istanbul", "Istanbul announces a new policy", "Istanbul", "", "TR"},
+		{"madrid", "Madrid announces a new policy", "Madrid", "", "ES"},
+		{"tehran", "Tehran announces a new policy", "Tehran", "", "IR"},
+		{"bengaluru", "Bengaluru announces a new policy", "Bengaluru", "", "IN"},
+		{"leeds", "Leeds announces a new policy", "Leeds", "", "GB"},
+		{"taipei", "Taipei announces a new policy", "Taipei", "1668341", "TW"},
+		{"la_paz", "La Paz announces a new policy", "La Paz", "3911925", "BO"},
+		{"hyderabad_india", "Officials meet in Hyderabad, India", "Hyderabad", "", "IN"},
+		{"santo_domingo", "Officials meet in Santo Domingo, Dominican Republic", "Santo Domingo", "", "DO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "capital-recall-" + tc.name, Title: tc.title})
+			for _, loc := range placed.Locations {
+				place, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				if tc.wantID != "" && loc.PlaceId != tc.wantID {
+					continue
+				}
+				if normalizePlotName(place.Name) != normalizePlotName(tc.wantName) || place.CountryCode != tc.wantCountry {
+					continue
+				}
+				if loc.Precision != dorv1.Precision_PRECISION_CITY {
+					t.Fatalf("%q should resolve at city precision, got %+v", tc.title, loc)
+				}
+				return
+			}
+			t.Fatalf("%q should resolve %s (%s) at city precision, got %+v", tc.title, tc.wantName, tc.wantCountry, placed.Locations)
+		})
+	}
+}
+
+func TestFullCacheADM1RegionAndQualifierFixtures(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	for _, tc := range []struct{ name, title, wantID string }{
+		{"florida_locative", "Officials meet in Florida", "admin:US.FL"},
+		{"florida_governor", "Florida governor signs budget", "admin:US.FL"},
+		{"ontario_locative", "Officials meet in Ontario", "admin:CA.08"},
+		{"delaware_locative", "Officials meet in Delaware", "admin:US.DE"},
+		{"oregon_locative", "Officials meet in Oregon", "admin:US.OR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "adm1-" + tc.name, Title: tc.title})
+			for _, loc := range placed.Locations {
+				if loc.PlaceId != tc.wantID {
+					continue
+				}
+				if loc.Precision != dorv1.Precision_PRECISION_REGION {
+					t.Fatalf("%q should keep %s at region precision, got %+v", tc.title, tc.wantID, loc)
+				}
+				return
+			}
+			t.Fatalf("%q should resolve ADM1 %s, got %+v", tc.title, tc.wantID, placed.Locations)
+		})
+	}
+
+	for _, tc := range []struct {
+		name, title, wantCountry, forbidCountry, forbidID string
+	}{
+		{"florida_cuba", "Floods hit Florida, Cuba", "CU", "US", "admin:US.FL"},
+		{"ontario_california", "Officials meet in Ontario, California", "US", "CA", ""},
+		{"delaware_ohio", "Officials meet in Delaware, Ohio", "US", "", "admin:US.DE"},
+		{"oregon_ohio", "Officials meet in Oregon, Ohio", "US", "", "admin:US.OR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "adm1-qualified-" + tc.name, Title: tc.title})
+			if len(placed.Locations) == 0 {
+				t.Fatalf("%q should resolve the explicit qualifier, got no locations", tc.title)
+			}
+			foundWanted := false
+			for _, loc := range placed.Locations {
+				place, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				if loc.PlaceId == tc.forbidID {
+					t.Fatalf("%q must not resolve the local homonym region: %+v", tc.title, loc)
+				}
+				if tc.forbidCountry != "" && place.CountryCode == tc.forbidCountry {
+					t.Fatalf("%q must not resolve in %s: %+v", tc.title, tc.forbidCountry, loc)
+				}
+				if place.CountryCode == tc.wantCountry {
+					foundWanted = true
+				}
+			}
+			if !foundWanted {
+				t.Fatalf("%q should resolve a %s place, got %+v", tc.title, tc.wantCountry, placed.Locations)
+			}
+		})
+	}
+}
+
+func TestFullCacheWashingtonSeatOwnership(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	wa, ok := g.ByID("admin:US.WA")
+	if !ok || wa.Feature != "ADM1" || !geo.ValidCoordinates(wa.Lat, wa.Lon) {
+		t.Fatalf("full cache must contain a valid Washington State ADM1: %+v found=%v", wa, ok)
+	}
+	dc, ok := g.ByID("4140963")
+	if !ok || dc.Feature != "PPLC" || dc.CountryCode != "US" || !geo.ValidCoordinates(dc.Lat, dc.Lon) {
+		t.Fatalf("full cache must contain a valid Washington, D.C. capital: %+v found=%v", dc, ok)
+	}
+
+	state := p.place(context.Background(), &dorv1.Article{Id: "washington-state", Title: "Washington State Announces a New Water Plan"})
+	foundState := false
+	for _, loc := range state.Locations {
+		if loc.PlaceId == wa.ID {
+			foundState = true
+			if loc.Precision != dorv1.Precision_PRECISION_REGION {
+				t.Errorf("Washington State should resolve at region precision, got %+v", loc)
+			}
+		}
+	}
+	if !foundState {
+		t.Fatalf("Washington State should resolve the WA ADM1, got %+v", state.Locations)
+	}
+
+	city := p.place(context.Background(), &dorv1.Article{Id: "washington-dc", Title: "Washington, D.C. announces a new plan"})
+	foundCity := false
+	for _, loc := range city.Locations {
+		if loc.PlaceId == dc.ID {
+			foundCity = true
+			if loc.Precision != dorv1.Precision_PRECISION_CITY {
+				t.Errorf("Washington, D.C. should resolve at city precision, got %+v", loc)
+			}
+		}
+	}
+	if !foundCity {
+		t.Fatalf("Washington, D.C. should resolve the DC city, got %+v", city.Locations)
+	}
+
+	decision := g.RepairLocation(geo.StoredLocation{
+		PlaceID: dc.ID, Lat: float64(float32(dc.Lat)), Lon: float64(float32(dc.Lon)), Precision: geo.PrecisionOf(dc),
+	}, []geo.TextEvidence{{Title: "Washington State announces a new water plan"}})
+	if decision.Replacement != nil {
+		if decision.Replacement.ID != wa.ID || decision.Precision != geo.RegionResolution {
+			t.Fatalf("Washington State evidence should replace the DC capital with the WA ADM1 at region precision, got %+v", decision)
+		}
+	} else if decision.ReviewReason == "" {
+		t.Fatalf("Washington State evidence must not silently retain the DC capital: %+v", decision)
+	}
+}
+
 var fullCachePlotGazetteers = struct {
 	sync.Mutex
 	byDir map[string]*geo.Gazetteer

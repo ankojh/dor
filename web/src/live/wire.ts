@@ -12,6 +12,15 @@ type WireExtra = {
   lon?: number;
   located?: boolean;
   approxPrompts?: string[];
+  // F1·2 provenance: append-only and zero means unknown, so a partial update
+  // must never erase a known degraded marker.
+  degraded?: boolean;
+  fallback?: boolean;
+  categoryBackend?: string;
+  categoryConfidence?: number;
+  placeBackend?: string;
+  placeDegraded?: boolean;
+  placeFallback?: boolean;
 };
 
 export function mergeWireRow(existing: WireRow, incoming: WireRow): WireRow {
@@ -41,5 +50,15 @@ export function mergeWireRow(existing: WireRow, incoming: WireRow): WireRow {
     newExtra.approxPrompts && newExtra.approxPrompts.length > 0
       ? newExtra.approxPrompts
       : oldExtra.approxPrompts;
+  extra.degraded = newExtra.degraded || oldExtra.degraded;
+  extra.fallback = newExtra.fallback || oldExtra.fallback;
+  extra.categoryBackend = newExtra.categoryBackend || oldExtra.categoryBackend;
+  extra.categoryConfidence =
+    newExtra.categoryConfidence !== undefined && newExtra.categoryConfidence !== 0
+      ? newExtra.categoryConfidence
+      : oldExtra.categoryConfidence;
+  extra.placeBackend = newExtra.placeBackend || oldExtra.placeBackend;
+  extra.placeDegraded = newExtra.placeDegraded || oldExtra.placeDegraded;
+  extra.placeFallback = newExtra.placeFallback || oldExtra.placeFallback;
   return merged;
 }

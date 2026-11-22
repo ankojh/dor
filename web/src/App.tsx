@@ -7,9 +7,21 @@ import { shouldIgnoreGlobeKeys, isTypingTarget } from "./keyboard";
 import { nextSelectionIndex, selectionKeyForStory, keepSelectionForStory } from "./globe/selection";
 import { TtlLruCache, LatestRequest } from "./text-cache";
 import { LruCache } from "./worker/lru";
-import type { StorySummary } from "./globe/live-data";
+import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
 import { mergeWireRow } from "./live/wire";
+import {
+  rollingMinuteBars,
+  rollingMinuteRate,
+  sortWireItems,
+  wireJoin,
+  wireMetadataProvenance,
+  wirePlace,
+  wirePublishMs,
+  wireSourceName,
+  wireTime,
+  type WireStoryContext,
+} from "./live/wire-display";
 import {
   AlertInbox,
   approximateLabel,
@@ -67,11 +79,6 @@ function clockText(ms: number): string {
   return new Date(ms).toISOString().slice(11, 19);
 }
 
-function wireTime(row: WireRow, receivedAt: number): string {
-  const seconds = Number(row.at) || Math.floor(receivedAt / 1000);
-  return new Date(seconds * 1000).toISOString().slice(11, 19);
-}
-
 function hexColor(category: number): string {
   const rgb = categoryColor(category);
   return `#${rgb.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
@@ -79,18 +86,6 @@ function hexColor(category: number): string {
 
 function articleKey(row: WireRow): string {
   return row.articleId || `${row.source}:${row.at}:${row.title}`;
-}
-
-function sourceName(source: string): string {
-  return source || "WIRE";
-}
-
-function joinText(row: WireRow): string {
-  if (row.join === 1) {
-    return row.storyId ? `↳ joined story ${row.storyId.slice(0, 10)}` : "↳ joined a story";
-  }
-  if (row.storyId) return "↳ new story";
-  return "";
 }
 
 function healthLabel(health: SourceHealth): string {
@@ -293,6 +288,43 @@ export function App() {
   const [focus, setFocus] = createSignal<FocusDetails | null>(null);
   const [wireRows, setWireRows] = createSignal<WireItem[]>([]);
   const [pendingNew, setPendingNew] = createSignal(0);
+  // Live story titles and source counts for wire join lines. A version signal
+  // makes the map reactive without copying thousands of entries per patch.
+  const storyContexts = new Map<string, WireStoryContext>();
+  const [storyContextVersion, setStoryContextVersion] = createSignal(0);
+  const setStoryContexts = (summaries: LiveStory[]): void => {
+    storyContexts.clear();
+    rememberStoryContexts(summaries);
+  };
+  const rememberStoryContexts = (summaries: LiveStory[]): void => {
+    let changed = false;
+    for (const entry of summaries) {
+      const id = entry?.story?.id;
+      if (!id) continue;
+      const title = entry.story.title ?? "";
+      const sourceCount = Number(entry.story.sourceCount) || 0;
+      const place = entry.place || entry.story.locations?.[entry.story.primary]?.name || "";
+      const previous = storyContexts.get(id);
+      if (
+        previous?.title === title &&
+        previous.sourceCount === sourceCount &&
+        previous.place === place
+      ) {
+        continue;
+      }
+      storyContexts.set(id, { title, sourceCount, place });
+      changed = true;
+      if (storyContexts.size > 6000) {
+        const oldest = storyContexts.keys().next().value;
+        if (oldest !== undefined) storyContexts.delete(oldest);
+      }
+    }
+    if (changed) setStoryContextVersion((version) => version + 1);
+  };
+  const storyContext = (storyId: string): WireStoryContext | undefined => {
+    storyContextVersion();
+    return storyId ? storyContexts.get(storyId) : undefined;
+  };
   const [freshKeys, setFreshKeys] = createSignal<Set<string>>(new Set<string>());
   const [pausedByHover, setPausedByHover] = createSignal(false);
   const [scrollTop, setScrollTop] = createSignal(0);
@@ -506,22 +538,9 @@ export function App() {
     overscan: 10,
   });
 
-  const rate = createMemo(() => {
-    const cutoff = now() - 60_000;
-    return wireRows().filter((item) => item.receivedAt >= cutoff).length;
-  });
+  const rate = createMemo(() => rollingMinuteRate(wireRows(), now()));
 
-  const rateBars = createMemo(() => {
-    const buckets = [0, 0, 0, 0, 0];
-    const cutoff = now() - 60_000;
-    for (const item of wireRows()) {
-      if (item.receivedAt < cutoff) continue;
-      const bucket = Math.min(4, Math.floor((item.receivedAt - cutoff) / 12_000));
-      buckets[bucket] = (buckets[bucket] ?? 0) + 1;
-    }
-    const max = Math.max(1, ...buckets);
-    return buckets.map((value) => Math.max(12, Math.round((value / max) * 100)));
-  });
+  const rateBars = createMemo(() => rollingMinuteBars(wireRows(), now()));
 
   const timelineBars = createMemo(() => {
     const rows = wireRows();
@@ -584,11 +603,14 @@ export function App() {
     if (updates.length > 0) {
       // The wire row was already visible; update metadata in place. This is
       // the article.clean -> article.placed transition and must not duplicate.
+      // Publish times can change with the update, so re-sort after merging.
       setWireRows((previous) =>
-        previous.map((item) => {
-          const update = updates.find((candidate) => candidate.key === item.key);
-          return update ? { ...item, row: mergeWireRow(item.row, update.row) } : item;
-        }),
+        sortWireItems(
+          previous.map((item) => {
+            const update = updates.find((candidate) => candidate.key === item.key);
+            return update ? { ...item, row: mergeWireRow(item.row, update.row) } : item;
+          }),
+        ),
       );
     }
     if (added === 0) return;
@@ -603,7 +625,10 @@ export function App() {
     if (paused() || pendingWire.length === 0) return;
     const batch = pendingWire.splice(0);
     setWireRows((previous) => {
-      const all = [...batch.reverse(), ...previous];
+      // Strict newest-first by effective publish time. Arrival order is not
+      // publish order: a poll can deliver a batch oldest-last, and a source
+      // dateline can carry a wrong timezone.
+      const all = sortWireItems([...batch, ...previous]);
       const kept = all.slice(0, 1000);
       for (const item of all.slice(1000)) seen.delete(item.key);
       return kept;
@@ -1131,12 +1156,14 @@ export function App() {
         // Keep the selected row: a reconnect snapshot preserves the focused
         // story, so the user's row must not jump back to the newest one.
         setLastSeq(message.seq);
+        setStoryContexts(message.summaries);
         liveGlobe?.setInit(message);
         if (message.recentWire.length) enqueueWire(message.recentWire);
         break;
       case "patch":
         workerBounds = message.bounds;
         setLastSeq(message.seq);
+        rememberStoryContexts(message.summaries);
         liveGlobe?.queuePatch(message);
         for (const hit of message.alerts) handleAlertHit(hit);
         enqueueWire(message.wire);
@@ -1150,6 +1177,7 @@ export function App() {
         setWireRows([]);
         setPendingNew(0);
         setLastSeq(0);
+        setStoryContexts([]);
         break;
     }
   };
@@ -1275,9 +1303,11 @@ export function App() {
         mode:
           initialQuery.get("perf") === "1"
             ? "perf"
-            : initialQuery.get("mock") === "1"
-              ? "mock"
-              : "live",
+            : initialQuery.get("wirefixture") === "1"
+              ? "wirefixture"
+              : initialQuery.get("mock") === "1"
+                ? "mock"
+                : "live",
       });
       const frame = (): void => {
         if (disposed) return;
@@ -1635,7 +1665,7 @@ export function App() {
         <div class="wire-head">
           <div class="r1">
             <h2>Live wire</h2>
-            <span class="rate" title="Articles received in the last minute">
+            <span class="rate" title="Articles in the last minute">
               <i>
                 <For each={rateBars()}>{(height) => <b style={`height:${height}%`} />}</For>
               </i>
@@ -1989,6 +2019,17 @@ export function App() {
                           if (item?.kind !== "article") return null;
                           const row = item.item.row;
                           const color = hexColor(row.category);
+                          const story = storyContext(row.storyId);
+                          const place = wirePlace(row, story?.place);
+                          const provenance = wireMetadataProvenance(row);
+                          const join = wireJoin(row, story);
+                          const tooltip = [
+                            row.title,
+                            place.title !== place.text ? place.title : "",
+                            provenance.approx ? provenance.title : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ");
                           return (
                             <button
                               class="wr-body"
@@ -1996,19 +2037,33 @@ export function App() {
                               onClick={() => selectArticle(item.item)}
                               onMouseEnter={() => rowEnter(row.storyId)}
                               onMouseLeave={rowLeave}
-                              title={row.title}
+                              title={tooltip}
+                              data-wire-at={wirePublishMs(row, item.item.receivedAt)}
+                              data-wire-key={item.item.key}
                             >
                               <time>{wireTime(row, item.item.receivedAt)}</time>
                               <span class="dot" />
                               <span class="h">
-                                <span class="ws">{sourceName(row.source)}</span>
-                                <span class="title">{row.title || "Untitled article"}</span>
-                                <Show when={joinText(row)}>
-                                  <span class="join">{joinText(row)}</span>
+                                <span class="hl">
+                                  <span class="ws-line">
+                                    <span class="ws">{wireSourceName(row)}</span>
+                                    <Show when={provenance.approx}>
+                                      <span class="approx" aria-hidden="true">
+                                        ≈ approx
+                                      </span>
+                                    </Show>
+                                  </span>
+                                  <span class="title">{row.title || "Untitled article"}</span>
+                                </span>
+                                <Show when={join}>
+                                  <span class="join">{join}</span>
                                 </Show>
                               </span>
-                              <span class="pl">
-                                {row.place || "—"}
+                              <span
+                                class={`pl ${place.global ? "global" : ""}`}
+                                data-place={place.global ? "global" : place.text}
+                              >
+                                <span class="pl-name">{place.text}</span>
                                 <Show when={prompts().length > 0 && activeScore(row) > 0}>
                                   <span
                                     class="match-score"

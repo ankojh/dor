@@ -181,6 +181,11 @@ function shortPlaceName(name: string): string {
   return `${filtered[0]}, ${filtered[filtered.length - 1]}`;
 }
 
+/** Compact map/timeline label: the city, not its admin chain. */
+function compactPlaceName(name: string): string {
+  return name.split(",")[0]?.trim() || name;
+}
+
 /** Collapse the same place repeated by different source articles. */
 function displayPlaces(locations: StorySummary["locations"]): PlaceRow[] {
   const rows = new Map<string, PlaceRow>();
@@ -739,7 +744,7 @@ export function App() {
           at,
           left: 4 + ((at - start) / span) * 92,
           label:
-            story.storyId === details.storyId ? "first seen" : `→ ${shortPlaceName(story.place)}`,
+            story.storyId === details.storyId ? "first seen" : `→ ${compactPlaceName(story.place)}`,
           title: `${story.title} · ${clockText(at * 1000)} UTC`,
           color: hexColor(story.category),
           showLabel: index === 0,
@@ -749,13 +754,22 @@ export function App() {
     // Keep only labels that fit; every event still has a dot and a title.
     let lastLabelAt = -100;
     for (const event of events) {
-      event.showLabel = event.left - lastLabelAt >= 13;
+      event.showLabel = event.left - lastLabelAt >= 20;
       if (event.showLabel) lastLabelAt = event.left;
     }
     return events;
   });
 
   const places = createMemo(() => displayPlaces(focus()?.story.locations ?? []));
+  const distanceRows = createMemo(() => {
+    const seen = new Set<string>();
+    return (focus()?.hud.links ?? []).filter((link) => {
+      const key = compactPlaceName(link.place).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
   const primaryPlaceKey = createMemo(() => {
     const details = focus();
     if (!details) return null;
@@ -2542,7 +2556,7 @@ export function App() {
         </div>
         <Show when={zoomBand().label !== "GLOBE"}>
           <div class="stage-crumbs cap">
-            {zoomBand().label} · {focus()?.hud.story.place ?? "Global"}
+            {zoomBand().label} · {focus() ? compactPlaceName(focus()!.hud.story.place) : "Global"}
           </div>
         </Show>
         <Show when={globe().match.active && globe().match.matched === 0}>
@@ -2973,6 +2987,23 @@ export function App() {
                   </span>
                 </div>
               </div>
+              <Show when={view().zoom >= 8 && distanceRows().length > 0}>
+                <div class="sec distance-list">
+                  <span class="cap">Distances from here</span>
+                  <For each={distanceRows().slice(0, 4)}>
+                    {(link) => (
+                      <span class="distance-row">
+                        <b>{compactPlaceName(link.place)}</b>
+                        <span class="mono">
+                          {(link.distanceKm ?? 0) >= 1000
+                            ? `${Math.round(link.distanceKm ?? 0).toLocaleString("en-US")} km`
+                            : `${(link.distanceKm ?? 0).toFixed((link.distanceKm ?? 0) >= 10 ? 0 : 1)} km`}
+                        </span>
+                      </span>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <div class="sec">
                 <Show when={storyText()?.available && storyText()?.provenance === "generated"}>
                   <span class="agentk">

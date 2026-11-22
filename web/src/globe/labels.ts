@@ -16,7 +16,8 @@ function hex(rgb: readonly [number, number, number]): string {
 }
 
 export function storyLabel(category: number, place: string): string {
-  return `${categoryLabel(category).toUpperCase()} · ${place.toUpperCase()}`;
+  const compact = place.split(",")[0]?.trim() || place;
+  return `${categoryLabel(category).toUpperCase()} · ${compact.toUpperCase()}`;
 }
 
 export type AmbientLabel = { lng: number; lat: number; category: number; place: string };

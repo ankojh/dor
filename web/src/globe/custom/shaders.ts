@@ -309,8 +309,10 @@ void main() {
   vec2 dir = scr1 - scr0;
   float len = length(dir);
   // At street zoom a link between cities would be a screen-long line; keep
-  // only local links (the thread's own local context) visible.
-  if (uZoom > 11.5) alpha *= 1.0 - smoothstep(15000.0, 40000.0, aArcLength);
+  // only links that are local to the viewport, tapering with zoom.
+  float arcKm = aArcLength * 0.001;
+  float maxArcKm = uZoom > 13.0 ? 2.0 : uZoom > 10.0 ? 25.0 : uZoom > 8.0 ? 250.0 : 14000.0;
+  alpha *= 1.0 - smoothstep(maxArcKm * 0.8, maxArcKm, arcKm);
   if (uZoom > 13.0) alpha *= smoothstep(0.52, 0.68, strength);
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);

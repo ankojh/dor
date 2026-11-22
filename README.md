@@ -5,6 +5,11 @@ cluster and link news stories; a SolidJS + MapLibre web app shows them on a 3D g
 
 ## Quickstart
 
+Before upgrading or rolling back a gateway or a browser-facing web build, follow
+the mandatory [gateway and web worker release gate](docs/operations.md#mandatory-gateway-and-web-worker-release-gate).
+The gate applies to all-in-one and split deployments as well as externally
+hosted web assets.
+
 ```bash
 make dev                 # Postgres/pgvector :5433 + TEI :8090, waits for healthy
 make run                 # build and run every agent; loads .env when present

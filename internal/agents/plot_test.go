@@ -882,6 +882,22 @@ func TestFullCacheCanonicalMajorCityRecallAndHistoricalRepair(t *testing.T) {
 	if historical.Reason != "" && (historical.Replacement == nil || historical.Replacement.ID != hyderabad.ID) {
 		t.Fatalf("historical Hyderabad title must not be deleted just because fresh matching lacks country qualification: %+v", historical)
 	}
+	for _, tc := range []struct {
+		name string
+		lat  float64
+		lon  float64
+		want string
+	}{
+		{"zero-zero sentinel", 0, 0, "invalid_coordinate"},
+		{"valid but noncanonical coordinates", 10, 10, "unsupported_match"},
+	} {
+		t.Run("historical_Hyderabad_rejects_"+tc.name, func(t *testing.T) {
+			decision := g.RepairLocation(geo.StoredLocation{PlaceID: hyderabad.ID, Lat: tc.lat, Lon: tc.lon, Precision: geo.CityResolution}, []geo.TextEvidence{{Title: historicalTitle}})
+			if decision.Reason != tc.want || decision.Replacement != nil || decision.ReviewReason != "" {
+				t.Fatalf("historical ambiguity exception must not retain invalid/mismatched coordinates: got %+v, want destructive reason %q without replacement or review", decision, tc.want)
+			}
+		})
+	}
 }
 
 func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {

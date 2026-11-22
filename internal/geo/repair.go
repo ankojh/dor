@@ -40,6 +40,7 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 	sort.Slice(admitted, func(i, j int) bool { return betterPlace(admitted[i], admitted[j]) })
 	best, _ := DeterministicPrimary(admitted)
 	_, supported := byID[loc.PlaceID]
+	valid := ValidCoordinates(loc.Lat, loc.Lon)
 	reviewReason := ""
 	if known && !supported {
 		for _, other := range admitted {
@@ -49,13 +50,12 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 			}
 		}
 	}
-	if known && !supported {
+	if known && !supported && valid && DistanceKM(loc.Lat, loc.Lon, p.Lat, p.Lon) < 1 {
 		if g.historicalTitleSupport(p, evidence, admitted) {
 			supported = true
 			reviewReason = "canonical_title_requires_disambiguation"
 		}
 	}
-	valid := ValidCoordinates(loc.Lat, loc.Lon)
 	reason := ""
 	switch {
 	case !valid:

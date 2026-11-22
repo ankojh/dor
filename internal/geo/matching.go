@@ -221,7 +221,13 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		}
 	}
 	textQualified := independentQualifier(p, words, start, count, dateline)
-	if personUse(words, start, count) && !textQualified || !p.CountryID && organizationUse(words, start, count) {
+	organization := !p.CountryID && organizationUse(words, start, count)
+	if organization && textQualified && normalize(p.Country) != "" && strings.HasPrefix(tokensText(words[start+count:])+" ", normalize(p.Country)+" ") {
+		// United is part of the adjacent country qualifier (United Kingdom/
+		// States), not a club suffix. Other organization evidence still rejects.
+		organization = false
+	}
+	if personUse(words, start, count) && !textQualified || organization {
 		return 0
 	}
 	hintQualified := hint != "" && p.CountryCode == hint

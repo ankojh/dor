@@ -23,7 +23,9 @@ The new-point admission threshold is not evidence that an existing canonical
 point is false. A valid canonical title witness that passes the explicit
 rejection guards is retained when disambiguation remains uncertain. The audit
 records `needs_review` counts and complete `reviews` entries instead of an
-unsupported deletion. Stronger contradictory country/admin evidence still
+unsupported deletion. This exception requires a valid coordinate already
+within 1 km of that canonical point; invalid or geographically mismatched
+coordinates need regular geographic evidence, never an ambiguous rescue. Stronger contradictory country/admin evidence still
 replots it; invalid coordinates and unsupported precision are still corrected.
 These unresolved retained points are not certified as accurate. They require
 separate review and do not appear as destructive changes in the bundle. A

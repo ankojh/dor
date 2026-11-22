@@ -530,22 +530,18 @@ func (c *publisherCore) expireStories(now time.Time) {
 			delete(c.links, key)
 		}
 	}
-	c.mu.Unlock()
 	for _, id := range ids {
-		c.enqueue("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+		c.enqueueLocked("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+		delete(c.cooledAt, id)
 	}
 	for _, l := range links {
 		a, b := l.a, l.b
 		if a > b {
 			a, b = b, a
 		}
-		c.enqueue("link:"+a+"|"+b, &dorv1.Delta{Body: &dorv1.Delta_LinkRemove{
+		c.enqueueLocked("link:"+a+"|"+b, &dorv1.Delta{Body: &dorv1.Delta_LinkRemove{
 			LinkRemove: &dorv1.LinkKey{A: a, B: b},
 		}})
-	}
-	c.mu.Lock()
-	for _, id := range ids {
-		delete(c.cooledAt, id)
 	}
 	c.mu.Unlock()
 }
@@ -608,11 +604,12 @@ func (c *publisherCore) coolStories(now time.Time) {
 	}
 	for _, item := range batch {
 		c.cooledAt[item.id] = now.UnixNano()
+		// Enqueue under the same lock that sealed the snapshot: a concurrent
+		// content update either lands before this check (and is skipped) or
+		// after (and replaces the cooling delta), never backwards.
+		c.enqueueLocked("story:"+item.id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: item.hot}})
 	}
 	c.mu.Unlock()
-	for _, item := range batch {
-		c.enqueue("story:"+item.id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: item.hot}})
-	}
 }
 
 func (c *publisherCore) onStory(s *dorv1.Story) {
@@ -695,11 +692,16 @@ func (c *publisherCore) onLink(l *dorv1.Link) {
 
 func (c *publisherCore) enqueue(key string, delta *dorv1.Delta) {
 	c.mu.Lock()
+	c.enqueueLocked(key, delta)
+	c.mu.Unlock()
+}
+
+// enqueueLocked is enqueue for callers that already hold c.mu.
+func (c *publisherCore) enqueueLocked(key string, delta *dorv1.Delta) {
 	if _, ok := c.pending[key]; !ok {
 		c.order = append(c.order, key)
 	}
 	c.pending[key] = delta
-	c.mu.Unlock()
 }
 
 func publisherLinkKey(a, b string) string {

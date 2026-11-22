@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -86,6 +87,7 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 		index:        make(map[string]*relationEntry),
 		pending:      make(map[string]time.Time),
 		links:        make(map[string]*relationLink),
+		judged:       make(map[string][2]uint64),
 		sink:         cfg.Persist,
 		work:         make(chan string, 64),
 		pairLocks:    make([]sync.Mutex, relationPairLocks),
@@ -279,6 +281,7 @@ type relationCore struct {
 	index     map[string]*relationEntry
 	pending   map[string]time.Time
 	links     map[string]*relationLink
+	judged    map[string][2]uint64
 	sink      LinkSink
 	work      chan string
 	pairLocks []sync.Mutex
@@ -428,8 +431,8 @@ func (c *relationCore) observe(ctx context.Context, story *dorv1.Story) {
 	if entry.updated > now.Unix() {
 		entry.updated = now.Unix()
 	}
-	entry.rev = c.revision.Add(1)
 	c.mu.Lock()
+	changed := true
 	if prev := c.index[story.Id]; prev != nil {
 		// A metadata read can race the clusterer's write. Do not lose the
 		// embedding/entities or the original event time on a partial read.
@@ -439,13 +442,63 @@ func (c *relationCore) observe(ctx context.Context, story *dorv1.Story) {
 		if len(entry.entities) == 0 {
 			entry.entities = prev.entities
 		}
+		if entry.meta.UpdatedAt == 0 {
+			entry.meta = prev.meta
+		}
 		if entry.firstSeen == now.Unix() && prev.firstSeen > 0 {
 			entry.firstSeen = prev.firstSeen
 		}
+		// Heat cooling republishes a story with unchanged content. It must
+		// refresh the heat used by decay without triggering a new pair
+		// judgement or advancing the content revision.
+		changed = !storyContentEqual(prev.story, story) ||
+			prev.meta.UpdatedAt != entry.meta.UpdatedAt ||
+			!slices.Equal(prev.entities, entry.entities) ||
+			!equalVectors(prev.vec, entry.vec)
+		if !changed {
+			entry.rev = prev.rev
+		}
+	}
+	if changed || entry.rev == 0 {
+		entry.rev = c.revision.Add(1)
 	}
 	c.index[story.Id] = entry
-	c.pending[story.Id] = now.Add(c.cfg.Debounce)
+	if changed {
+		c.pending[story.Id] = now.Add(c.cfg.Debounce)
+	}
 	c.mu.Unlock()
+}
+
+// storyContentEqual compares the relation-relevant story fields. Heat is
+// derived and deliberately excluded.
+func storyContentEqual(a, b *dorv1.Story) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Id != b.Id || a.Title != b.Title || a.Category != b.Category ||
+		a.Primary != b.Primary || a.SourceCount != b.SourceCount ||
+		a.FirstSeen != b.FirstSeen || a.UpdatedAt != b.UpdatedAt ||
+		len(a.Locations) != len(b.Locations) {
+		return false
+	}
+	for i := range a.Locations {
+		if !proto.Equal(a.Locations[i], b.Locations[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalVectors(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func storyCoords(story *dorv1.Story) (float64, float64) {
@@ -709,6 +762,16 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 		return
 	}
 	revA, revB := ea.rev, eb.rev
+	key := pairKey(aid, bid)
+	c.mu.Lock()
+	last, judged := c.judged[key]
+	c.mu.Unlock()
+	if judged && last[0] == revA && last[1] == revB {
+		// Both endpoints changed since the last judgement, but this trigger
+		// carries revisions the pair was already judged against. Do not spend
+		// a second model call on the same inputs.
+		return
+	}
 
 	// The request order is the sorted order, so the direction is relative to
 	// the same pair the Link stores.
@@ -741,6 +804,7 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 	}
 	if !res.Accepted {
 		c.removeLinkLocked(ctx, aid, bid)
+		c.markJudged(aid, revA, bid, revB)
 		return
 	}
 	link := &dorv1.Link{
@@ -753,6 +817,13 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 		UpdatedAt:  c.now().Unix(),
 	}
 	c.upsertLinkLocked(ctx, link)
+	c.markJudged(aid, revA, bid, revB)
+}
+
+func (c *relationCore) markJudged(aid string, revA uint64, bid string, revB uint64) {
+	c.mu.Lock()
+	c.judged[pairKey(aid, bid)] = [2]uint64{revA, revB}
+	c.mu.Unlock()
 }
 
 func (c *relationCore) currentRevisions(aid string, revA uint64, bid string, revB uint64) bool {
@@ -798,6 +869,7 @@ func (c *relationCore) fallbackFenced(ctx context.Context, aid string, revA uint
 		return
 	}
 	c.fallbackLocked(ctx, a, b)
+	c.markJudged(aid, revA, bid, revB)
 }
 
 // fallbackLocked emits a similarity-only thematic link, explicitly unverified.

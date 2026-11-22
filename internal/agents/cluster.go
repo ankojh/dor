@@ -1143,7 +1143,10 @@ func (c *clusterer) load(ctx context.Context) error {
 			FirstSeen: s.FirstSeen,
 			UpdatedAt: s.UpdatedAt,
 			ExpiresAt: time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
-			CooledAt:  time.Unix(s.UpdatedAt, 0).UTC().UnixNano(),
+			// Resume cooling from the persisted heat at process start. Using
+			// the content time here would re-apply decay the previous process
+			// already applied.
+			CooledAt: c.now().UnixNano(),
 		}
 		if st.Story.Primary < uint32(len(st.Story.Locations)) {
 			st.Cell = locationCell(st.Story.Locations[st.Story.Primary])
@@ -1158,7 +1161,6 @@ func (c *clusterer) load(ctx context.Context) error {
 				st.FirstSeen = meta.FirstSeen
 				st.UpdatedAt = meta.UpdatedAt
 				st.ExpiresAt = time.Unix(meta.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
-				st.CooledAt = time.Unix(meta.UpdatedAt, 0).UTC().UnixNano()
 				committed := commits[s.Id]
 				for _, articleID := range meta.ArticleIDs {
 					// A missing completion record means the story was written

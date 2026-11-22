@@ -78,6 +78,15 @@ const (
 	// label. No TTL: a report stays until the eval workflow consumes it.
 	KVBucketEvalPending = "eval_pending"
 	KVEvalPendingTTL    = 0
+	// KVBucketGatewayLease carries short-lived gateway serving heartbeats used
+	// only by the maintenance exclusion barrier. A TTL keeps heartbeat history
+	// bounded in a non-expiring deployment.
+	KVBucketGatewayLease = "gateway_lease"
+	KVGatewayLeaseTTL    = 15 * time.Second
+	// KVBucketProducerLease carries short-lived fetcher/writer runtime
+	// heartbeats used by maintenance to prove producers are paused and drained.
+	KVBucketProducerLease = "producer_lease"
+	KVProducerLeaseTTL    = 15 * time.Second
 
 	KVLiveStateSnapshotKey = "snapshot"
 	KVPublisherSeqKey      = "publisher.seq"
@@ -149,6 +158,56 @@ type Bus struct {
 	closing    atomic.Bool
 	closedCh   chan struct{}
 	closedOnce sync.Once
+
+	// ingressGate blocks new article.raw producers; downstreamGate blocks
+	// enrichment/story/alert/match output and live_state/join mutations. The
+	// split is the staged drain: source admission closes first while the finite
+	// downstream backlog finishes.
+	ingress    pipelineGate
+	downstream pipelineGate
+}
+
+// pipelineGate admits an operation under a mutex, so closing the gate cannot
+// race a late admitted write. inflight remains visible until the operation
+// returns.
+type pipelineGate struct {
+	mu       sync.Mutex
+	closed   bool
+	inflight int64
+}
+
+func (g *pipelineGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.inflight++
+	return true
+}
+
+func (g *pipelineGate) leave() {
+	g.mu.Lock()
+	g.inflight--
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) open() {
+	g.mu.Lock()
+	g.closed = false
+	g.mu.Unlock()
+}
+
+func (g *pipelineGate) snapshot() (bool, int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed, g.inflight
 }
 
 // Connect starts the embedded server when opts.URL is empty, connects a NATS
@@ -401,6 +460,8 @@ func kvBuckets() []kvSpec {
 		{KVBucketAlertDelivery, KVAlertDeliveryTTL, 0},
 		{KVBucketSourceHealth, KVSourceHealthTTL, 0},
 		{KVBucketEvalPending, KVEvalPendingTTL, 0},
+		{KVBucketGatewayLease, KVGatewayLeaseTTL, 0},
+		{KVBucketProducerLease, KVProducerLeaseTTL, 0},
 		{KVBucketSession, KVBucketSessionTTL, 0},
 	}
 }
@@ -684,7 +745,10 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	b.kvMu.Unlock()
 	if ok {
 		if bucket == KVBucketJoins {
-			return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+			return &maintenanceKV{KeyValue: &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, bus: b}, nil
+		}
+		if maintenanceGuardedBucket(bucket) {
+			return &maintenanceKV{KeyValue: kv, bus: b}, nil
 		}
 		return kv, nil
 	}
@@ -699,9 +763,82 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 		// The joins bucket must never use the library's PurgeDeletes: it
 		// snapshots markers and then purges each subject unconditionally,
 		// which can erase a join recreated after the snapshot.
-		return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+		return &maintenanceKV{KeyValue: &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, bus: b}, nil
+	}
+	if maintenanceGuardedBucket(bucket) {
+		return &maintenanceKV{KeyValue: kv, bus: b}, nil
 	}
 	return kv, nil
+}
+
+// maintenanceGuardedBucket reports whether writes to a bucket belong to a
+// pipeline writer that must stop during maintenance.
+func maintenanceGuardedBucket(bucket string) bool {
+	return bucket == KVBucketLiveState || bucket == KVBucketJoins
+}
+
+// maintenanceKV rejects write operations while the pipeline producer fence is
+// closed. Reads stay available for health, diagnostics and the maintenance
+// adapter (which has its own unpaused Bus).
+type maintenanceKV struct {
+	jetstream.KeyValue
+	bus *Bus
+}
+
+func (k *maintenanceKV) PutString(ctx context.Context, key string, value string) (uint64, error) {
+	if !k.bus.downstream.enter() {
+		return 0, ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.PutString(ctx, key, value)
+}
+
+func (k *maintenanceKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	if !k.bus.downstream.enter() {
+		return 0, ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.Create(ctx, key, value, opts...)
+}
+
+func (k *maintenanceKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if !k.bus.downstream.enter() {
+		return 0, ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.Put(ctx, key, value)
+}
+
+func (k *maintenanceKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if !k.bus.downstream.enter() {
+		return 0, ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.Update(ctx, key, value, revision)
+}
+
+func (k *maintenanceKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	if !k.bus.downstream.enter() {
+		return ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.Delete(ctx, key, opts...)
+}
+
+func (k *maintenanceKV) Purge(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	if !k.bus.downstream.enter() {
+		return ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.Purge(ctx, key, opts...)
+}
+
+func (k *maintenanceKV) PurgeDeletes(ctx context.Context, opts ...jetstream.KVPurgeOpt) error {
+	if !k.bus.downstream.enter() {
+		return ErrIngestPaused
+	}
+	defer k.bus.downstream.leave()
+	return k.KeyValue.PurgeDeletes(ctx, opts...)
 }
 
 // safeJoinsKV replaces the destructive PurgeDeletes implementation with a
@@ -812,10 +949,95 @@ func WithHeaders(h nats.Header) PublishOption {
 	}
 }
 
+// ErrIngestPaused is returned when a maintenance run has paused the shared
+// producer boundary. Callers should retry after the fence is released.
+var ErrIngestPaused = errors.New("bus: ingestion paused for maintenance")
+
+// PauseIngress closes external/raw producer admission. Downstream work remains
+// active for the staged finite drain.
+func (b *Bus) PauseIngress() { b.ingress.close() }
+
+// ResumeIngress releases raw producer admission.
+func (b *Bus) ResumeIngress() { b.ingress.open() }
+
+// IngressPaused reports the current raw producer state.
+func (b *Bus) IngressPaused() bool { closed, _ := b.ingress.snapshot(); return closed }
+
+// PauseDownstream closes enrichment/story/alert/match output and guarded
+// live_state/join mutations.
+func (b *Bus) PauseDownstream() { b.downstream.close() }
+
+// ResumeDownstream releases downstream writers.
+func (b *Bus) ResumeDownstream() { b.downstream.open() }
+
+// DownstreamPaused reports the downstream writer state.
+func (b *Bus) DownstreamPaused() bool { closed, _ := b.downstream.snapshot(); return closed }
+
+// IngestBarrier reports the staged producer state and retained INGEST bounds.
+type IngestBarrier struct {
+	Paused             bool   `json:"paused"`
+	Inflight           int64  `json:"inflight"`
+	IngressClosed      bool   `json:"ingress_closed"`
+	IngressInflight    int64  `json:"ingress_inflight"`
+	DownstreamClosed   bool   `json:"downstream_closed"`
+	DownstreamInflight int64  `json:"downstream_inflight"`
+	First              uint64 `json:"first"`
+	Last               uint64 `json:"last"`
+}
+
+// IngestBarrier samples the producer fences and the INGEST stream tail.
+func (b *Bus) IngestBarrier(ctx context.Context) (IngestBarrier, error) {
+	ingressClosed, ingressInflight := b.ingress.snapshot()
+	downstreamClosed, downstreamInflight := b.downstream.snapshot()
+	out := IngestBarrier{
+		Paused:             downstreamClosed,
+		Inflight:           ingressInflight + downstreamInflight,
+		IngressClosed:      ingressClosed,
+		IngressInflight:    ingressInflight,
+		DownstreamClosed:   downstreamClosed,
+		DownstreamInflight: downstreamInflight,
+	}
+	stream, err := b.StreamNamed(ctx, StreamIngest)
+	if err != nil {
+		return out, err
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.First, out.Last = info.State.FirstSeq, info.State.LastSeq
+	return out, nil
+}
+
+// maintenancePausedSubject reports whether a publish belongs to a pipeline
+// stage that maintenance freezes. DELTA is the forward repair output and is
+// deliberately not paused.
+func maintenancePausedSubject(subject string) bool {
+	switch StreamForSubject(subject) {
+	case StreamIngest, StreamEnrich, StreamStory, StreamAlert, StreamMatch:
+		return true
+	default:
+		return false
+	}
+}
+
 // Publish writes one message. It always sets Nats-Msg-Id; when the caller does
 // not supply one a unique id is generated. Callers that can be retried must
 // supply a stable id namespaced by stage (for example "clean:<articleID>").
 func (b *Bus) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOption) (*jetstream.PubAck, error) {
+	ingress := subject == SubjectArticleRaw || subject == SubjectArticleRawPriority
+	downstream := !ingress && maintenancePausedSubject(subject)
+	if ingress {
+		if !b.ingress.enter() {
+			return nil, ErrIngestPaused
+		}
+		defer b.ingress.leave()
+	} else if downstream {
+		if !b.downstream.enter() {
+			return nil, ErrIngestPaused
+		}
+		defer b.downstream.leave()
+	}
 	po := PublishOptions{}
 	for _, opt := range opts {
 		opt(&po)

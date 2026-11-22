@@ -24,6 +24,7 @@ import (
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/live"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -1150,6 +1151,9 @@ func (c *clusterer) jevSameEvent(ctx context.Context, cand *candidateMatch, arti
 }
 
 func (c *clusterer) persist(ctx context.Context, st *storyState, article *dorv1.Article) error {
+	if article != nil {
+		article.PublishedAt = maintenance.ApplyCurrentPolicy(article.Id, article.PublishedAt)
+	}
 	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
 	if err != nil {
 		return fmt.Errorf("cluster: live_state kv: %w", err)

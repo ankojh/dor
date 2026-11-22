@@ -883,8 +883,18 @@ export function App() {
   const enqueueWire = (rows: WireRow[], hydrated = false): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
+    const removals: string[] = [];
     for (const row of rows) {
       const key = articleKey(row);
+      // A negative timestamp is the forward-only suppression tombstone emitted
+      // by the publisher. Delete the row locally instead of rendering it.
+      if (Number(row.at) < 0) {
+        const pendingIndex = pendingWire.findIndex((item) => item.key === key);
+        if (pendingIndex >= 0) pendingWire.splice(pendingIndex, 1);
+        seen.delete(key);
+        removals.push(key);
+        continue;
+      }
       const pendingIndex = pendingWire.findIndex((item) => item.key === key);
       if (pendingIndex >= 0) {
         const previous = pendingWire[pendingIndex]!;
@@ -909,6 +919,10 @@ export function App() {
         if (removed) seen.delete(removed.key);
       }
       added++;
+    }
+    if (removals.length > 0) {
+      const gone = new Set(removals);
+      setWireRows((previous) => previous.filter((item) => !gone.has(item.key)));
     }
     if (updates.length > 0) {
       // The wire row was already visible; update metadata in place. This is

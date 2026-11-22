@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/publication"
 )
@@ -48,6 +49,12 @@ type hub struct {
 	snapRetryAt  time.Time
 	snapFailures int
 	readSnapshot func(context.Context) (*dorv1.Snapshot, error) // injectable KV read
+	// floor is the active maintenance baseline. A client below floorT must
+	// receive Resync plus a snapshot at or beyond it, even when the old ring
+	// still covers its requested range.
+	floorSet bool
+	floorT   uint64
+	floorD   uint64
 	// alertOwner resolves a saved alert's anonymous owner. Alert deltas are
 	// private; an empty owner is visible to nobody.
 	alertOwner func(string) string
@@ -111,6 +118,80 @@ func (h *hub) closeAll() {
 	for _, c := range clients {
 		c.kick("server shutting down")
 	}
+}
+
+// suspend invalidates every in-memory recovery surface before a maintenance
+// baseline change. A KV watch alone is not a serving fence; this is the local
+// half of that fence.
+func (h *hub) suspend() {
+	h.mu.Lock()
+	for c := range h.clients {
+		if c.resumeCancel != nil {
+			c.resumeCancel()
+		}
+		c.ready = false
+		c.resetQueueLocked()
+	}
+	h.ring = nil
+	h.seq = 0
+	h.stories = make(map[string]*dorv1.Story)
+	h.mu.Unlock()
+	h.snapMu.Lock()
+	h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = nil, nil, 0, time.Time{}
+	h.snapMu.Unlock()
+}
+
+// installBaseline atomically replaces the replay ring, story lookup and floor
+// with a decoded snapshot at or beyond the current minimum resume sequence.
+func (h *hub) installBaseline(snap *dorv1.Snapshot, floor maintenance.Floor) error {
+	if snap == nil {
+		return fmt.Errorf("gateway: nil maintenance baseline snapshot")
+	}
+	if floor.Valid() && snap.Seq < floor.MinimumResumeSeq {
+		return fmt.Errorf("gateway: snapshot seq %d is below maintenance floor %d", snap.Seq, floor.MinimumResumeSeq)
+	}
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Snapshot{Snapshot: snap}})
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	for c := range h.clients {
+		if c.resumeCancel != nil {
+			c.resumeCancel()
+		}
+		c.ready = false
+		c.resetQueueLocked()
+	}
+	h.ring = nil
+	h.seq = snap.Seq
+	h.stories = make(map[string]*dorv1.Story, len(snap.Stories))
+	for _, story := range snap.Stories {
+		h.observeStoryLocked(story)
+	}
+	if floor.Valid() {
+		h.floorSet, h.floorT, h.floorD = true, floor.MinimumResumeSeq, floor.BootstrapStreamSeq
+	} else {
+		h.floorSet, h.floorT, h.floorD = false, 0, 0
+	}
+	h.mu.Unlock()
+	h.snapMu.Lock()
+	h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = wire, snap, snap.Seq, time.Now()
+	h.snapErr, h.snapFailures, h.snapRetryAt = nil, 0, time.Time{}
+	h.snapMu.Unlock()
+	return nil
+}
+
+// floorForRead returns the currently installed baseline.
+func (h *hub) floorForRead() (bool, uint64, uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.floorSet, h.floorT, h.floorD
+}
+
+func (h *hub) snapshotMeetsFloor(seq uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.floorSet || seq >= h.floorT
 }
 
 // addBatch records fresh deltas and broadcasts without blocking on clients.
@@ -263,8 +344,20 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 			if snap.Seq > h.seq {
 				h.seq = snap.Seq
 			}
+			floorSet, floorT := h.floorSet, h.floorT
 			from := lastSeq + 1
 			snapshotNeeded := forceSnapshot || lastSeq == 0 || lastSeq > h.seq
+			// The maintenance floor overrides ring coverage. A client below T,
+			// including one exactly at the stale hub sequence, must discard local
+			// state and take the corrected snapshot.
+			if floorSet && lastSeq < floorT {
+				snapshotNeeded = true
+				if reason == "" {
+					reason = "maintenance floor"
+				} else {
+					reason += "; maintenance floor"
+				}
+			}
 			deltas, covered := h.sinceLocked(from)
 			if !snapshotNeeded && !covered {
 				snapshotNeeded = true
@@ -378,9 +471,13 @@ func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error)
 	for {
 		h.snapMu.Lock()
 		if h.snapVal != nil && time.Since(h.snapAt) < snapshotTTL {
-			data, snap := append([]byte(nil), h.snapBytes...), h.snapVal
-			h.snapMu.Unlock()
-			return data, snap, nil
+			if !h.snapshotMeetsFloor(h.snapVal.Seq) {
+				h.snapAt = time.Time{}
+			} else {
+				data, snap := append([]byte(nil), h.snapBytes...), h.snapVal
+				h.snapMu.Unlock()
+				return data, snap, nil
+			}
 		}
 		if loading := h.snapLoad; loading != nil {
 			h.snapMu.Unlock()
@@ -403,6 +500,9 @@ func (h *hub) loadSnapshot(ctx context.Context) ([]byte, *dorv1.Snapshot, error)
 		h.snapMu.Unlock()
 		data, snap, err := h.fetchSnapshot(context.WithoutCancel(ctx))
 		h.snapMu.Lock()
+		if err == nil && !h.snapshotMeetsFloor(snap.Seq) {
+			err = fmt.Errorf("gateway: snapshot seq %d is below the maintenance floor", snap.Seq)
+		}
 		if err == nil {
 			h.snapBytes, h.snapVal, h.snapSeq, h.snapAt = data, snap, snap.Seq, time.Now()
 			h.snapFailures = 0

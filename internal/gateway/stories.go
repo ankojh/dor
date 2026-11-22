@@ -260,6 +260,11 @@ func (s *Server) kvArticles(ctx context.Context, kv jetstream.KeyValue, ids []st
 		if !ok || a == nil {
 			continue
 		}
+		// A negative PublishedAt is the maintenance suppression tombstone in
+		// the hot article copy. The DB fallback is filtered by migration 0008.
+		if a.PublishedAt < 0 {
+			continue
+		}
 		out = append(out, store.StoryArticle{
 			ID: a.Id, SourceID: a.SourceId, Title: a.Title, URL: a.Url,
 			PublishedAt: time.Unix(a.PublishedAt, 0).UTC(), Lang: a.Lang,

@@ -12,6 +12,17 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// WireSuppressedAt is the tombstone timestamp for an article whose original
+// publication time cannot be established. DELTA has no dedicated wire-removal
+// event, so a negative At is the forward-only removal record: committed state
+// retains the row for audit, while snapshots, gateways and clients exclude it.
+const WireSuppressedAt int64 = -1
+
+// WireSuppressed reports whether a wire row is a suppression tombstone.
+func WireSuppressed(row *dorv1.WireRow) bool {
+	return row != nil && row.At <= WireSuppressedAt
+}
+
 // State contains committed data only. Admitted but uncommitted rows never enter
 // a base checkpoint. Orders are persisted because map iteration is not eviction.
 type State struct {
@@ -41,6 +52,9 @@ func NewState(snapshot *dorv1.Snapshot) *State {
 		s.Links[v.A+"|"+v.B] = v
 	}
 	for _, v := range snapshot.RecentWire {
+		if WireSuppressed(v) {
+			continue
+		}
 		s.Rows[v.ArticleId] = v
 		s.WireOrder = append(s.WireOrder, v.ArticleId)
 		s.RecentWire = append(s.RecentWire, v)
@@ -59,7 +73,12 @@ func (s *State) Clone() *State {
 }
 
 func (s *State) Snapshot() *dorv1.Snapshot {
-	r := &dorv1.Snapshot{Seq: s.Seq, RecentWire: append([]*dorv1.WireRow(nil), s.RecentWire...)}
+	r := &dorv1.Snapshot{Seq: s.Seq}
+	for _, v := range s.RecentWire {
+		if !WireSuppressed(v) {
+			r.RecentWire = append(r.RecentWire, v)
+		}
+	}
 	for _, v := range s.Stories {
 		r.Stories = append(r.Stories, v)
 	}
@@ -192,9 +211,11 @@ func (s *State) Apply(r *Record, raw uint64) error {
 					break
 				}
 			}
-			s.RecentWire = append(s.RecentWire, b.Wire)
-			if len(s.RecentWire) > 500 {
-				s.RecentWire = append([]*dorv1.WireRow(nil), s.RecentWire[len(s.RecentWire)-500:]...)
+			if !WireSuppressed(b.Wire) {
+				s.RecentWire = append(s.RecentWire, b.Wire)
+				if len(s.RecentWire) > 500 {
+					s.RecentWire = append([]*dorv1.WireRow(nil), s.RecentWire[len(s.RecentWire)-500:]...)
+				}
 			}
 		}
 		s.Seq = d.Seq

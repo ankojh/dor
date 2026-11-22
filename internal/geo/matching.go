@@ -60,6 +60,18 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 	hint := g.CountryCode(countryHint)
 	sport := sportingText(title + " " + text)
 	found := map[string]Place{}
+	// fieldsSeen records which text fields (dateline, title, lede) supported a
+	// place. Region-to-city suppression needs evidence from the same field;
+	// otherwise a city mentioned only in the lede would erase a region named
+	// in the headline.
+	fieldsSeen := map[string]uint8{}
+	// regionQualified marks a city whose own enclosing region was named next
+	// to it ("Houston, Texas"), which is explicit City, Region evidence even
+	// when the region itself appears in another field.
+	regionQualified := map[string]bool{}
+	// titleFieldMask is the fieldsSeen bit for the headline. A city mentioned
+	// only in the lede must not erase a region the headline names.
+	const titleFieldMask uint8 = 1 << 1
 	for fieldIndex, field := range []string{dateline, title, text} {
 		words := tokenize(field)
 		var spans []mention
@@ -119,6 +131,14 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 						}
 					}
 				}
+				if n == 1 && m.place.ID != "" && !m.qualified && g.unresolvedSingleWordHomonym(m.place, phrase, words, i, n, fieldIndex == 0) {
+					// Population alone is not evidence for a single-word cross-country
+					// homonym. An unqualified, non-locative name ("Valencia Marathon")
+					// must dominate five to one or stay unresolved; supported locative
+					// mentions ("in Hyderabad", "in Kochi", "in Barcelona") keep their
+					// place.
+					m.place = Place{}
+				}
 				for _, other := range atSpan[1:] {
 					if n > 1 && other.quality == m.quality && other.place.CountryCode != m.place.CountryCode && !g.dominatesHomonym(m.place, other.place, phrase) {
 						// Population cannot choose an unresolved cross-country
@@ -143,6 +163,10 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 			if m.place.ID == "" {
 				continue
 			}
+			fieldsSeen[m.place.ID] |= 1 << fieldIndex
+			if m.place.Feature != "ADM1" && qualifiedByAdmin(m.place, words, m.start, m.end-m.start, fieldIndex == 0) {
+				regionQualified[m.place.ID] = true
+			}
 			if old, ok := found[m.place.ID]; !ok || g.betterPlace(m.place, old) {
 				found[m.place.ID] = m.place
 			}
@@ -152,16 +176,30 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 	for _, p := range found {
 		out = append(out, p)
 	}
-	// If the title names both a region and a city inside it, the city is the
+	// If the text names both a region and a city inside it, the city is the
 	// precise event location (St. Louis, Missouri; Atlanta, Georgia). Keep the
-	// region when no city inside it was admitted (Bihar Bridge).
+	// region when no city inside it was admitted (Bihar Bridge). Suppression
+	// requires evidence from the same field, or an explicit City, Region pair
+	// such as "Houston, Texas". A city that occurs only in the lede must not
+	// erase a region the headline names.
 	if len(out) > 1 {
 		filtered := out[:0]
 		for i, p := range out {
 			if p.Feature == "ADM1" {
 				replaced := false
 				for j, other := range out {
-					if i != j && cityInRegion(other, p) {
+					if i == j || !cityInRegion(other, p) {
+						continue
+					}
+					// A city suppresses a region only with same-field evidence. A
+					// region the headline names additionally requires a headline
+					// city, unless the pair is explicit ("Houston, Texas"); a city
+					// that occurs only in the lede must not erase it.
+					supported := regionQualified[other.ID]
+					if !supported && fieldsSeen[other.ID]&fieldsSeen[p.ID] != 0 {
+						supported = fieldsSeen[p.ID]&titleFieldMask == 0 || fieldsSeen[other.ID]&titleFieldMask != 0
+					}
+					if supported {
 						replaced = true
 						break
 					}
@@ -345,51 +383,65 @@ func civicHead(word string) bool {
 // Qualifiers must be outside the matched name; a city must never receive a
 // country/admin bonus by matching its own name (Armenia, India, Florida, ...).
 func independentQualifier(p Place, words []token, start, count int, dateline bool) bool {
-	name := normalize(p.Name)
-	adjacent := func(q string) bool {
-		q = normalize(q)
-		if q == "" || q == name {
-			return false
-		}
-		parts := strings.Fields(q)
-		matches := func(at int) bool {
-			if at < 0 || at+len(parts) > len(words) {
-				return false
-			}
-			for k, part := range parts {
-				if words[at+k].norm != part {
-					return false
-				}
-			}
-			return true
-		}
-		end := start + count
-		if p.Feature == "ADM1" && end < len(words) && adminTypeNoun(words[end].norm) {
-			end++
-		}
-		if matches(end) && (dateline || strings.ContainsAny(words[end].sep, ",(")) {
-			return true
-		}
-		if start > len(parts) && words[start-1].norm == "s" && strings.ContainsAny(words[start-1].sep, "'’") && matches(start-len(parts)-1) {
-			return true
-		}
-		if matches(start-len(parts)) && (dateline || strings.ContainsAny(words[start].sep, ",:(")) {
-			return true
-		}
-		return end < len(words) && words[end].norm == "in" && matches(end+1)
+	if adjacentName(p.Country, p, words, start, count, dateline) || adjacentName(p.Admin, p, words, start, count, dateline) {
+		return true
 	}
 	// An uppercase administrative code is an explicit qualifier, including
 	// conventional unpunctuated forms such as Washington DC or Paris TX.
 	end := start + count
-	adminCode := false
 	if end < len(words) && len(p.AdminCode) == 2 && p.AdminCode == strings.ToUpper(p.AdminCode) &&
 		p.AdminCode[0] >= 'A' && p.AdminCode[0] <= 'Z' {
-		adminCode = words[end].raw == p.AdminCode
-		if end+1 < len(words) && strings.Contains(words[end+1].sep, ".") && !strings.ContainsAny(words[end+1].sep, "\n;:!?") {
-			adminCode = adminCode || words[end].raw+words[end+1].raw == p.AdminCode
+		if words[end].raw == p.AdminCode {
+			return true
+		}
+		if end+1 < len(words) && strings.Contains(words[end+1].sep, ".") && !strings.ContainsAny(words[end+1].sep, "\n;:!?") &&
+			words[end].raw+words[end+1].raw == p.AdminCode {
+			return true
 		}
 	}
-	return adjacent(p.Country) || adjacent(p.Admin) || adminCode
+	return false
+}
+
+// qualifiedByAdmin reports whether the occurrence names its own enclosing
+// first-level region ("Houston, Texas", "Houston in Texas"). A country
+// qualifier alone does not qualify the City, Region pair.
+func qualifiedByAdmin(p Place, words []token, start, count int, dateline bool) bool {
+	return p.Feature != "ADM1" && adjacentName(p.Admin, p, words, start, count, dateline)
+}
+
+// adjacentName reports whether q appears as an explicit qualifier of p,
+// either adjacent with punctuation/dateline or through "in <q>".
+func adjacentName(q string, p Place, words []token, start, count int, dateline bool) bool {
+	q = normalize(q)
+	if q == "" || q == normalize(p.Name) {
+		return false
+	}
+	parts := strings.Fields(q)
+	matches := func(at int) bool {
+		if at < 0 || at+len(parts) > len(words) {
+			return false
+		}
+		for k, part := range parts {
+			if words[at+k].norm != part {
+				return false
+			}
+		}
+		return true
+	}
+	end := start + count
+	if p.Feature == "ADM1" && end < len(words) && adminTypeNoun(words[end].norm) {
+		end++
+	}
+	if matches(end) && (dateline || strings.ContainsAny(words[end].sep, ",(")) {
+		return true
+	}
+	if start > len(parts) && words[start-1].norm == "s" && strings.ContainsAny(words[start-1].sep, "'’") && matches(start-len(parts)-1) {
+		return true
+	}
+	if matches(start-len(parts)) && (dateline || strings.ContainsAny(words[start].sep, ",:(")) {
+		return true
+	}
+	return end < len(words) && words[end].norm == "in" && matches(end+1)
 }
 
 func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, start, count int, dateline bool, hint string) int {
@@ -488,6 +540,24 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	// Possessive apostrophe-s is grammar, not a location pattern. Only an
 	// actual preposition or the explicit '-based' construction is locative.
 	locative := locativeEvidence(words, start, count) || administrativeContainerEvidence(p, words, start)
+	// Indonesian/Malay "kota" (city) before a capitalized name belongs to that
+	// longer name ("Kota Medan", "Kota (Pemkot) Tanjungpinang"), not to Kota,
+	// India. A comma-separated qualifier ("Kota, Rajasthan") still denotes the
+	// actual city.
+	if phrase == "kota" && start+count < len(words) && capitalized(words[start+count].raw) &&
+		!strings.ContainsAny(words[start+count].sep, "\n.;:!?,/") {
+		return 0
+	}
+	// The local name "Kepulauan Riau" is the Riau Islands province, not the
+	// mainland Riau region that follows the same word. When the indexed region
+	// is not itself an island group, an unindexed local island form must not
+	// fall back to the contained region at a different administrative level.
+	// A region whose canonical name is already an island group keeps matching.
+	if p.Feature == "ADM1" && start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?,()/") &&
+		(words[start-1].norm == "kepulauan" || words[start-1].norm == "pulau") &&
+		!strings.HasSuffix(normalize(p.Name), " islands") {
+		return 0
+	}
 	if end := start + count; end+1 < len(words) && words[end].norm == "upon" && capitalized(words[end+1].raw) && !strings.ContainsAny(words[end].sep+words[end+1].sep, "\n.;:!?,()/") {
 		return 0
 	}
@@ -818,6 +888,37 @@ func (g *Gazetteer) dominatesHomonym(p, other Place, phrase string) bool {
 	}
 	population, otherPopulation := g.majorPopulation(p), g.majorPopulation(other)
 	return population >= 50000 && otherPopulation > 0 && population >= 5*otherPopulation
+}
+
+// unresolvedSingleWordHomonym reports whether a single-word canonical city is
+// one of several same-named populated places in different countries whose
+// populations are comparable. Population alone cannot choose between them
+// ("Valencia Marathon" in Spain versus Valencia, Venezuela), so the match must
+// abstain unless the text independently supports it. A locative mention is
+// support: "in Hyderabad", "in Kochi" and "in Barcelona" name the event place
+// even when a foreign namesake exists. This is deliberately narrower than
+// declining every unqualified single-word homonym, which removed those
+// supported cities.
+func (g *Gazetteer) unresolvedSingleWordHomonym(p Place, phrase string, words []token, start, count int, dateline bool) bool {
+	if dateline || p.CountryID || p.Feature == "ADM1" || p.RegionAlias != "" ||
+		expandedPlaceName(p.Name) != expandedPlaceName(phrase) {
+		return false
+	}
+	if locativeEvidence(words, start, count) {
+		return false
+	}
+	population := g.majorPopulation(p)
+	for _, other := range g.byName[phrase] {
+		if other.ID == p.ID || other.RegionAlias != "" || other.CountryID || other.Feature == "ADM1" ||
+			other.CountryCode == p.CountryCode || expandedPlaceName(other.Name) != expandedPlaceName(p.Name) {
+			continue
+		}
+		otherPopulation := g.majorPopulation(other)
+		if otherPopulation > 0 && population < 5*otherPopulation {
+			return true
+		}
+	}
+	return false
 }
 
 // Named organizations are not literal city evidence. A following City Council

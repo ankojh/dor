@@ -1504,6 +1504,77 @@ func TestFullCacheTaipeiSeatRegionConflicts(t *testing.T) {
 	})
 }
 
+func TestFullCacheHistoricalRepairRetentionBoundaries(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	canonical := func(p geo.Place) geo.StoredLocation {
+		return geo.StoredLocation{
+			PlaceID: p.ID, Lat: float64(float32(p.Lat)), Lon: float64(float32(p.Lon)), Precision: geo.PrecisionOf(p),
+		}
+	}
+	mustPlace := func(id string) geo.Place {
+		p, ok := g.ByID(id)
+		if !ok || !geo.ValidCoordinates(p.Lat, p.Lon) {
+			t.Fatalf("full cache must contain a valid canonical row %s: %+v found=%v", id, p, ok)
+		}
+		return p
+	}
+	mustLookup := func(name, country string) geo.Place {
+		p, ok := g.Lookup(name, country)
+		if !ok || !geo.ValidCoordinates(p.Lat, p.Lon) {
+			t.Fatalf("full cache must contain a valid %s/%s row: %+v found=%v", name, country, p, ok)
+		}
+		return p
+	}
+
+	t.Run("naryn_region_invalid_coordinates", func(t *testing.T) {
+		naryn := mustPlace("admin:KG.04")
+		decision := g.RepairLocation(geo.StoredLocation{
+			PlaceID: naryn.ID, Lat: 0, Lon: 0, Precision: geo.RegionResolution,
+		}, []geo.TextEvidence{{Title: "Naryn region expands housing, training and medical facilities to address doctor shortage"}})
+		if decision.Reason != "invalid_coordinate" || decision.Replacement == nil || decision.Replacement.ID != naryn.ID ||
+			decision.Precision != geo.RegionResolution || !geo.ValidCoordinates(decision.Replacement.Lat, decision.Replacement.Lon) {
+			t.Fatalf("lowercase trailing jurisdiction noun should keep Naryn Region at region precision with valid coordinates: %+v", decision)
+		}
+	})
+
+	for _, tc := range []struct{ name, id, title string }{
+		{"kyiv_region_review_only", "703448", "Drone attack damages apartment block in Kyiv region, people may be trapped under rubble"},
+		{"kathmandu_valley_review_only", "1283240", "Seven things to do in Kathmandu Valley this week"},
+		{"kabale_road_review_only", "233070", "Kisoro–Mgahinga, Kabale–Lake Bunyonyi Road Projects Face Two-Year Delay"},
+		{"hassan_route_section_review_only", "1270239", "NHAI yet to act despite 300 complaints of inordinate delay at Chowlagere toll plaza on NH 75 Hassan-Sakleshpur section"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stored := mustPlace(tc.id)
+			decision := g.RepairLocation(canonical(stored), []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "" || decision.Replacement != nil || decision.ReviewReason != "canonical_title_requires_disambiguation" {
+				t.Fatalf("valid canonical %s in container/route context should be retained for review, not removed: %+v", stored.Name, decision)
+			}
+		})
+	}
+
+	for _, tc := range []struct{ name, title string }{
+		{"st_louis_river_still_removed", "Crews search the St. Louis River after a boating accident"},
+		{"orlando_pirates_still_removed", "Orlando Pirates confirm key defender has been ruled out for the rest of the year"},
+		{"kampala_rotary_still_removed", "Rotary Club of Kampala City Calls for Stronger Protection of Girls Against Sexual Exploitation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stored geo.Place
+			switch tc.name {
+			case "st_louis_river_still_removed":
+				stored = mustLookup("St. Louis", "US")
+			case "orlando_pirates_still_removed":
+				stored = mustLookup("Orlando", "US")
+			default:
+				stored = mustPlace("232422")
+			}
+			decision := g.RepairLocation(canonical(stored), []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "unsupported_match" || decision.Replacement != nil || decision.ReviewReason != "" {
+				t.Fatalf("non-geographic use of %s must still be removed, not retained: %+v", stored.Name, decision)
+			}
+		})
+	}
+}
+
 var fullCachePlotGazetteers = struct {
 	sync.Mutex
 	byDir map[string]*geo.Gazetteer

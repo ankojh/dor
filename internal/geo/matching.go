@@ -193,7 +193,10 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	}
 	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
 		!(p.Feature == "ADM1" && g.majorPlaceSupported(p)) &&
-		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && strings.Contains(" region province district county ", " "+words[end].norm+" ") || words[end].norm == "park" && p.Population >= 50000 || words[end].norm == "bridge" && g.majorPlaceSupported(p) && !givenNames[phrase] && !familyNames[phrase])) {
+		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && containerSuffix(words[end].norm) ||
+			words[end].norm == "park" && p.Population >= 50000 ||
+			words[end].norm == "bridge" && g.majorPlaceSupported(p) && !givenNames[phrase] && !familyNames[phrase] ||
+			(g.majorPlaceSupported(p) || seatLike(p)) && (containerSuffix(words[end].norm) || routeContextNearby(words, end)))) {
 		// A populated-place coordinate does not establish the position of a
 		// separately named river/valley, or an administrative jurisdiction.
 		return 0
@@ -236,9 +239,13 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 			return 0
 		}
 	}
-	for _, w := range words[start : start+count] {
+	for i, w := range words[start : start+count] {
 		nameSuffix := w.norm == "s" && strings.ContainsAny(w.sep, "'’")
-		if !capitalized(w.raw) && !nameSuffix && !strings.Contains(" de la le del dos do da of the and upon ", " "+w.norm+" ") {
+		// News style lowercases a trailing generic jurisdiction noun even when
+		// it is part of the canonical ADM1 name ("Naryn region"). The leading
+		// token still has to be capitalized.
+		trailingJurisdiction := canonical && p.Feature == "ADM1" && i == count-1 && jurisdictionNoun(w.norm)
+		if !capitalized(w.raw) && !nameSuffix && !trailingJurisdiction && !strings.Contains(" de la le del dos do da of the and upon ", " "+w.norm+" ") {
 			return 0
 		}
 	}
@@ -249,7 +256,10 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		// States), not a club suffix. Other organization evidence still rejects.
 		organization = false
 	}
-	if personUse(words, start, count) && !textQualified || organization {
+	// A hyphenated route/compound ("Hassan-Sakleshpur section") is not a
+	// personal name even when the first token is also a given name.
+	routeCompound := historical && routeContextNearby(words, start+count)
+	if (personUse(words, start, count) && !textQualified && !routeCompound) || organization {
 		return 0
 	}
 	hintQualified := hint != "" && p.CountryCode == hint
@@ -380,6 +390,37 @@ func geographicHead(words []token, start, count int) bool {
 
 func adminTypeNoun(word string) bool {
 	return strings.Contains(" region state province prefecture ", " "+word+" ")
+}
+
+// Generic jurisdiction tails can be lowercase in running news text while the
+// canonical ADM1 name carries them ("Naryn region" for "Naryn Region").
+func jurisdictionNoun(word string) bool {
+	return strings.Contains(" region state province prefecture district county municipality department canton constituency ", " "+word+" ")
+}
+
+// containerSuffix names an enclosing area rather than a conflicting feature:
+// a city named in "X region"/"X valley" is still a plausible coarse witness.
+func containerSuffix(word string) bool {
+	return strings.Contains(" region province district county state prefecture municipality department canton constituency valley area metro metropolitan greater ", " "+word+" ")
+}
+
+// routeContextNearby detects a road/structure compound around a matched name
+// ("Kabale–Lake Bunyonyi Road", "Hassan-Sakleshpur section"). It is only used
+// in historical retention, never to admit a new point.
+func routeContextNearby(words []token, end int) bool {
+	for i := end; i < min(len(words), end+5); i++ {
+		if strings.ContainsAny(words[i].sep, "\n.;:!?") {
+			break
+		}
+		if strings.Contains(" road roads highway freeway section corridor route street avenue boulevard bridge park airport port ", " "+words[i].norm+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func seatLike(p Place) bool {
+	return p.Feature == "PPLC" || strings.HasPrefix(p.Feature, "PPLA")
 }
 
 func sameJurisdiction(a, b Place) bool {

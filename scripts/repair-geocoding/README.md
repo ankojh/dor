@@ -24,7 +24,12 @@ Cruz, San Jose, bare Santo Domingo).
 
 The new-point admission threshold is not evidence that an existing canonical
 point is false. A valid canonical title witness that passes the explicit
-rejection guards is retained when disambiguation remains uncertain. The audit
+rejection guards is retained when disambiguation remains uncertain. In
+historical repair only, a title that names the canonical place inside a
+containing jurisdiction or route context ("X region", "X Valley", "X–Y Road
+section") also counts as a witness, so it is retained for review rather than
+destructively removed. Natural-feature, organization, person and common-word
+uses are still rejected, and new-point plotting stays strict. The audit
 records `needs_review` counts and complete `reviews` entries instead of an
 unsupported deletion. This exception requires a valid coordinate already
 within 1 km of that canonical point; invalid or geographically mismatched

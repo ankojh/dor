@@ -129,8 +129,10 @@ ON CONFLICT (id, created_at) DO UPDATE SET
     published_at = EXCLUDED.published_at,
     lang = EXCLUDED.lang,
     dateline = EXCLUDED.dateline,
-    category = EXCLUDED.category,
-    cat_conf = EXCLUDED.cat_conf,
+    -- A later assignment-only upsert (or a re-delivered clean article) must
+    -- not reset enrichment that another stage already wrote.
+    category = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.category ELSE articles.category END,
+    cat_conf = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.cat_conf ELSE articles.cat_conf END,
     story_id = COALESCE(EXCLUDED.story_id, articles.story_id)`
 	const locationSQL = `
 INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf)

@@ -2,6 +2,10 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -88,6 +92,8 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 		pending:      make(map[string]time.Time),
 		links:        make(map[string]*relationLink),
 		judged:       make(map[string][2]uint64),
+		pairs:        make(map[string]*relationPairRecord),
+		dirty:        make(map[string]bool),
 		sink:         cfg.Persist,
 		work:         make(chan string, 64),
 		pairLocks:    make([]sync.Mutex, relationPairLocks),
@@ -99,9 +105,9 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 	if err != nil {
 		return nil, err
 	}
-	durable := "relation"
+	durable := "relation-v2"
 	if cfg.Shard >= 0 {
-		durable = fmt.Sprintf("relation-%d", cfg.Shard)
+		durable = fmt.Sprintf("relation-v2-%d", cfg.Shard)
 	}
 	base, err := NewBase(b, metrics, log, Spec{
 		Name:           RelationAgentName,
@@ -115,14 +121,13 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 			if err := proto.Unmarshal(msg.Data, &story); err != nil {
 				return Terminal(fmt.Errorf("relation: story: %w", err))
 			}
-			core.observe(ctx, &story)
-			return nil
+			return core.observeSeq(ctx, &story, msg.StreamSequence)
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &relationAgent{name: RelationAgentName, core: core, base: base}, nil
+	return &relationAgent{name: RelationAgentName, core: core, base: base, durable: durable}, nil
 }
 
 // relationFilters binds every story shard on every judge. Candidate indexing
@@ -141,9 +146,10 @@ func relationFilters(shards, shard int) ([]string, error) {
 }
 
 type relationAgent struct {
-	name string
-	core *relationCore
-	base *Base
+	name    string
+	core    *relationCore
+	base    *Base
+	durable string
 
 	started atomic.Bool
 	stopped atomic.Bool
@@ -170,8 +176,43 @@ func (r *relationAgent) Start(ctx context.Context) error {
 		return err
 	}
 	r.startLoops(ctx)
+	go r.retireLegacyConsumer(ctx)
 	r.core.log.Info("relation judge started", "shard", r.core.cfg.Shard, "shards", r.core.cfg.Shards)
 	return nil
+}
+
+// retireLegacyConsumer removes the pre-v2 durable after the widened consumer
+// has caught up. Filter widening alone does not replay messages the old durable
+// acknowledged under its narrower filter; the new DeliverAll durable does.
+func (r *relationAgent) retireLegacyConsumer(ctx context.Context) {
+	stream, err := r.core.bus.StreamNamed(ctx, bus.StreamStory)
+	if err != nil {
+		return
+	}
+	legacy := "relation"
+	if r.core.cfg.Shard >= 0 {
+		legacy = fmt.Sprintf("relation-%d", r.core.cfg.Shard)
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		consumer, err := stream.Consumer(ctx, r.durable)
+		if err == nil {
+			if info, infoErr := consumer.Info(ctx); infoErr == nil && info.NumPending == 0 && info.NumAckPending == 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if err := stream.DeleteConsumer(ctx, legacy); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+		r.core.log.Debug("relation: legacy consumer retirement deferred", "durable", legacy, "err", err)
+	}
 }
 
 func (r *relationAgent) startLoops(ctx context.Context) {
@@ -258,6 +299,34 @@ type relationEntry struct {
 	// rev is the local revision of this observation. A judgement captures the
 	// revisions of both endpoints and discards its result if either moved.
 	rev uint64
+	// contentSeq is the durable content revision (JetStream stream sequence of
+	// the latest content-changing story.changed, or a local counter in tests).
+	contentSeq uint64
+	judgedSeq  uint64
+}
+
+// relationStoryRecord is the durable per-story trigger state. The story/meta
+// payload makes restore independent of the separate clusterer writes, and
+// contentSeq is recorded before the input is acknowledged.
+type relationStoryRecord struct {
+	Story      []byte `json:"story"`
+	Meta       []byte `json:"meta"`
+	ContentSeq uint64 `json:"content_seq"`
+	JudgedSeq  uint64 `json:"judged_seq"`
+	Updated    int64  `json:"updated"`
+}
+
+// relationPairRecord is the durable judgement/output state for one unordered
+// pair. Published is set only after the link KV write and link.changed publish
+// succeed, so a failed output is retried instead of suppressed.
+type relationPairRecord struct {
+	A         string `json:"a"`
+	B         string `json:"b"`
+	SeqA      uint64 `json:"seq_a"`
+	SeqB      uint64 `json:"seq_b"`
+	Outcome   string `json:"outcome"` // link|remove|none
+	Link      []byte `json:"link,omitempty"`
+	Published bool   `json:"published"`
 }
 
 // relationLink is the in-memory relation plus the strength last persisted and
@@ -282,11 +351,20 @@ type relationCore struct {
 	pending   map[string]time.Time
 	links     map[string]*relationLink
 	judged    map[string][2]uint64
+	pairs     map[string]*relationPairRecord
+	dirty     map[string]bool
 	sink      LinkSink
 	work      chan string
 	pairLocks []sync.Mutex
 	revision  atomic.Uint64
+	localSeq  atomic.Uint64
 	lastDecay time.Time
+	lastRetry time.Time
+
+	// storyLocks serialise observe and the final seq check/commit for one
+	// story inside this process. Durable pair records provide the cross-process
+	// correctness; these locks avoid duplicate decider calls.
+	storyLocks [128]sync.Mutex
 
 	shards       int
 	shard        int
@@ -302,6 +380,7 @@ func (c *relationCore) init(ctx context.Context) error {
 		c.kv = nil
 	}
 	c.lastDecay = c.now()
+	c.localSeq.Store(1)
 	if c.kv != nil {
 		restoreCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
@@ -310,60 +389,138 @@ func (c *relationCore) init(ctx context.Context) error {
 	return nil
 }
 
+func relationStoryKey(id string) string { return "rel.s." + id }
+
+func relationPairKey(a, b string) string {
+	a, b = live.SortPair(a, b)
+	return "rel.p." + a + "." + b
+}
+
+func (c *relationCore) storyLock(id string) *sync.Mutex {
+	h := bus.StoryShard(id)
+	return &c.storyLocks[h%len(c.storyLocks)]
+}
+
 // restore rebuilds the candidate index from all live stories (not just this
 // shard's input) and the link table from live state. Without it a restarted
 // judge cannot re-evaluate or decay existing links.
 func (c *relationCore) restore(ctx context.Context) {
 	now := c.now().UTC()
-	lister, err := c.kv.ListKeysFiltered(ctx, "story.*")
-	if err != nil {
-		if !isKVNotFound(err) {
-			c.log.Warn("relation: restore stories", "err", err)
-		}
-		return
-	}
 	restored := 0
-	for key := range lister.Keys() {
-		if strings.HasPrefix(key, "storymeta.") || strings.HasPrefix(key, "storymap.") {
-			continue
+	// Durable trigger records are authoritative. Restore schedules every story
+	// whose latest content has not been fully judged, which recovers triggers
+	// acknowledged before a crash and seeds initial comparisons after a
+	// consumer/filter upgrade.
+	if lister, err := c.kv.ListKeysFiltered(ctx, "rel.s.>"); err == nil {
+		for key := range lister.Keys() {
+			entry, err := c.kv.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var rec relationStoryRecord
+			if json.Unmarshal(entry.Value(), &rec) != nil {
+				continue
+			}
+			var story dorv1.Story
+			if proto.Unmarshal(rec.Story, &story) != nil || story.Id == "" {
+				continue
+			}
+			var meta live.StoryMeta
+			if len(rec.Meta) > 0 {
+				_ = json.Unmarshal(rec.Meta, &meta)
+			}
+			rel := relationEntryFromRecord(&story, meta, rec, c.revision.Add(1))
+			rel.updated = rec.Updated
+			if rel.updated == 0 {
+				rel.updated = story.UpdatedAt
+			}
+			if rel.updated == 0 || now.Sub(time.Unix(rel.updated, 0)) > clusterStoryTTL {
+				_ = c.kv.Delete(ctx, key)
+				continue
+			}
+			rel.lat, rel.lon = storyCoords(&story)
+			if latest, ok := live.LoadStory(ctx, c.kv, story.Id); ok {
+				// Heat is derived and the clusterer owns its latest value.
+				story.Heat = latest.Heat
+				rel.story = &story
+			}
+			judged := c.loadJudgedSeq(ctx, story.Id)
+			rel.judgedSeq = judged
+			if judged < rec.ContentSeq || rec.ContentSeq == 0 {
+				c.pending[story.Id] = now.Add(c.cfg.Debounce)
+			}
+			c.index[story.Id] = rel
+			restored++
 		}
-		entry, err := c.kv.Get(ctx, key)
-		if err != nil {
-			continue
+		_ = lister.Stop()
+	}
+
+	// Legacy stories (written before rel.s existed) still need a durable
+	// record; create one and schedule the initial comparison.
+	if lister, err := c.kv.ListKeysFiltered(ctx, "story.*"); err == nil {
+		for key := range lister.Keys() {
+			if !strings.HasPrefix(key, "story.") || strings.HasPrefix(key, "storymeta.") || strings.HasPrefix(key, "storymap.") {
+				continue
+			}
+			id := strings.TrimPrefix(key, "story.")
+			if c.index[id] != nil {
+				continue
+			}
+			entry, err := c.kv.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var story dorv1.Story
+			if proto.Unmarshal(entry.Value(), &story) != nil || story.Id == "" {
+				continue
+			}
+			updated := story.UpdatedAt
+			if updated == 0 {
+				updated = story.FirstSeen
+			}
+			if updated == 0 || now.Sub(time.Unix(updated, 0)) > clusterStoryTTL {
+				continue
+			}
+			meta, _ := live.LoadStoryMeta(ctx, c.kv, story.Id)
+			rec := relationStoryRecord{ContentSeq: 1, JudgedSeq: 0, Updated: updated}
+			rec.Story, _ = proto.Marshal(&story)
+			rec.Meta, _ = json.Marshal(meta)
+			if data, err := json.Marshal(rec); err == nil {
+				_, _ = c.kv.Put(ctx, relationStoryKey(story.Id), data)
+			}
+			rel := relationEntryFromRecord(&story, meta, rec, c.revision.Add(1))
+			rel.updated = updated
+			rel.lat, rel.lon = storyCoords(&story)
+			c.index[story.Id] = rel
+			c.pending[story.Id] = now.Add(c.cfg.Debounce)
+			restored++
 		}
-		var story dorv1.Story
-		if proto.Unmarshal(entry.Value(), &story) != nil || story.Id == "" {
-			continue
-		}
-		updated := story.UpdatedAt
-		if updated == 0 {
-			updated = story.FirstSeen
-		}
-		if updated == 0 || now.Sub(time.Unix(updated, 0)) > clusterStoryTTL {
-			continue
-		}
-		rel := &relationEntry{
-			story:     &story,
-			firstSeen: story.FirstSeen,
-			updated:   updated,
-			rev:       c.revision.Add(1),
-		}
-		if rel.firstSeen == 0 {
-			rel.firstSeen = updated
-		}
-		if meta, ok := live.LoadStoryMeta(ctx, c.kv, story.Id); ok {
-			rel.meta = meta
-			rel.vec = meta.Embedding
-			rel.entities = meta.Entities
-			if meta.FirstSeen > 0 {
-				rel.firstSeen = meta.FirstSeen
+		_ = lister.Stop()
+	}
+
+	// Pair records are the durable judgement ledger. Populate the local
+	// dedupe cache and the retry set; the ledger is bounded by the 48 h TTL
+	// and explicit eviction.
+	if lister, err := c.kv.ListKeysFiltered(ctx, "rel.p.>"); err == nil {
+		for key := range lister.Keys() {
+			entry, err := c.kv.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var rec relationPairRecord
+			if json.Unmarshal(entry.Value(), &rec) != nil || rec.A == "" || rec.B == "" {
+				continue
+			}
+			pkey := relationPairKey(rec.A, rec.B)
+			c.pairs[pkey] = &rec
+			if rec.Published {
+				c.judged[pairKey(rec.A, rec.B)] = [2]uint64{rec.SeqA, rec.SeqB}
+			} else {
+				c.dirty[pkey] = true
 			}
 		}
-		rel.lat, rel.lon = storyCoords(&story)
-		c.index[story.Id] = rel
-		restored++
+		_ = lister.Stop()
 	}
-	_ = lister.Stop()
 
 	linkLister, err := c.kv.ListKeysFiltered(ctx, "link.>")
 	if err != nil {
@@ -400,12 +557,41 @@ func (c *relationCore) restore(ctx context.Context) {
 	c.log.Info("relation: restored live state", "stories", restored, "links", links)
 }
 
+func relationEntryFromRecord(story *dorv1.Story, meta live.StoryMeta, rec relationStoryRecord, rev uint64) *relationEntry {
+	e := &relationEntry{
+		story:      story,
+		meta:       meta,
+		vec:        meta.Embedding,
+		entities:   meta.Entities,
+		firstSeen:  meta.FirstSeen,
+		updated:    rec.Updated,
+		rev:        rev,
+		contentSeq: rec.ContentSeq,
+		judgedSeq:  rec.JudgedSeq,
+	}
+	if e.firstSeen == 0 {
+		e.firstSeen = story.FirstSeen
+	}
+	if e.updated == 0 {
+		e.updated = story.UpdatedAt
+	}
+	return e
+}
+
 // observe indexes a story on every judge and schedules a debounced judgement.
 // Judgement execution is still partitioned per pair in ownsPair, so observing
 // on every shard does not double-judge a pair.
 func (c *relationCore) observe(ctx context.Context, story *dorv1.Story) {
+	_ = c.observeSeq(ctx, story, 0)
+}
+
+// observeSeq records the latest content revision before acknowledging the
+// input. streamSeq is the JetStream sequence of the story.changed message; a
+// message older than the recorded content is an obsolete replay and is
+// ignored, even if it arrives after a restart restored newer state.
+func (c *relationCore) observeSeq(ctx context.Context, story *dorv1.Story, streamSeq uint64) error {
 	if story == nil || story.Id == "" {
-		return
+		return nil
 	}
 	now := c.now()
 	entry := &relationEntry{story: story, firstSeen: story.FirstSeen}
@@ -431,9 +617,14 @@ func (c *relationCore) observe(ctx context.Context, story *dorv1.Story) {
 	if entry.updated > now.Unix() {
 		entry.updated = now.Unix()
 	}
+
+	lock := c.storyLock(story.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
 	c.mu.Lock()
-	changed := true
-	if prev := c.index[story.Id]; prev != nil {
+	prev := c.index[story.Id]
+	if prev != nil {
 		// A metadata read can race the clusterer's write. Do not lose the
 		// embedding/entities or the original event time on a partial read.
 		if len(entry.vec) == 0 {
@@ -448,25 +639,97 @@ func (c *relationCore) observe(ctx context.Context, story *dorv1.Story) {
 		if entry.firstSeen == now.Unix() && prev.firstSeen > 0 {
 			entry.firstSeen = prev.firstSeen
 		}
-		// Heat cooling republishes a story with unchanged content. It must
-		// refresh the heat used by decay without triggering a new pair
-		// judgement or advancing the content revision.
-		changed = !storyContentEqual(prev.story, story) ||
-			prev.meta.UpdatedAt != entry.meta.UpdatedAt ||
-			!slices.Equal(prev.entities, entry.entities) ||
-			!equalVectors(prev.vec, entry.vec)
-		if !changed {
-			entry.rev = prev.rev
-		}
-	}
-	if changed || entry.rev == 0 {
-		entry.rev = c.revision.Add(1)
-	}
-	c.index[story.Id] = entry
-	if changed {
-		c.pending[story.Id] = now.Add(c.cfg.Debounce)
 	}
 	c.mu.Unlock()
+
+	// Reject an obsolete replay before it can replace newer restored content.
+	if prev != nil && prev.contentSeq > 0 {
+		if streamSeq > 0 && streamSeq <= prev.contentSeq {
+			return nil
+		}
+		if streamSeq == 0 && prev.updated > 0 && entry.updated > 0 && entry.updated < prev.updated {
+			return nil
+		}
+	}
+
+	changed := prev == nil || !storyContentEqual(prev.story, story) ||
+		prev.meta.UpdatedAt != entry.meta.UpdatedAt ||
+		!slices.Equal(prev.entities, entry.entities) ||
+		!equalVectors(prev.vec, entry.vec)
+	if !changed {
+		// Heat cooling republishes a story with unchanged content. Refresh the
+		// heat used by decay without advancing the content revision or
+		// scheduling a judgement.
+		c.mu.Lock()
+		prev.story = story
+		prev.lat, prev.lon = entry.lat, entry.lon
+		entry.rev = prev.rev
+		entry.contentSeq = prev.contentSeq
+		entry.meta = prev.meta
+		c.mu.Unlock()
+		return nil
+	}
+
+	seq := streamSeq
+	if seq == 0 {
+		seq = c.localSeq.Add(1)
+	}
+	rec := relationStoryRecord{ContentSeq: seq, Updated: entry.updated}
+	if prev != nil {
+		rec.JudgedSeq = prev.judgedSeq
+	}
+	rec.Story, _ = proto.Marshal(story)
+	rec.Meta, _ = json.Marshal(entry.meta)
+	if err := c.storeStoryRecord(ctx, story.Id, &rec); err != nil {
+		return err
+	}
+	entry.contentSeq = seq
+	entry.rev = c.revision.Add(1)
+	c.mu.Lock()
+	c.index[story.Id] = entry
+	c.pending[story.Id] = now.Add(c.cfg.Debounce)
+	c.mu.Unlock()
+	return nil
+}
+
+// storeStoryRecord writes the durable content revision with CAS. A concurrent
+// story update from another judge either wins (higher sequence) or is retried.
+func (c *relationCore) storeStoryRecord(ctx context.Context, storyID string, rec *relationStoryRecord) error {
+	if c.kv == nil {
+		return nil
+	}
+	key := relationStoryKey(storyID)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		entry, err := c.kv.Get(ctx, key)
+		if err == nil {
+			var existing relationStoryRecord
+			if json.Unmarshal(entry.Value(), &existing) == nil {
+				if existing.ContentSeq >= rec.ContentSeq {
+					return nil
+				}
+				if existing.JudgedSeq > rec.JudgedSeq {
+					rec.JudgedSeq = existing.JudgedSeq
+				}
+			}
+			if _, err := c.kv.Update(ctx, key, data, entry.Revision()); err == nil {
+				return nil
+			}
+			continue
+		}
+		if !isKVNotFound(err) {
+			return err
+		}
+		if _, err := c.kv.Create(ctx, key, data); err == nil {
+			return nil
+		} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			return err
+		}
+	}
+	return fmt.Errorf("relation: story record contention for %s", storyID)
 }
 
 // storyContentEqual compares the relation-relevant story fields. Heat is
@@ -518,7 +781,7 @@ func storyCoords(story *dorv1.Story) (float64, float64) {
 // pairKey is the stable pair identity used by the link table and locks.
 func pairKey(a, b string) string {
 	a, b = live.SortPair(a, b)
-	return a + "." + b
+	return a + "|" + b
 }
 
 // pairShard assigns each unordered pair to exactly one judge. Both endpoint
@@ -573,6 +836,10 @@ func (c *relationCore) scheduleLoop(ctx context.Context) {
 				}
 			}
 			c.decay(ctx, now)
+			if c.lastRetry.IsZero() || now.Sub(c.lastRetry) >= 5*time.Second {
+				c.lastRetry = now
+				c.retryOutputs(ctx)
+			}
 		}
 	}
 }
@@ -611,12 +878,30 @@ func (c *relationCore) decay(ctx context.Context, now time.Time) {
 	}
 	var victims []victim
 	var fades []fade
+	var evicted []string
+	var evictedPairs []string
 	c.mu.Lock()
 	cutoff := now.Add(-clusterStoryTTL).Unix()
 	for id, e := range c.index {
 		if e == nil || e.updated < cutoff {
 			delete(c.index, id)
 			delete(c.pending, id)
+			evicted = append(evicted, id)
+		}
+	}
+	for _, id := range evicted {
+		for key := range c.judged {
+			a, b, ok := strings.Cut(key, "|")
+			if ok && (a == id || b == id) {
+				delete(c.judged, key)
+			}
+		}
+		for key, rec := range c.pairs {
+			if rec != nil && (rec.A == id || rec.B == id) {
+				delete(c.pairs, key)
+				delete(c.dirty, key)
+				evictedPairs = append(evictedPairs, key)
+			}
 		}
 	}
 	for key, l := range c.links {
@@ -645,6 +930,17 @@ func (c *relationCore) decay(ctx context.Context, now time.Time) {
 	}
 	c.mu.Unlock()
 
+	for _, id := range evicted {
+		if c.kv != nil {
+			_ = c.kv.Delete(ctx, relationStoryKey(id))
+			_ = c.kv.Delete(ctx, relationJudgedKey(id, c.shard))
+		}
+	}
+	for _, key := range evictedPairs {
+		if c.kv != nil {
+			_ = c.kv.Delete(ctx, key)
+		}
+	}
 	for _, v := range victims {
 		c.tombstone(ctx, v.a, v.b)
 	}
@@ -726,6 +1022,10 @@ func (c *relationCore) invalidateLinkText(ctx context.Context, a, b string) {
 func (c *relationCore) judge(ctx context.Context, id string) {
 	c.mu.Lock()
 	entry := c.index[id]
+	seq := uint64(0)
+	if entry != nil {
+		seq = entry.contentSeq
+	}
 	c.mu.Unlock()
 	if entry == nil {
 		return
@@ -738,18 +1038,23 @@ func (c *relationCore) judge(ctx context.Context, id string) {
 		if !c.ownsPair(entry.story.Id, other.story.Id) {
 			continue
 		}
-		c.judgePair(ctx, entry, other)
+		if err := c.judgePair(ctx, entry, other); err != nil {
+			c.log.Warn("relation: judgement deferred", "a", entry.story.Id, "b", other.story.Id, "err", err)
+			c.reschedule(id)
+			return
+		}
 	}
+	c.markStoryJudged(ctx, id, seq)
 }
 
-// judgePair serialises one pair, judges it from the current story revisions and
-// discards a result whose inputs changed while the model was answering. A
-// changed story is rescheduled by observe, so the pair is re-judged with the
-// newer state instead of letting a stale answer win.
-func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
+// judgePair serialises one pair, judges it from the current content revisions
+// and commits the result through a durable pair record. A result whose inputs
+// changed before the commit is discarded; a failed output stays unpublished
+// and is retried from the record.
+func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) error {
 	aid, bid := live.SortPair(a.story.Id, b.story.Id)
 	if aid == bid {
-		return
+		return nil
 	}
 	lock := c.lockPair(aid, bid)
 	lock.Lock()
@@ -759,84 +1064,176 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) {
 	ea, eb := c.index[aid], c.index[bid]
 	c.mu.Unlock()
 	if ea == nil || eb == nil {
-		return
+		return nil
 	}
-	revA, revB := ea.rev, eb.rev
-	key := pairKey(aid, bid)
+	if !c.ownsPair(aid, bid) {
+		return nil
+	}
+	seqA, seqB := c.currentSeqs(ctx, aid, bid)
+	key := relationPairKey(aid, bid)
 	c.mu.Lock()
-	last, judged := c.judged[key]
+	last, judged := c.judged[pairKey(aid, bid)]
 	c.mu.Unlock()
-	if judged && last[0] == revA && last[1] == revB {
-		// Both endpoints changed since the last judgement, but this trigger
-		// carries revisions the pair was already judged against. Do not spend
-		// a second model call on the same inputs.
-		return
+	if judged && last[0] == seqA && last[1] == seqB {
+		return nil
+	}
+	rec, rev, exists, err := c.loadPairRecord(ctx, key)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if rec.SeqA == seqA && rec.SeqB == seqB {
+			if rec.Published {
+				c.cacheJudged(aid, seqA, bid, seqB)
+				return nil
+			}
+			return c.applyPairOutput(ctx, key, rec, rev)
+		}
+		if rec.SeqA > seqA || rec.SeqB > seqB {
+			return nil
+		}
 	}
 
-	// The request order is the sorted order, so the direction is relative to
-	// the same pair the Link stores.
 	first, second := ea, eb
 	if first.story.Id != aid {
 		first, second = eb, ea
 	}
 	inA := c.storyInput(ctx, first)
 	inB := c.storyInput(ctx, second)
+	var link *dorv1.Link
 	if c.cfg.Decider == nil {
-		c.fallbackFenced(ctx, aid, revA, bid, revB, ea, eb)
-		return
+		link = fallbackLink(ea, eb, c.now())
+	} else {
+		priority := relationPriority(ea, eb, c.now())
+		resp, err := c.cfg.Decider.Decide(ctx, relateRequest(inA, inB, priority))
+		if err != nil {
+			c.log.Debug("relation: jev unavailable; similarity-only link", "a", aid, "b", bid, "err", err)
+			link = fallbackLink(ea, eb, c.now())
+		} else {
+			res := decide.CombineRelate(resp, inA, inB, c.cfg.Thresholds)
+			if !res.Answered {
+				link = fallbackLink(ea, eb, c.now())
+			} else if !res.Accepted {
+				link = nil
+			} else {
+				link = &dorv1.Link{
+					A:          aid,
+					B:          bid,
+					Type:       linkType(res.Type),
+					Dir:        linkDir(res.Direction),
+					Confidence: float32(res.RelatedP),
+					Strength:   float32(res.Strength),
+					UpdatedAt:  c.now().Unix(),
+				}
+			}
+		}
 	}
-	priority := relationPriority(ea, eb, c.now())
-	resp, err := c.cfg.Decider.Decide(ctx, relateRequest(inA, inB, priority))
-	if err != nil {
-		c.log.Debug("relation: jev unavailable; similarity-only link", "a", aid, "b", bid, "err", err)
-		c.fallbackFenced(ctx, aid, revA, bid, revB, ea, eb)
-		return
-	}
-	res := decide.CombineRelate(resp, inA, inB, c.cfg.Thresholds)
-	if !res.Answered {
-		c.fallbackFenced(ctx, aid, revA, bid, revB, ea, eb)
-		return
-	}
-	if !c.currentRevisions(aid, revA, bid, revB) {
+	// Fence before writing the durable result. The concurrent writer cannot
+	// change the pair record between this check and the CAS commit because the
+	// pair record CAS rejects an older sequence pair; a later content change
+	// reschedules both stories.
+	if !c.seqsCurrent(ctx, aid, seqA, bid, seqB) {
 		c.reschedule(aid)
 		c.reschedule(bid)
-		return
+		return nil
 	}
-	if !res.Accepted {
-		c.removeLinkLocked(ctx, aid, bid)
-		c.markJudged(aid, revA, bid, revB)
-		return
+	pr := &relationPairRecord{A: aid, B: bid, SeqA: seqA, SeqB: seqB}
+	if link != nil {
+		pr.Outcome = "link"
+		pr.Link, _ = proto.MarshalOptions{Deterministic: true}.Marshal(link)
+	} else if c.linkExists(ctx, aid, bid) {
+		pr.Outcome = "remove"
+	} else {
+		pr.Outcome = "none"
 	}
-	link := &dorv1.Link{
-		A:          aid,
-		B:          bid,
-		Type:       linkType(res.Type),
-		Dir:        linkDir(res.Direction),
-		Confidence: float32(res.RelatedP),
-		Strength:   float32(res.Strength),
-		UpdatedAt:  c.now().Unix(),
+	rev, err = c.storePairRecord(ctx, key, pr, rev, exists)
+	if err != nil {
+		return err
 	}
-	c.upsertLinkLocked(ctx, link)
-	c.markJudged(aid, revA, bid, revB)
+	return c.applyPairOutput(ctx, key, pr, rev)
 }
 
-func (c *relationCore) markJudged(aid string, revA uint64, bid string, revB uint64) {
+func (c *relationCore) cacheJudged(aid string, seqA uint64, bid string, seqB uint64) {
 	c.mu.Lock()
-	c.judged[pairKey(aid, bid)] = [2]uint64{revA, revB}
+	c.judged[pairKey(aid, bid)] = [2]uint64{seqA, seqB}
 	c.mu.Unlock()
 }
 
-func (c *relationCore) currentRevisions(aid string, revA uint64, bid string, revB uint64) bool {
+// currentSeqs reads the authoritative content revisions for both endpoints.
+func (c *relationCore) currentSeqs(ctx context.Context, aid, bid string) (uint64, uint64) {
+	seqA, seqB := c.entrySeq(aid), c.entrySeq(bid)
+	if c.kv != nil {
+		for _, item := range []struct {
+			id  string
+			out *uint64
+		}{{aid, &seqA}, {bid, &seqB}} {
+			if entry, err := c.kv.Get(ctx, relationStoryKey(item.id)); err == nil {
+				var rec relationStoryRecord
+				if json.Unmarshal(entry.Value(), &rec) == nil && rec.ContentSeq > *item.out {
+					*item.out = rec.ContentSeq
+				}
+			}
+		}
+	}
+	return seqA, seqB
+}
+
+func (c *relationCore) entrySeq(id string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ea, eb := c.index[aid], c.index[bid]
-	return ea != nil && eb != nil && ea.rev == revA && eb.rev == revB
+	if e := c.index[id]; e != nil {
+		if e.contentSeq > 0 {
+			return e.contentSeq
+		}
+		return e.rev
+	}
+	return 0
+}
+
+func (c *relationCore) seqsCurrent(ctx context.Context, aid string, seqA uint64, bid string, seqB uint64) bool {
+	gotA, gotB := c.currentSeqs(ctx, aid, bid)
+	return gotA == seqA && gotB == seqB
 }
 
 func (c *relationCore) reschedule(id string) {
 	c.mu.Lock()
 	c.pending[id] = c.now().Add(c.cfg.Debounce)
 	c.mu.Unlock()
+}
+
+// markStoryJudged records the content revision this shard finished evaluating.
+// Per-shard keys avoid one shard clearing another shard's pending pairs.
+func (c *relationCore) markStoryJudged(ctx context.Context, id string, seq uint64) {
+	if seq == 0 || c.kv == nil {
+		return
+	}
+	key := relationJudgedKey(id, c.shard)
+	if _, err := c.kv.Put(ctx, key, []byte(fmt.Sprint(seq))); err != nil {
+		c.log.Debug("relation: judged revision write deferred", "story", id, "err", err)
+		return
+	}
+	c.mu.Lock()
+	if e := c.index[id]; e != nil && e.contentSeq == seq {
+		e.judgedSeq = seq
+	}
+	c.mu.Unlock()
+}
+
+func relationJudgedKey(id string, shard int) string {
+	return fmt.Sprintf("rel.j.%s.%d", id, shard)
+}
+
+func (c *relationCore) loadJudgedSeq(ctx context.Context, id string) uint64 {
+	if c.kv == nil {
+		return 0
+	}
+	entry, err := c.kv.Get(ctx, relationJudgedKey(id, c.shard))
+	if err != nil {
+		return 0
+	}
+	var seq uint64
+	_, _ = fmt.Sscanf(string(entry.Value()), "%d", &seq)
+	return seq
 }
 
 // relationPriority tags a likely causal/reaction pair as default work so the
@@ -860,36 +1257,24 @@ func relationPriority(a, b *relationEntry, now time.Time) budget.Priority {
 	return budget.PriorityThematic
 }
 
-// fallbackFenced runs the deterministic fallback only when both inputs still
-// hold the revisions the judgement started with.
-func (c *relationCore) fallbackFenced(ctx context.Context, aid string, revA uint64, bid string, revB uint64, a, b *relationEntry) {
-	if !c.currentRevisions(aid, revA, bid, revB) {
-		c.reschedule(aid)
-		c.reschedule(bid)
-		return
-	}
-	c.fallbackLocked(ctx, a, b)
-	c.markJudged(aid, revA, bid, revB)
-}
-
-// fallbackLocked emits a similarity-only thematic link, explicitly unverified.
-// It never invents a causal or reaction type. The caller holds the pair lock.
-func (c *relationCore) fallbackLocked(ctx context.Context, a, b *relationEntry) {
-	score := cheapScore(a, b, c.now())
+// fallbackLink emits a similarity-only thematic link, explicitly unverified. It
+// never invents a causal or reaction type.
+func fallbackLink(a, b *relationEntry, now time.Time) *dorv1.Link {
+	score := cheapScore(a, b, now)
 	if score < 0.3 {
-		return
+		return nil
 	}
 	aid, bid := live.SortPair(a.story.Id, b.story.Id)
-	c.upsertLinkLocked(ctx, &dorv1.Link{
+	return &dorv1.Link{
 		A:          aid,
 		B:          bid,
 		Type:       dorv1.LinkType_LINK_TYPE_THEMATIC,
 		Dir:        dorv1.Direction_DIRECTION_UNCLEAR,
 		Confidence: float32(score),
 		Strength:   float32(score),
-		UpdatedAt:  c.now().Unix(),
+		UpdatedAt:  now.Unix(),
 		Unverified: true,
-	})
+	}
 }
 
 // relateRequest sets the budget priority the judge selected from cheap pair
@@ -900,7 +1285,277 @@ func relateRequest(a, b decide.Story, priority budget.Priority) decide.Request {
 	return req
 }
 
-// upsertLinkLocked writes one relation. The caller holds the pair lock.
+func (c *relationCore) loadPairRecord(ctx context.Context, key string) (*relationPairRecord, uint64, bool, error) {
+	if c.kv == nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if rec := c.pairs[key]; rec != nil {
+			cp := *rec
+			return &cp, 0, true, nil
+		}
+		return nil, 0, false, nil
+	}
+	entry, err := c.kv.Get(ctx, key)
+	if err != nil {
+		if isKVNotFound(err) {
+			return nil, 0, false, nil
+		}
+		return nil, 0, false, err
+	}
+	var rec relationPairRecord
+	if json.Unmarshal(entry.Value(), &rec) != nil {
+		return nil, 0, false, errors.New("relation: malformed pair record")
+	}
+	return &rec, entry.Revision(), true, nil
+}
+
+// storePairRecord writes the durable judgement with CAS. An older sequence
+// pair never overwrites a newer record.
+func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *relationPairRecord, rev uint64, exists bool) (uint64, error) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return 0, err
+	}
+	if c.kv == nil {
+		c.mu.Lock()
+		cp := *rec
+		c.pairs[key] = &cp
+		c.mu.Unlock()
+		return 0, nil
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if exists {
+			if updated, err := c.kv.Update(ctx, key, data, rev); err == nil {
+				c.rememberPair(key, rec)
+				return updated, nil
+			}
+		} else {
+			if created, err := c.kv.Create(ctx, key, data); err == nil {
+				c.rememberPair(key, rec)
+				return created, nil
+			} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+				return 0, err
+			}
+		}
+		// Reconcile with the winner.
+		entry, err := c.kv.Get(ctx, key)
+		if err != nil {
+			if isKVNotFound(err) {
+				exists = false
+				continue
+			}
+			return 0, err
+		}
+		var current relationPairRecord
+		if json.Unmarshal(entry.Value(), &current) == nil {
+			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
+				return entry.Revision(), nil
+			}
+			if current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
+				return entry.Revision(), nil
+			}
+		}
+		rev, exists = entry.Revision(), true
+	}
+	return 0, errors.New("relation: pair record contention")
+}
+
+func (c *relationCore) rememberPair(key string, rec *relationPairRecord) {
+	c.mu.Lock()
+	cp := *rec
+	c.pairs[key] = &cp
+	if rec.Published {
+		delete(c.dirty, key)
+	} else {
+		c.dirty[key] = true
+	}
+	c.mu.Unlock()
+}
+
+func (c *relationCore) deletePairRecord(ctx context.Context, a, b string, rev uint64) {
+	key := relationPairKey(a, b)
+	c.mu.Lock()
+	delete(c.pairs, key)
+	delete(c.dirty, key)
+	delete(c.judged, key)
+	c.mu.Unlock()
+	if c.kv == nil {
+		return
+	}
+	if rev > 0 {
+		// Conditional so a concurrent newer judgement is never deleted.
+		_ = c.kv.Purge(ctx, key, jetstream.LastRevision(rev))
+		return
+	}
+	_ = c.kv.Delete(ctx, key)
+}
+
+func (c *relationCore) linkExists(ctx context.Context, a, b string) bool {
+	c.mu.Lock()
+	rel := c.links[pairKey(a, b)]
+	c.mu.Unlock()
+	if rel != nil && rel.link != nil {
+		return true
+	}
+	if c.kv != nil {
+		if link, ok := live.LoadLink(ctx, c.kv, a, b); ok && link.Strength > 0 && link.Confidence > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// applyPairOutput writes/publishes a durable pair outcome. Published is set
+// only after every output succeeds, so a crash or failed publish leaves the
+// record recoverable.
+func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
+	switch rec.Outcome {
+	case "none":
+		return c.markPairPublished(ctx, key, rec, rev)
+	case "remove":
+		a, b := live.SortPair(rec.A, rec.B)
+		tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
+		if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
+			return errors.New("relation: link tombstone KV write failed")
+		}
+		if err := c.publishLink(ctx, tombstone, rec.SeqA, rec.SeqB, true); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		delete(c.links, pairKey(a, b))
+		c.mu.Unlock()
+		if c.sink != nil {
+			c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
+		}
+		c.invalidateLinkText(ctx, a, b)
+		return c.markPairPublished(ctx, key, rec, rev)
+	case "link":
+		var link dorv1.Link
+		if err := proto.Unmarshal(rec.Link, &link); err != nil {
+			return err
+		}
+		link.A, link.B = live.SortPair(link.A, link.B)
+		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
+		}
+		if c.kv != nil && !live.PutLink(ctx, c.kv, &link) {
+			return errors.New("relation: link KV write failed")
+		}
+		// Re-check after the write: a story update may have landed while the
+		// KV write was in flight.
+		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+			c.rollbackLink(ctx, &link)
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
+		}
+		if err := c.publishLink(ctx, &link, rec.SeqA, rec.SeqB, false); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
+		c.mu.Unlock()
+		c.invalidateLinkText(ctx, link.A, link.B)
+		if c.sink != nil {
+			c.sink.EnqueueLink(store.LinkRecord{
+				A: link.A, B: link.B, Type: int16(link.Type), Direction: int16(link.Dir),
+				Confidence: link.Confidence, Strength: link.Strength, Unverified: link.Unverified,
+				UpdatedAt: time.Unix(link.UpdatedAt, 0).UTC(),
+				DecaysAt:  time.Unix(link.UpdatedAt, 0).UTC().Add(48 * time.Hour),
+			})
+		}
+		return c.markPairPublished(ctx, key, rec, rev)
+	default:
+		return fmt.Errorf("relation: unknown pair outcome %q", rec.Outcome)
+	}
+}
+
+func (c *relationCore) rollbackLink(ctx context.Context, link *dorv1.Link) {
+	if c.kv == nil {
+		return
+	}
+	current, ok := live.LoadLink(ctx, c.kv, link.A, link.B)
+	if !ok || live.LinkRevision(current) != live.LinkRevision(link) {
+		return
+	}
+	_ = c.kv.Delete(ctx, live.LinkKey(link.A, link.B))
+	c.mu.Lock()
+	if rel := c.links[pairKey(link.A, link.B)]; rel != nil && rel.link != nil && live.LinkRevision(rel.link) == live.LinkRevision(link) {
+		delete(c.links, pairKey(link.A, link.B))
+	}
+	c.mu.Unlock()
+}
+
+func (c *relationCore) publishLink(ctx context.Context, link *dorv1.Link, seqA, seqB uint64, remove bool) error {
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(link)
+	if err != nil {
+		return err
+	}
+	msgID := pairMessageID(link.A, link.B, seqA, seqB, remove)
+	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(msgID)); err != nil {
+		return fmt.Errorf("relation: publish link: %w", err)
+	}
+	return nil
+}
+
+func pairMessageID(a, b string, seqA, seqB uint64, remove bool) string {
+	a, b = live.SortPair(a, b)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", a, b, seqA, seqB)))
+	suffix := ""
+	if remove {
+		suffix = ":rm"
+	}
+	return "link:" + a + "." + b + ":" + hex.EncodeToString(sum[:8]) + suffix
+}
+
+func (c *relationCore) markPairPublished(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
+	rec.Published = true
+	if c.kv == nil {
+		c.rememberPair(key, rec)
+		return nil
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	// The record may have been superseded while the output was in flight.
+	if _, err := c.kv.Update(ctx, key, data, rev); err != nil {
+		if errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			return nil
+		}
+		return err
+	}
+	c.rememberPair(key, rec)
+	c.cacheJudged(rec.A, rec.SeqA, rec.B, rec.SeqB)
+	return nil
+}
+
+// retryOutputs republishes durable outputs whose publish previously failed.
+func (c *relationCore) retryOutputs(ctx context.Context) {
+	c.mu.Lock()
+	dirty := make([]string, 0, len(c.dirty))
+	for key := range c.dirty {
+		dirty = append(dirty, key)
+	}
+	c.mu.Unlock()
+	for _, key := range dirty {
+		rec, rev, ok, err := c.loadPairRecord(ctx, key)
+		if err != nil || !ok || rec.Published {
+			continue
+		}
+		if err := c.applyPairOutput(ctx, key, rec, rev); err != nil {
+			c.log.Debug("relation: output retry deferred", "pair", key, "err", err)
+		}
+	}
+}
+
+// upsertLinkLocked persists a decayed link. The caller holds the pair lock.
 func (c *relationCore) upsertLinkLocked(ctx context.Context, link *dorv1.Link) {
 	if link == nil || link.A == "" || link.B == "" {
 		return
@@ -909,10 +1564,11 @@ func (c *relationCore) upsertLinkLocked(ctx context.Context, link *dorv1.Link) {
 	if link.UpdatedAt == 0 {
 		link.UpdatedAt = c.now().Unix()
 	}
-	live.PutLink(ctx, c.kv, link)
-	key := pairKey(link.A, link.B)
+	if c.kv != nil {
+		live.PutLink(ctx, c.kv, link)
+	}
 	c.mu.Lock()
-	c.links[key] = &relationLink{link: link, publishedStrength: float64(link.Strength)}
+	c.links[pairKey(link.A, link.B)] = &relationLink{link: link, publishedStrength: float64(link.Strength)}
 	c.mu.Unlock()
 	c.invalidateLinkText(ctx, link.A, link.B)
 	if c.sink != nil {
@@ -929,46 +1585,44 @@ func (c *relationCore) upsertLinkLocked(ctx context.Context, link *dorv1.Link) {
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data,
-		bus.WithMsgID(linkMessageID(link)))
-	if err != nil {
-		c.log.Warn("relation: publish link", "a", link.A, "b", link.B, "err", err)
+	if _, err := c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(linkMessageID(link))); err != nil {
+		c.log.Debug("relation: decay publish deferred", "a", link.A, "b", link.B, "err", err)
 	}
 }
 
-// linkMessageID is revision-based, not second-resolution. Two different
-// judgements in the same second therefore have different ids, while a replay
-// of the identical relation is deduplicated by JetStream.
 func linkMessageID(link *dorv1.Link) string {
 	return fmt.Sprintf("link:%s.%s:%016x", link.A, link.B, live.LinkRevision(link))
 }
 
-// removeLinkLocked writes the zero-strength tombstone the publisher maps to
-// Delta.link_remove. The caller holds the pair lock. A pair that exists in KV
-// but not in this process's table is still removed.
+// removeLinkLocked writes a decay/eviction tombstone. The caller holds the
+// pair lock. The durable judgement ledger entry is dropped with the link.
 func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 	a, b = live.SortPair(a, b)
 	key := pairKey(a, b)
 	c.mu.Lock()
 	existing := c.links[key]
 	delete(c.links, key)
+	delete(c.judged, key)
+	delete(c.pairs, key)
+	delete(c.dirty, key)
 	c.mu.Unlock()
+	if c.kv != nil && existing != nil {
+		_ = c.kv.Delete(ctx, relationPairKey(a, b))
+	}
 	if existing == nil {
 		return
 	}
-	tombstone := &dorv1.Link{
-		A:         a,
-		B:         b,
-		UpdatedAt: c.now().Unix(),
-	}
-	if existing != nil && existing.link != nil {
+	tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
+	if existing.link != nil {
 		tombstone.Type = existing.link.Type
 		tombstone.Dir = existing.link.Dir
+	}
+	if c.kv != nil {
+		live.PutLink(ctx, c.kv, tombstone)
 	}
 	if c.sink != nil {
 		c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
 	}
-	live.PutLink(ctx, c.kv, tombstone)
 	c.invalidateLinkText(ctx, a, b)
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(tombstone)
 	if err != nil {
@@ -976,8 +1630,7 @@ func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, _ = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data,
-		bus.WithMsgID(linkMessageID(tombstone)))
+	_, _ = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(linkMessageID(tombstone)))
 }
 
 func (c *relationCore) storyInput(ctx context.Context, e *relationEntry) decide.Story {

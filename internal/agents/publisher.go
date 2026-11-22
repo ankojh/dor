@@ -373,6 +373,9 @@ type publisherCore struct {
 	// Cooling accumulates against this, not against UpdatedAt, so repeated
 	// ticks do not re-apply the same decay.
 	cooledAt map[string]int64
+	// coolDue bounds the cooling scan rate without taking c.mu. Tests and
+	// callers may invoke coolStories often; the scan itself is periodic.
+	coolDue atomic.Int64
 }
 
 func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
@@ -502,12 +505,38 @@ func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) 
 // connected clients receive an explicit removal delta.
 func (c *publisherCore) expireStories(now time.Time) {
 	c.mu.Lock()
+	// A story may have a newer acknowledged update waiting for (or inside)
+	// the publication batch. Expiry must use the effective content: pending
+	// wins over in-flight wins over committed. Anything else would expire a
+	// story whose fresh input is then acknowledged against an expiry delta.
+	effective := func(id string) int64 {
+		if d := c.pending["story:"+id]; d != nil {
+			if s := d.GetStoryUpsert(); s != nil {
+				return s.UpdatedAt
+			}
+		}
+		if c.inflight != nil {
+			for _, d := range c.inflight.deltas {
+				if s := d.GetStoryUpsert(); s != nil && s.Id == id {
+					return s.UpdatedAt
+				}
+			}
+		}
+		if s := c.stories[id]; s != nil {
+			return s.UpdatedAt
+		}
+		return 0
+	}
 	ids := make([]string, 0)
 	for id, s := range c.stories {
-		if s == nil || s.UpdatedAt <= 0 {
+		if s == nil {
 			continue
 		}
-		if now.Sub(time.Unix(s.UpdatedAt, 0)) >= publisherStoryTTL {
+		updated := effective(id)
+		if updated <= 0 {
+			continue
+		}
+		if now.Sub(time.Unix(updated, 0)) >= publisherStoryTTL {
 			ids = append(ids, id)
 		}
 	}
@@ -550,6 +579,11 @@ func (c *publisherCore) expireStories(now time.Time) {
 // anchored to the last content change. A story with a story upsert already
 // pending is skipped so a fresh update always wins.
 func (c *publisherCore) coolStories(now time.Time) {
+	nowNano := now.UnixNano()
+	if due := c.coolDue.Load(); due > nowNano {
+		return
+	}
+	c.coolDue.Store(nowNano + int64(time.Second))
 	c.mu.Lock()
 	if !c.restored || len(c.stories) == 0 {
 		c.mu.Unlock()

@@ -234,7 +234,11 @@ func (c *publisherCore) flush(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	c.ingestMu.Unlock()
+	// One lock contract for inflight: every read and write is under c.mu.
+	// Lock order is flushMu -> ingestMu -> mu.
+	c.mu.Lock()
 	batch := c.inflight
+	c.mu.Unlock()
 	if batch == nil {
 		return c.checkFence(c.storage.Renew(ctx))
 	}
@@ -283,7 +287,9 @@ func (c *publisherCore) flush(ctx context.Context) error {
 	for _, done := range batch.waiters {
 		close(done)
 	}
+	c.mu.Lock()
 	c.inflight = nil
+	c.mu.Unlock()
 	return nil
 }
 
@@ -295,11 +301,17 @@ func (c *publisherCore) saveCheckpoint(ctx context.Context, cp publisherCheckpoi
 	if len(r.Revisions)+len(r.RevisionDeletes)+len(r.Scores)+len(r.ScoreDeletes) == 0 {
 		return c.checkFence(c.storage.Renew(ctx))
 	}
+	c.mu.Lock()
 	c.inflight = &publisherBatch{record: r, revisions: cp.Revisions, scores: cp.Scores}
+	c.mu.Unlock()
 	if err := c.storage.Reserve(ctx, r); err != nil {
 		return c.checkFence(err)
 	}
-	c.inflight.reserved = true
+	c.mu.Lock()
+	if c.inflight != nil {
+		c.inflight.reserved = true
+	}
+	c.mu.Unlock()
 	if err := c.storage.Commit(ctx, r.Ordinal, c.committed.Seq, c.committed.Raw); err != nil {
 		return c.checkFence(err)
 	}
@@ -307,7 +319,9 @@ func (c *publisherCore) saveCheckpoint(ctx context.Context, cp publisherCheckpoi
 		return err
 	}
 	c.checkpoint.Revisions, c.checkpoint.Scores = maps.Clone(c.committed.Revisions), cloneScores(c.committed.Scores)
+	c.mu.Lock()
 	c.inflight = nil
+	c.mu.Unlock()
 	return nil
 }
 func (c *publisherCore) release(ctx context.Context) error {

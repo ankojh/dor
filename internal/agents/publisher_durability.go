@@ -307,7 +307,9 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 		c.wireOrder = append(c.wireOrder, row.ArticleId)
 	}
 	c.mu.Unlock()
+	c.mu.Lock()
 	c.inflight = nil
+	c.mu.Unlock()
 	if len(cp.Pending) > 0 || cp.PendingRevisions != nil {
 		var batch dorv1.DeltaBatch
 		if err := proto.Unmarshal(cp.Pending, &batch); err != nil {
@@ -320,7 +322,9 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 			}
 			next++
 		}
+		c.mu.Lock()
 		c.inflight = &publisherBatch{data: cp.Pending, deltas: batch.Deltas, reserved: true, revisions: maps.Clone(cp.PendingRevisions), scores: cloneScores(cp.PendingScores)}
+		c.mu.Unlock()
 		for _, d := range batch.Deltas {
 			if row := d.GetWire(); row != nil {
 				if c.wireRows[row.ArticleId] == nil {

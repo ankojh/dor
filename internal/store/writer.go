@@ -58,10 +58,13 @@ type auxMutation struct {
 }
 
 // pendingAssignment is a story assignment whose article row was not inserted
-// yet when the story batch was flushed. It is retried when that article arrives.
+// yet when the story batch was flushed. It is retried when that article arrives
+// and independently on a bounded backoff schedule.
 type pendingAssignment struct {
 	storyID  string
 	category int16
+	attempts int
+	nextAt   time.Time
 }
 
 type Writer struct {
@@ -340,9 +343,11 @@ func (w *Writer) loop() {
 			}
 		case <-ticker.C:
 			flush()
+			w.retryPending(false)
 		}
 	}
 	flush()
+	w.retryPending(true)
 }
 
 func (w *Writer) flushLinks(batch []LinkRecord) {
@@ -434,7 +439,7 @@ func (w *Writer) trackAssignments(batch []StoryRecord, missing map[string]string
 		if _, exists := w.pendingAssign[articleID]; !exists {
 			w.pendingOrder = append(w.pendingOrder, articleID)
 		}
-		w.pendingAssign[articleID] = pendingAssignment{storyID: storyID, category: rec.Category}
+		w.pendingAssign[articleID] = pendingAssignment{storyID: storyID, category: rec.Category, nextAt: time.Time{}}
 	}
 	for len(w.pendingOrder) > maxPendingAssignments {
 		old := w.pendingOrder[0]
@@ -444,39 +449,63 @@ func (w *Writer) trackAssignments(batch []StoryRecord, missing map[string]string
 	w.assignMu.Unlock()
 }
 
-// retryAssignments applies any remembered assignments for article ids that
-// just landed. Cleared assignments are retried on the next story batch.
-func (w *Writer) retryAssignments(records []ArticleRecord) {
+// retryPending applies remembered assignments. An article flush forces an
+// immediate attempt; the writer ticker retries on a bounded backoff so a
+// transient database failure recovers without waiting for the article to be
+// delivered again.
+func (w *Writer) retryPending(force bool) {
+	now := time.Now()
 	w.assignMu.Lock()
 	if len(w.pendingAssign) == 0 {
 		w.assignMu.Unlock()
 		return
 	}
-	pending := make(map[string]pendingAssignment, len(records))
-	for _, rec := range records {
-		if a, ok := w.pendingAssign[rec.ID]; ok {
-			pending[rec.ID] = a
+	type attempt struct {
+		id string
+		a  pendingAssignment
+	}
+	todo := make([]attempt, 0, len(w.pendingAssign))
+	for id, a := range w.pendingAssign {
+		if force || a.nextAt.IsZero() || !now.Before(a.nextAt) {
+			todo = append(todo, attempt{id: id, a: a})
 		}
 	}
 	w.assignMu.Unlock()
-	if len(pending) == 0 {
-		return
-	}
-	for articleID, a := range pending {
+	for _, item := range todo {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
-		ok, err := w.store.AssignStory(ctx, articleID, a.storyID, a.category)
+		ok, err := w.store.AssignStory(ctx, item.id, item.a.storyID, item.a.category)
 		cancel()
-		if err != nil {
+		switch {
+		case err != nil:
 			w.errors.Add(1)
-			w.log.Warn("store assignment retry failed", "article_id", articleID, "story_id", a.storyID, "err", err)
-			continue
-		}
-		if ok {
+			w.log.Warn("store assignment retry failed", "article_id", item.id, "story_id", item.a.storyID, "err", err)
+			w.backoffAssignment(item.id, item.a, now)
+		case ok:
 			w.assignMu.Lock()
-			delete(w.pendingAssign, articleID)
+			delete(w.pendingAssign, item.id)
 			w.assignMu.Unlock()
+		default:
+			// The row is still missing; the next article flush or ticker
+			// retries it.
+			w.backoffAssignment(item.id, item.a, now)
 		}
 	}
+}
+
+func (w *Writer) backoffAssignment(id string, a pendingAssignment, now time.Time) {
+	a.attempts++
+	delay := 200 * time.Millisecond << min(a.attempts-1, 7)
+	if delay > 30*time.Second || delay <= 0 {
+		delay = 30 * time.Second
+	}
+	a.nextAt = now.Add(delay)
+	w.assignMu.Lock()
+	if current, ok := w.pendingAssign[id]; ok {
+		current.attempts = a.attempts
+		current.nextAt = a.nextAt
+		w.pendingAssign[id] = current
+	}
+	w.assignMu.Unlock()
 }
 
 func (w *Writer) flush(batch []ArticleRecord) {
@@ -486,7 +515,7 @@ func (w *Writer) flush(batch []ArticleRecord) {
 		cancel()
 		if err == nil {
 			w.batches.Add(1)
-			w.retryAssignments(batch)
+			w.retryPending(true)
 			return
 		}
 		w.errors.Add(1)

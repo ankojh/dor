@@ -169,7 +169,11 @@ func (c *publisherCore) gcChunks(ctx context.Context, kv jetstream.KeyValue) err
 func (c *publisherCore) pruneInputRevisions(ctx context.Context) error {
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
-	if !c.restored || c.inflight != nil {
+	c.mu.Lock()
+	inflight := c.inflight != nil
+	restored := c.restored
+	c.mu.Unlock()
+	if !restored || inflight {
 		return nil
 	}
 	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)

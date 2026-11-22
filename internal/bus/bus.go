@@ -64,7 +64,10 @@ const (
 	// after its join is durable, so the join must outlive a process stop or
 	// backlog. The clusterer deletes a join after its story and placed outputs
 	// commit, and removes orphaned join records on restart.
-	KVJoinsTTL           = 0
+	KVJoinsTTL = 0
+	// KVJoinsMarkerTTL bounds the delete markers completed joins leave behind
+	// in the non-expiring bucket. Pending joins are live keys and are unaffected.
+	KVJoinsMarkerTTL     = 5 * time.Minute
 	KVBudgetsTTL         = time.Hour
 	KVSpendTTL           = 48 * time.Hour
 	KVLiveStateTTL       = 48 * time.Hour
@@ -382,22 +385,23 @@ func (b *Bus) warnPolicyMismatch(name string, want StreamPolicy, got jetstream.S
 }
 
 type kvSpec struct {
-	name string
-	ttl  time.Duration
+	name      string
+	ttl       time.Duration
+	markerTTL time.Duration
 }
 
 func kvBuckets() []kvSpec {
 	return []kvSpec{
-		{KVBucketSeen, KVSeenTTL},
-		{KVBucketJoins, KVJoinsTTL},
-		{KVBucketBudgets, KVBudgetsTTL},
-		{KVBucketSpend, KVSpendTTL},
-		{KVBucketLiveState, KVLiveStateTTL},
-		{KVBucketPublisher, KVPublisherTTL},
-		{KVBucketAlertDelivery, KVAlertDeliveryTTL},
-		{KVBucketSourceHealth, KVSourceHealthTTL},
-		{KVBucketEvalPending, KVEvalPendingTTL},
-		{KVBucketSession, KVBucketSessionTTL},
+		{KVBucketSeen, KVSeenTTL, 0},
+		{KVBucketJoins, KVJoinsTTL, KVJoinsMarkerTTL},
+		{KVBucketBudgets, KVBudgetsTTL, 0},
+		{KVBucketSpend, KVSpendTTL, 0},
+		{KVBucketLiveState, KVLiveStateTTL, 0},
+		{KVBucketPublisher, KVPublisherTTL, 0},
+		{KVBucketAlertDelivery, KVAlertDeliveryTTL, 0},
+		{KVBucketSourceHealth, KVSourceHealthTTL, 0},
+		{KVBucketEvalPending, KVEvalPendingTTL, 0},
+		{KVBucketSession, KVBucketSessionTTL, 0},
 	}
 }
 
@@ -421,11 +425,12 @@ func (b *Bus) provisionKV(ctx context.Context) error {
 			}
 		}
 		kv, err := b.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-			Bucket:   spec.name,
-			History:  1,
-			TTL:      spec.ttl,
-			Storage:  jetstream.FileStorage,
-			MaxBytes: maxBytes,
+			Bucket:         spec.name,
+			History:        1,
+			TTL:            spec.ttl,
+			Storage:        jetstream.FileStorage,
+			MaxBytes:       maxBytes,
+			LimitMarkerTTL: spec.markerTTL,
 		})
 		if err != nil {
 			return fmt.Errorf("bus: provision kv %s: %w", spec.name, err)

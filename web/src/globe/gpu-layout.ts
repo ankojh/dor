@@ -20,8 +20,8 @@ export function texelOf(index: number, width: number = TEXTURE_WIDTH): { x: numb
  * free index or -1 when full, `free` returns a slot to the list.
  */
 export class CapacityPool {
-  readonly capacity: number;
-  private readonly used: Uint8Array;
+  capacity: number;
+  private used: Uint8Array;
   private readonly freeList: number[];
 
   constructor(capacity: number, reserve = 0) {
@@ -31,6 +31,15 @@ export class CapacityPool {
     const reserved = Math.min(this.capacity, Math.max(0, reserve));
     for (let i = 0; i < reserved; i++) this.used[i] = 1;
     for (let i = this.capacity - 1; i >= reserved; i--) this.freeList.push(i);
+  }
+
+  grow(capacity: number): void {
+    if (capacity <= this.capacity) return;
+    const used = new Uint8Array(capacity);
+    used.set(this.used);
+    this.used = used;
+    for (let i = capacity - 1; i >= this.capacity; i--) this.freeList.unshift(i);
+    this.capacity = capacity;
   }
 
   allocate(): number {

@@ -7,7 +7,7 @@
  * needs.
  */
 import type { Link, Story } from "../gen/dor/v1/dor_pb";
-import { Role } from "../gen/dor/v1/dor_pb";
+
 import { categoryColor, encodeArc, type FocusState, FOCUS_AMBIENT } from "./encoding";
 import { greatCirclePoint, lngLatToMercator, splitMercator, type Vec2 } from "./mercator";
 import { RIPPLE_CAPACITY } from "./ripples";
@@ -19,8 +19,15 @@ import {
   type TetherSegment,
 } from "../worker/fake/protocol";
 
+/** Display-only metadata; protobuf messages stay in the worker. */
+export type StorySummary = Pick<
+  Story,
+  "id" | "title" | "category" | "primary" | "sourceCount" | "heat" | "firstSeen" | "updatedAt"
+> & {
+  locations: Array<Pick<Story["locations"][number], "name" | "lat" | "lon" | "role" | "precision">>;
+};
 export type LiveStory = {
-  story: Story;
+  story: StorySummary;
   index: number;
   lng: number;
   lat: number;
@@ -45,15 +52,17 @@ export function linkKey(a: string, b: string): string {
   return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
 }
 
-export function storyLocation(story: Story): { lng: number; lat: number; place: string } | null {
+export function storyLocation(
+  story: StorySummary,
+): { lng: number; lat: number; place: string } | null {
   if (story.locations.length === 0) return null;
   const primary = story.locations[story.primary] ?? story.locations[0]!;
   return { lng: primary.lon, lat: primary.lat, place: primary.name || "Unknown" };
 }
 
-function storyParties(story: Story): LiveStory["parties"] {
+function storyParties(story: StorySummary): LiveStory["parties"] {
   return story.locations
-    .filter((location) => location.role === Role.PARTY)
+    .filter((location) => location.role === 2)
     .slice(0, 6)
     .map((location) => ({
       lng: location.lon,
@@ -78,7 +87,23 @@ export function buildLiveGlobe(
     const category = story.category >= 0 && story.category <= 8 ? story.category : 0;
     storyById.set(story.id, index);
     located.push({
-      story,
+      story: {
+        id: story.id,
+        title: story.title,
+        category: story.category,
+        primary: story.primary,
+        sourceCount: story.sourceCount,
+        heat: story.heat,
+        firstSeen: story.firstSeen,
+        updatedAt: story.updatedAt,
+        locations: story.locations.map(({ name, lat, lon, role, precision }) => ({
+          name,
+          lat,
+          lon,
+          role,
+          precision,
+        })),
+      },
       index,
       lng: location.lng,
       lat: location.lat,
@@ -317,7 +342,7 @@ function linkColorFor(type: number): readonly [number, number, number] {
   return colors[type] ?? colors[0]!;
 }
 
-function buildArcArrays(
+export function buildArcArrays(
   stories: LiveStory[],
   linkA: number[],
   linkB: number[],

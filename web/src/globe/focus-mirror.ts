@@ -1,3 +1,6 @@
+import { growArray, type Numeric } from "./arrays";
+import type { AdjacencyArrays } from "../worker/fake/protocol";
+import type { LinkPatch, StoryPatch } from "../worker/messages";
 import { FOCUS_AMBIENT, FOCUS_FOCUSED, FOCUS_LINKED, FOCUS_SECOND } from "./encoding";
 import type {
   FakeInit,
@@ -29,37 +32,37 @@ export type FocusMirrorResult = {
  * must be turned off.
  */
 export class FocusMirror {
-  private readonly storyCount: number;
-  private readonly linkCount: number;
-  private readonly storyCapacity: number;
-  private readonly linkCapacity: number;
-  private readonly adjStart: Uint32Array;
-  private readonly adjList: Uint16Array;
-  private readonly adjLink: Uint16Array;
-  private readonly linkA: Uint16Array;
-  private readonly linkB: Uint16Array;
-  private readonly linkType: Uint8Array;
-  private readonly linkStrength: Float32Array;
-  private readonly linkUnverified: Uint8Array;
-  private readonly linkDirection: Uint8Array;
-  private readonly linkConfidence: Float32Array;
-  private readonly linkDistance: Float32Array;
-  private readonly storyLng: Float64Array;
-  private readonly storyLat: Float64Array;
-  private readonly storyTitle: string[];
-  private readonly storyPlace: string[];
-  private readonly storyCategory: Uint8Array;
-  private readonly storySources: Uint16Array;
-  private readonly storyHeat: Float32Array;
-  private readonly partyCount: Uint8Array;
-  private readonly partyLng: Float32Array;
-  private readonly partyLat: Float32Array;
-  private readonly partyLabel: string[];
-  private readonly storyActive: Uint8Array;
-  private readonly linkActive: Uint8Array;
+  private storyCount: number;
+  private linkCount: number;
+  private storyCapacity: number;
+  private linkCapacity: number;
+  private adjStart: Uint32Array;
+  private adjList: Uint16Array;
+  private adjLink: Uint16Array;
+  private linkA: Uint16Array;
+  private linkB: Uint16Array;
+  private linkType: Uint8Array;
+  private linkStrength: Float32Array;
+  private linkUnverified: Uint8Array;
+  private linkDirection: Uint8Array;
+  private linkConfidence: Float32Array;
+  private linkDistance: Float32Array;
+  private storyLng: Float64Array;
+  private storyLat: Float64Array;
+  private storyTitle: string[];
+  private storyPlace: string[];
+  private storyCategory: Uint8Array;
+  private storySources: Uint16Array;
+  private storyHeat: Float32Array;
+  private partyCount: Uint8Array;
+  private partyLng: Float32Array;
+  private partyLat: Float32Array;
+  private partyLabel: string[];
+  private storyActive: Uint8Array;
+  private linkActive: Uint8Array;
 
-  private readonly storyState: Uint8Array;
-  private readonly linkState: Uint8Array;
+  private storyState: Uint8Array;
+  private linkState: Uint8Array;
   private litStories = new Set<number>();
   private litLinks = new Set<number>();
 
@@ -118,6 +121,58 @@ export class FocusMirror {
     this.storyActive.fill(1, 0, this.storyCount);
     this.linkActive = new Uint8Array(this.linkCapacity);
     this.linkActive.fill(1, 0, this.linkCount);
+  }
+
+  ensureCapacity(stories: number, links: number): void {
+    const record = this as unknown as Record<string, unknown>;
+    const linkFields = new Set([
+      "linkA",
+      "linkB",
+      "linkType",
+      "linkStrength",
+      "linkUnverified",
+      "linkDirection",
+      "linkConfidence",
+      "linkDistance",
+      "linkActive",
+      "linkState",
+    ]);
+    const partyFields = new Set(["partyLng", "partyLat"]);
+    for (const key of Object.keys(this)) {
+      const value = record[key];
+      if (!ArrayBuffer.isView(value) || key.startsWith("adj")) continue;
+      record[key] = growArray(
+        value as Numeric,
+        linkFields.has(key) ? links : stories * (partyFields.has(key) ? 6 : 1),
+      );
+    }
+    this.adjStart = growArray(this.adjStart, stories + 1);
+    this.adjList = growArray(this.adjList, links * 2);
+    this.adjLink = growArray(this.adjLink, links * 2);
+    this.storyCapacity = Math.max(this.storyCapacity, stories);
+    this.linkCapacity = Math.max(this.linkCapacity, links);
+  }
+  applyAdjacency(adjacency: AdjacencyArrays): void {
+    this.adjStart = adjacency.adjStart;
+    this.adjList = adjacency.adjList;
+    this.adjLink = adjacency.adjLink;
+  }
+  applyStoryMetadata(op: StoryPatch): void {
+    if (!op.summary) return;
+    const i = op.index,
+      parties = op.summary.parties;
+    this.partyCount[i] = parties.length;
+    parties.forEach((p, j) => {
+      this.partyLng[i * 6 + j] = p.lng;
+      this.partyLat[i * 6 + j] = p.lat;
+      this.partyLabel[i * 6 + j] = p.label;
+    });
+  }
+  applyLinkMetadata(op: LinkPatch): void {
+    this.linkDirection[op.index] = op.direction ?? 0;
+    this.linkConfidence[op.index] = op.confidence ?? 0;
+    this.linkDistance[op.index] = op.distanceKm ?? 0;
+    this.linkUnverified[op.index] = op.unverified ? 1 : 0;
   }
 
   /** Current lit state for tests and diagnostics. */
@@ -325,6 +380,7 @@ export class FocusMirror {
     add: boolean,
     type = 0,
     strength = 0.5,
+    deferAdjacency = false,
   ): void {
     if (linkIndex < 0 || linkIndex >= this.linkCapacity) return;
     if (add) {
@@ -346,7 +402,7 @@ export class FocusMirror {
       this.litLinks.delete(linkIndex);
       this.linkState[linkIndex] = FOCUS_AMBIENT;
     }
-    this.rebuildAdjacency();
+    if (!deferAdjacency) this.rebuildAdjacency();
   }
 
   /** Apply a story insert/remove; structural, so it rebuilds once. */
@@ -362,6 +418,7 @@ export class FocusMirror {
       heat: number;
     },
     add: boolean,
+    deferAdjacency = false,
   ): void {
     if (index < 0 || index >= this.storyCapacity) return;
     this.storyActive[index] = add ? 1 : 0;
@@ -377,7 +434,7 @@ export class FocusMirror {
       this.litStories.delete(index);
       this.storyState[index] = FOCUS_AMBIENT;
     }
-    this.rebuildAdjacency();
+    if (!deferAdjacency) this.rebuildAdjacency();
   }
 
   private rebuildAdjacency(): void {

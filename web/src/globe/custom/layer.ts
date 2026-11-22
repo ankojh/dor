@@ -1,3 +1,4 @@
+import type { StoryPatch, LinkPatch, MatchBytes } from "../../worker/messages";
 import type {
   CustomLayerInterface,
   CustomRenderMethodInput,
@@ -5,13 +6,7 @@ import type {
 } from "maplibre-gl";
 import { CATEGORY_COLORS, DEFAULT_STRENGTH_FLOOR, LINK_COLORS } from "../encoding";
 import { lngLatToMercator, matrixTranslate, splitMercator } from "../mercator";
-import type {
-  FakeInit,
-  FocusPatch,
-  LinkOp,
-  StoryOp,
-  StreamPatch,
-} from "../../worker/fake/protocol";
+import type { FakeInit, FocusPatch, StreamPatch } from "../../worker/fake/protocol";
 import { GlobeGpuData } from "./buffers";
 import {
   ARC_FRAG,
@@ -407,16 +402,27 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     if (heatOn) gl.uniform1f(heatOn, state.heatOn);
   }
 
+  storyAnimation(index: number) {
+    return this.data?.storyAnimation(index);
+  }
+
+  ensureCapacity(stories: number, links: number): void {
+    this.data?.ensureCapacity(stories, links);
+  }
+  updateMatches(stories: MatchBytes, links: MatchBytes): void {
+    this.data?.updateMatches(stories, links);
+  }
+
   stream(patch: StreamPatch): void {
     this.data?.updateStream(patch);
   }
 
   /** Runtime structural changes, applied to geometry, textures and pools. */
-  applyLinkOp(op: LinkOp): void {
+  applyLinkOp(op: LinkPatch): void {
     this.data?.applyLinkOp(op);
   }
 
-  applyStoryOp(op: StoryOp): void {
+  applyStoryOp(op: StoryPatch): void {
     this.data?.applyStoryOp(op);
   }
 

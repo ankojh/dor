@@ -15,10 +15,6 @@ import {
   SetPromptsSchema,
   ServerMessageSchema,
   type ClientMessage,
-  type Delta,
-  type Link,
-  type Story,
-  type WireRow,
 } from "../gen/dor/v1/dor_pb";
 import type {
   SourceHealth,
@@ -27,11 +23,11 @@ import type {
   WorkerMessage,
   WorkerStatus,
 } from "./messages";
-import { mergeWireRow } from "../live/wire";
+import { LiveState } from "./state";
+import { transferablesOf, type FeedMessage } from "./messages";
 
-const WIRE_LIMIT = 1000;
 const statusScope = globalThis as unknown as {
-  postMessage(message: WorkerMessage): void;
+  postMessage(message: WorkerMessage, transfer?: ArrayBuffer[]): void;
   __dorWorker?: Record<string, unknown>;
 };
 const debug: Record<string, unknown> = {
@@ -57,16 +53,17 @@ const socketUrl =
 const apiBase = (env.VITE_API_URL || "").replace(/\/$/, "");
 const healthUrl = env.VITE_HEALTH_URL || `${apiBase}/api/health`;
 
-const stories = new Map<string, Story>();
-const links = new Map<string, Link>();
-const wire: WireRow[] = [];
-const seenArticles = new Set<string>();
+/** A missing promised snapshot retires the socket; never restart recovery with Hello on it. */
+export const SNAPSHOT_RECOVERY_TIMEOUT_MS = 30_000;
+
+const state = new LiveState();
 let lastSeq = 0;
-let lastWireAt: number | null = null;
 let activeFilters: WireFilters | null = null;
 let activePrompts: string[] = [];
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+let awaitingSnapshot = false;
 let reconnectAttempt = 0;
 let reconnectAt = 0;
 let stopped = false;
@@ -82,42 +79,11 @@ function postStatus(connection: WorkerStatus["connection"], error?: string): voi
     type: "status",
     connection,
     lastSeq,
-    lastWireAt,
+    lastWireAt: state.lastWireAt,
     reconnectInMs: reconnectAt > Date.now() ? reconnectAt - Date.now() : null,
     health,
     ...(error ? { error } : {}),
   });
-}
-
-function wireKey(row: WireRow): string {
-  return row.articleId || `${row.source}:${row.at}:${row.title}`;
-}
-
-function rememberWire(row: WireRow): void {
-  const key = wireKey(row);
-  const existing = wire.find((candidate) => wireKey(candidate) === key);
-  if (existing) {
-    // article.clean arrives first; article.placed later adds story_id,
-    // category and join. Update the row in place instead of dropping it.
-    Object.assign(existing, mergeWireRow(existing, row));
-    lastWireAt = Math.max(lastWireAt ?? 0, Number(row.at));
-    return;
-  }
-  seenArticles.add(key);
-  wire.unshift(row);
-  if (wire.length > WIRE_LIMIT) {
-    const removed = wire.pop();
-    if (removed) seenArticles.delete(wireKey(removed));
-  }
-  lastWireAt = Math.max(lastWireAt ?? 0, Number(row.at));
-}
-
-function resetState(): void {
-  stories.clear();
-  links.clear();
-  wire.length = 0;
-  seenArticles.clear();
-  lastWireAt = null;
 }
 
 function sendClient(body: ClientMessage["body"]): void {
@@ -164,43 +130,34 @@ function sendAck(): void {
   sendClient({ case: "ack", value: create(AckSchema, { seq: BigInt(lastSeq) }) });
 }
 
-function applyDelta(delta: Delta): void {
-  const seq = Number(delta.seq);
-  if (seq > lastSeq) lastSeq = seq;
-  switch (delta.body.case) {
-    case "storyUpsert":
-      stories.set(delta.body.value.id, delta.body.value);
-      break;
-    case "storyExpire": {
-      const id = delta.body.value;
-      stories.delete(id);
-      for (const [key, link] of links) {
-        if (link.a === id || link.b === id) links.delete(key);
-      }
-      break;
-    }
-    case "linkUpsert":
-      links.set(linkKey(delta.body.value.a, delta.body.value.b), delta.body.value);
-      break;
-    case "linkRemove":
-      links.delete(linkKey(delta.body.value.a, delta.body.value.b));
-      break;
-    case "wire":
-      rememberWire(delta.body.value);
-      break;
-    default:
-      break;
-  }
+function clearSnapshotTimer(): void {
+  if (snapshotTimer !== null) clearTimeout(snapshotTimer);
+  snapshotTimer = null;
 }
 
-function linkKey(a: string, b: string): string {
-  return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+function awaitSnapshot(connection: WebSocket): void {
+  awaitingSnapshot = true;
+  debug.recovery = "awaiting snapshot";
+  // Repeated Resync frames cannot extend the first recovery deadline.
+  if (snapshotTimer !== null) return;
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    if (socket !== connection || !awaitingSnapshot || stopped) return;
+    // Retire before close: buffered frames and delayed close callbacks from
+    // this connection must not mutate state or affect a replacement socket.
+    socket = null;
+    debug.socket = "snapshot timeout";
+    connection.close(4000, "snapshot recovery timed out");
+    scheduleReconnect();
+  }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
 }
 
-async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
+async function handleBinary(data: Blob | ArrayBuffer, connection: WebSocket): Promise<void> {
+  if (socket !== connection) return;
   debug.raw = Number(debug.raw) + 1;
   const bytes =
     data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
+  if (socket !== connection) return;
   let message;
   try {
     message = fromBinary(ServerMessageSchema, bytes);
@@ -213,50 +170,41 @@ async function handleBinary(data: Blob | ArrayBuffer): Promise<void> {
   switch (message.body.case) {
     case "snapshot": {
       const snapshot = message.body.value;
-      resetState();
-      for (const story of snapshot.stories) stories.set(story.id, story);
-      for (const link of snapshot.links) links.set(linkKey(link.a, link.b), link);
-      const recentWire = snapshot.recentWire;
-      for (const row of recentWire) rememberWire(row);
-      lastSeq = Number(snapshot.seq);
+      const seq = Number(snapshot.seq);
+      const init = state.snapshot(snapshot.stories, snapshot.links, snapshot.recentWire, seq);
+      lastSeq = seq;
+      awaitingSnapshot = false;
+      clearSnapshotTimer();
+      debug.recovery = "ready";
       debug.snapshots = Number(debug.snapshots) + 1;
-      debug.wires = wire.length;
-      statusScope.postMessage({
-        type: "snapshot",
-        seq: lastSeq,
-        builtAt: Number(snapshot.builtAt),
-        stories: [...stories.values()],
-        links: [...links.values()],
-        ...(recentWire.length > 0 ? { recentWire } : {}),
-      });
+      statusScope.postMessage(init, transferablesOf(init));
       sendAck();
       postStatus("online");
       break;
     }
     case "deltas": {
+      // The recovery snapshot is authoritative. No tail/live delta may be
+      // applied or ACKed until it arrives, including unexpected stale frames.
+      if (awaitingSnapshot) return;
       const batch = message.body.value.deltas;
       debug.batches = Number(debug.batches) + 1;
       debug.deltas = Number(debug.deltas) + batch.length;
-      debug.wires = wire.length;
-      for (const delta of batch) applyDelta(delta);
-      statusScope.postMessage({
-        type: "deltas",
-        seq: lastSeq,
-        deltas: batch,
-      });
+      debug.wires = state.wire.size;
+      for (const delta of batch) state.apply(delta);
+      lastSeq = state.seq;
       sendAck();
       postStatus("online");
       break;
     }
     case "resync": {
-      resetState();
       lastSeq = 0;
+      state.seq = 0;
+      awaitSnapshot(connection);
       statusScope.postMessage({
         type: "resync",
         seq: Number(message.body.value.seq),
         reason: message.body.value.reason,
       });
-      sendHello();
       postStatus("online");
       break;
     }
@@ -292,23 +240,29 @@ function connect(): void {
     scheduleReconnect();
     return;
   }
-  socket.binaryType = "arraybuffer";
+  const connection = socket;
+  connection.binaryType = "arraybuffer";
   debug.socket = "connecting";
-  socket.onopen = () => {
+  connection.onopen = () => {
+    if (socket !== connection) return;
     debug.socket = "open";
     reconnectAttempt = 0;
     reconnectAt = 0;
     postStatus("online");
+    if (lastSeq === 0) awaitSnapshot(connection);
     sendHello();
   };
-  socket.onmessage = (event) => {
+  connection.onmessage = (event) => {
     if (typeof event.data === "string") return;
-    void handleBinary(event.data as Blob | ArrayBuffer);
+    void handleBinary(event.data as Blob | ArrayBuffer, connection);
   };
-  socket.onerror = () => {
+  connection.onerror = () => {
+    if (socket !== connection) return;
     postStatus("reconnecting", "gateway socket error");
   };
-  socket.onclose = (event) => {
+  connection.onclose = (event) => {
+    if (socket !== connection) return;
+    clearSnapshotTimer();
     debug.socket = `closed:${event.code}`;
     socket = null;
     if (stopped) return;
@@ -371,24 +325,56 @@ statusScope.postMessage({
   reconnectInMs: 0,
   health,
 });
-connect();
-void pollHealth();
-const healthTimer = setInterval(() => void pollHealth(), 15_000);
-void healthTimer;
+let started = false;
+let stopFeed: (() => void) | null = null;
+let healthTimer: ReturnType<typeof setInterval> | null = null;
+function mockMessage(message: FeedMessage): void {
+  if (message.type === "snapshot") {
+    const init = state.snapshot(
+      message.stories,
+      message.links,
+      message.recentWire ?? [],
+      message.seq,
+    );
+    statusScope.postMessage(init, transferablesOf(init));
+  } else if (message.type === "deltas") message.deltas.forEach((delta) => state.apply(delta));
+  else statusScope.postMessage(message);
+}
+async function start(mode: "live" | "mock" | "perf"): Promise<void> {
+  if (started) return;
+  started = true;
+  if (mode === "mock") {
+    const { startMock } = await import("../live/mock");
+    stopFeed = startMock(mockMessage).stop;
+  } else if (mode === "perf") {
+    const { startPerfFeed } = await import("./perf-feed");
+    stopFeed = startPerfFeed(mockMessage);
+  } else {
+    connect();
+    void pollHealth();
+    healthTimer = setInterval(() => void pollHealth(), 15_000);
+  }
+}
 
 const commandScope = globalThis as unknown as {
   onmessage: ((event: MessageEvent<WorkerCommand>) => void) | null;
 };
 commandScope.onmessage = (event) => {
   const command = event.data;
-  if (command?.type === "focus" && command.storyId) {
+  if (command?.type === "start") {
+    void start(command.mode);
+  } else if (command?.type === "frame") {
+    const patch = awaitingSnapshot ? null : state.flush();
+    if (patch) statusScope.postMessage(patch, transferablesOf(patch));
+    statusScope.postMessage({ type: "frameDone" });
+  } else if (command?.type === "focus" && command.storyId) {
     sendClient({ case: "focus", value: create(FocusSchema, { storyId: command.storyId }) });
   } else if (command?.type === "filters") {
     activeFilters = command.filters;
-    sendFilters();
+    if (state.setFilters(activeFilters)) sendFilters();
   } else if (command?.type === "prompts") {
     activePrompts = command.prompts;
-    sendPrompts();
+    if (state.setPrompts(activePrompts)) sendPrompts();
   }
 };
 
@@ -397,5 +383,8 @@ commandScope.onmessage = (event) => {
 self.addEventListener("beforeunload", () => {
   stopped = true;
   if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  clearSnapshotTimer();
   socket?.close();
+  stopFeed?.();
+  if (healthTimer) clearInterval(healthTimer);
 });

@@ -1,16 +1,22 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import type { Category, Story, WireRow } from "./gen/dor/v1/dor_pb";
-import { JoinKind, Precision, Role } from "./gen/dor/v1/dor_pb";
+import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
+import { afterShellPaint } from "./globe/load";
+import { createFocusHandler } from "./globe/focus-events";
+import { LruCache } from "./worker/lru";
+import type { StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
 import { mergeWireRow } from "./live/wire";
 import {
-  LiveGlobe,
-  type FocusDetails,
-  type GlobeState,
-  type LinkInfo,
-  type StoryFilter,
-} from "./globe/runtime";
+  AlertInbox,
+  approximateLabel,
+  historyIdentity,
+  toHistory,
+  type AlertToast,
+  type AlertHitRecord,
+  type IncomingAlert,
+} from "./live/alerts";
+import type { LiveGlobe, FocusDetails, GlobeState, LinkInfo } from "./globe/runtime";
 import type {
   ConnectionState,
   SourceHealth,
@@ -74,7 +80,7 @@ function sourceName(source: string): string {
 }
 
 function joinText(row: WireRow): string {
-  if (row.join === JoinKind.JOINED) {
+  if (row.join === 1) {
     return row.storyId ? `↳ joined story ${row.storyId.slice(0, 10)}` : "↳ joined a story";
   }
   if (row.storyId) return "↳ new story";
@@ -105,32 +111,34 @@ function relativeTime(unixSeconds: number, nowMs: number): string {
 
 function precisionLabel(precision: Precision): string {
   switch (precision) {
-    case Precision.COUNTRY:
+    case 0:
       return "COUNTRY";
-    case Precision.REGION:
+    case 1:
       return "REGION";
-    case Precision.CITY:
+    case 2:
       return "CITY";
-    case Precision.STREET:
+    case 3:
       return "STREET";
-    case Precision.POINT:
+    case 4:
       return "POINT";
   }
+  return "UNKNOWN";
 }
 
 function roleLabel(role: Role): string {
   switch (role) {
-    case Role.VENUE:
+    case 0:
       return "Venue";
-    case Role.ORIGIN:
+    case 1:
       return "Origin";
-    case Role.PARTY:
+    case 2:
       return "Party";
-    case Role.AFFECTED:
+    case 3:
       return "Affected";
-    case Role.MENTIONED:
+    case 4:
       return "Mentioned";
   }
+  return "Mentioned";
 }
 
 function directionLabel(link: LinkInfo): string {
@@ -205,25 +213,6 @@ type AlertRecord = {
   updated_at?: string;
 };
 
-type AlertToast = {
-  alertId: string;
-  storyId: string;
-  level: string;
-  title: string;
-  prompt: string;
-  firedAt: number;
-};
-
-type AlertHitRecord = {
-  alert_id: string;
-  story_id: string;
-  level: string;
-  fired_at: number;
-  title: string;
-  prompt: string;
-  source_count?: number;
-};
-
 type BacktestResult = {
   would_fire: number;
   stories: Array<{ story_id: string; title: string; source_count: number; score: number }>;
@@ -252,7 +241,11 @@ export function App() {
   let searchInput!: HTMLInputElement;
   let liveGlobe: LiveGlobe | null = null;
   let worker: Worker | null = null;
-  let mockStop: (() => void) | null = null;
+  let disposed = false;
+  const loadAbort = new AbortController();
+  let workerFrameHandle: number | null = null;
+  let workerFrameReady = true;
+  let workerBounds: unknown = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let freshTimer: ReturnType<typeof setTimeout> | null = null;
   let clockTimer: ReturnType<typeof setInterval> | null = null;
@@ -338,17 +331,17 @@ export function App() {
     "idle",
   );
   const pendingWire: WireItem[] = [];
+  const alertInbox = new AlertInbox();
   const seen = new Set<string>();
-  const briefCache = new Map<string, StoryText>();
-  const detailsCache = new Map<string, StoryDetails>();
-  const whyCache = new Map<string, LinkWhy>();
-  const prefetched = new Set<string>();
+  const briefCache = new LruCache<string, StoryText>();
+  const detailsCache = new LruCache<string, StoryDetails>();
+  const whyCache = new LruCache<string, LinkWhy>();
+  const prefetched = new LruCache<string, true>();
   const initialHash = new URLSearchParams(location.hash.slice(1));
   const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let touchStartY = 0;
-  let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
   const paused = createMemo(() => pausedByHover() || scrollTop() > 6);
@@ -370,15 +363,6 @@ export function App() {
 
   const isApproxMatch = (row: WireRow): boolean =>
     prompts().some((prompt) => row.approxPrompts.includes(prompt));
-
-  const promptStoryIds = createMemo(() => {
-    const ids = new Set<string>();
-    if (prompts().length === 0) return ids;
-    for (const item of wireRows()) {
-      if (item.row.storyId && activeScore(item.row) >= 0.5) ids.add(item.row.storyId);
-    }
-    return ids;
-  });
 
   const visibleWireRows = createMemo(() => {
     let rows = wireRows();
@@ -433,29 +417,6 @@ export function App() {
     }
     return rows;
   });
-
-  const buildStoryFilter = (): StoryFilter | null => {
-    const active = filters();
-    const hasFilters =
-      active.categories.length > 0 ||
-      active.regions.length > 0 ||
-      active.minSources > 0 ||
-      active.radiusKm > 0 ||
-      active.lat !== 0 ||
-      active.lon !== 0 ||
-      prompts().length > 0;
-    if (!hasFilters) return null;
-    return {
-      categories: new Set(active.categories),
-      regions: active.regions,
-      sources: active.sources,
-      minSources: active.minSources,
-      lat: active.lat,
-      lon: active.lon,
-      radiusKm: active.radiusKm,
-      promptStoryIds: promptStoryIds(),
-    };
-  };
 
   const searchResults = createMemo(() => {
     globe();
@@ -560,18 +521,6 @@ export function App() {
     return events;
   });
 
-  createEffect(() => {
-    filters();
-    prompts();
-    promptStoryIds();
-    if (!liveGlobe) return;
-    if (filterTimer !== null) clearTimeout(filterTimer);
-    filterTimer = setTimeout(() => {
-      filterTimer = null;
-      liveGlobe?.setStoryFilter(buildStoryFilter());
-    }, 180);
-  });
-
   const enqueueWire = (rows: WireRow[]): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
@@ -593,6 +542,10 @@ export function App() {
       }
       seen.add(key);
       pendingWire.push({ row, key, receivedAt: Date.now() });
+      if (pendingWire.length > 1000) {
+        const removed = pendingWire.shift();
+        if (removed) seen.delete(removed.key);
+      }
       added++;
     }
     if (updates.length > 0) {
@@ -616,7 +569,12 @@ export function App() {
   const flushWire = (): void => {
     if (paused() || pendingWire.length === 0) return;
     const batch = pendingWire.splice(0);
-    setWireRows((previous) => [...batch.reverse(), ...previous].slice(0, 1000));
+    setWireRows((previous) => {
+      const all = [...batch.reverse(), ...previous];
+      const kept = all.slice(0, 1000);
+      for (const item of all.slice(1000)) seen.delete(item.key);
+      return kept;
+    });
     const fresh = new Set(batch.map((item) => item.key));
     setFreshKeys(new Set<string>(fresh));
     if (freshTimer !== null) clearTimeout(freshTimer);
@@ -658,14 +616,12 @@ export function App() {
     const next = { ...filters(), ...patch };
     setFilters(next);
     worker?.postMessage({ type: "filters", filters: next });
-    liveGlobe?.setStoryFilter(buildStoryFilter());
   };
 
   const updatePrompts = (next: string[]): void => {
     const unique = [...new Set(next.map((prompt) => prompt.trim()).filter(Boolean))];
     setPrompts(unique);
     worker?.postMessage({ type: "prompts", prompts: unique });
-    liveGlobe?.setStoryFilter(buildStoryFilter());
   };
 
   const addPrompt = (): void => {
@@ -931,36 +887,31 @@ export function App() {
   };
 
   const dismissToast = (toast: AlertToast): void => {
-    setAlertToasts((previous) =>
-      previous.filter(
-        (item) => !(item.alertId === toast.alertId && item.storyId === toast.storyId),
-      ),
-    );
+    setAlertToasts((previous) => alertInbox.dismiss(previous, toast));
   };
 
-  const handleAlertHit = (hit: {
-    alertId: string;
-    storyId: string;
-    level: string;
-    title: string;
-    prompt: string;
-    firedAt: bigint;
-  }): void => {
+  const handleAlertHit = (hit: IncomingAlert): void => {
     const alert = alertList().find((item) => item.id === hit.alertId);
     if (alert && !alert.channels.includes("inapp")) return;
-    const toast: AlertToast = {
-      alertId: hit.alertId,
-      storyId: hit.storyId,
-      level: hit.level,
-      title: hit.title,
-      prompt: hit.prompt,
-      firedAt: Number(hit.firedAt),
-    };
-    setAlertToasts((previous) =>
-      previous.some((item) => item.alertId === toast.alertId && item.storyId === toast.storyId)
-        ? previous
-        : [toast, ...previous].slice(0, 4),
-    );
+    setAlertToasts((previous) => {
+      const next = alertInbox.push(previous, hit);
+      if (next !== previous) {
+        const record = toHistory(next[0]!);
+        setAlertHits((history) => {
+          const existing = history[record.alert_id];
+          if (!existing) return history;
+          const key = historyIdentity(record);
+          return {
+            ...history,
+            [record.alert_id]: [
+              record,
+              ...existing.filter((item) => historyIdentity(item) !== key),
+            ].slice(0, 100),
+          };
+        });
+      }
+      return next;
+    });
   };
 
   const muteAlertStory = async (toast: AlertToast): Promise<void> => {
@@ -1022,7 +973,7 @@ export function App() {
   };
 
   const loadLinkWhy = async (link: LinkInfo): Promise<void> => {
-    const key = `${link.aId} ${link.bId}`;
+    const key = `${link.aId}\u0000${link.bId}`;
     const cached = whyCache.get(key);
     if (cached) {
       setLinkWhy(cached);
@@ -1061,7 +1012,7 @@ export function App() {
 
   const prefetchStory = (storyId: string): void => {
     if (!storyId || prefetched.has(storyId)) return;
-    prefetched.add(storyId);
+    prefetched.set(storyId, true);
     worker?.postMessage({ type: "focus", storyId });
   };
 
@@ -1092,38 +1043,25 @@ export function App() {
       case "status":
         applyStatus(message);
         break;
-      case "snapshot":
+      case "init":
         seen.clear();
         pendingWire.length = 0;
         setWireRows([]);
         setPendingNew(0);
         setSelectedArticle(null);
         setLastSeq(message.seq);
-        liveGlobe?.setSnapshot(message.stories, message.links);
-        if (message.recentWire?.length) enqueueWire(message.recentWire);
+        liveGlobe?.setInit(message);
+        if (message.recentWire.length) enqueueWire(message.recentWire);
         break;
-      case "deltas":
+      case "patch":
+        workerBounds = message.bounds;
         setLastSeq(message.seq);
-        liveGlobe?.applyDeltas(message.deltas);
-        for (const delta of message.deltas) {
-          if (delta.body.case === "alert") {
-            const hit = delta.body.value;
-            handleAlertHit({
-              alertId: hit.alertId,
-              storyId: hit.storyId,
-              level: hit.level,
-              title: hit.title,
-              prompt: hit.prompt,
-              firedAt: hit.firedAt,
-            });
-          }
-        }
-        enqueueWire(
-          message.deltas
-            .filter((delta) => delta.body.case === "wire")
-            .map((delta) => (delta.body.case === "wire" ? delta.body.value : null))
-            .filter((row): row is WireRow => row !== null),
-        );
+        liveGlobe?.queuePatch(message);
+        for (const hit of message.alerts) handleAlertHit(hit);
+        enqueueWire(message.wire);
+        break;
+      case "frameDone":
+        workerFrameReady = true;
         break;
       case "resync":
         seen.clear();
@@ -1136,50 +1074,69 @@ export function App() {
   };
 
   onMount(() => {
-    liveGlobe = new LiveGlobe(mapContainer, {
-      onState: setGlobe,
-      onFocus: (details) => {
-        setFocus(details);
-        if (details) {
-          pendingInitialStory = null;
-          const matching = wireRows().find((item) => item.row.storyId === details.storyId);
-          setSelectedArticle(matching?.key ?? null);
-          setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
-          setStoryDetails(detailsCache.get(details.storyId) ?? null);
-          void loadStoryText(details.storyId);
-          void loadStoryDetails(details.storyId);
-          worker?.postMessage({ type: "focus", storyId: details.storyId });
-          syncHash(details.storyId);
-        } else {
-          setSelectedArticle(null);
-          setThreadOnly(false);
-          setSelectedLink(null);
-          setStoryText(null);
-          setStoryDetails(null);
-          syncHash(null);
-        }
-      },
-      onLinkClick: openLink,
-      onView: (nextView) => {
-        setView(nextView);
-        scheduleHash();
-      },
-    });
-    liveGlobe.setStrengthFloor(layerFloor());
-    const viewParam = initialHash.get("view")?.split(",").map(Number);
-    if (viewParam && viewParam.length === 3 && viewParam.every((value) => Number.isFinite(value))) {
-      liveGlobe.setView([viewParam[0]!, viewParam[1]!], viewParam[2]!);
+    if (initialQuery.has("diagnostics")) {
+      (window as unknown as { __dorApp?: unknown }).__dorApp = {
+        get bounds() {
+          return {
+            seen: seen.size,
+            visible: wireRows().length,
+            pending: pendingWire.length,
+            brief: briefCache.size,
+            details: detailsCache.size,
+            why: whyCache.size,
+            prefetched: prefetched.size,
+            worker: workerBounds,
+          };
+        },
+      };
     }
-    if (initialQuery.get("alert")) setAlertsOpen(true);
-    if (initialHash.get("f") === "thread") setThreadOnly(true);
-    if (initialHash.get("f") === "second") liveGlobe.setSecondDegree(true);
-    if (pendingInitialStory) liveGlobe.focusStoryId(pendingInitialStory);
-
-    if (new URLSearchParams(location.search).get("mock") === "1") {
-      void import("./live/mock").then(({ startMock }) => {
-        mockStop = startMock(handleMessage).stop;
+    void (async () => {
+      await afterShellPaint(loadAbort.signal);
+      if (disposed) return;
+      const { LiveGlobe } = await import("./globe/runtime");
+      if (disposed) return;
+      liveGlobe = new LiveGlobe(mapContainer, {
+        onState: setGlobe,
+        onFocus: createFocusHandler<FocusDetails>(setFocus, (details) => {
+          if (details) {
+            pendingInitialStory = null;
+            const matching = wireRows().find((item) => item.row.storyId === details.storyId);
+            setSelectedArticle(matching?.key ?? null);
+            setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
+            setStoryDetails(detailsCache.get(details.storyId) ?? null);
+            void loadStoryText(details.storyId);
+            void loadStoryDetails(details.storyId);
+            worker?.postMessage({ type: "focus", storyId: details.storyId });
+            syncHash(details.storyId);
+          } else {
+            setSelectedArticle(null);
+            setThreadOnly(false);
+            setSelectedLink(null);
+            setStoryText(null);
+            setStoryDetails(null);
+            syncHash(null);
+          }
+        }),
+        onLinkClick: openLink,
+        onView: (nextView) => {
+          setView(nextView);
+          scheduleHash();
+        },
       });
-    } else {
+      liveGlobe.setStrengthFloor(layerFloor());
+      const viewParam = initialHash.get("view")?.split(",").map(Number);
+      if (
+        viewParam &&
+        viewParam.length === 3 &&
+        viewParam.every((value) => Number.isFinite(value))
+      ) {
+        liveGlobe.setView([viewParam[0]!, viewParam[1]!], viewParam[2]!);
+      }
+      if (initialQuery.get("alert")) setAlertsOpen(true);
+      if (initialHash.get("f") === "thread") setThreadOnly(true);
+      if (initialHash.get("f") === "second") liveGlobe.setSecondDegree(true);
+      if (pendingInitialStory) liveGlobe.focusStoryId(pendingInitialStory);
+
       worker = new Worker(new URL("./worker/index.ts", import.meta.url), {
         type: "module",
         name: "dor-data-worker",
@@ -1189,7 +1146,32 @@ export function App() {
         setConnection("offline");
         console.error(`data worker: ${event.message}`);
       };
-    }
+      worker.postMessage({
+        type: "start",
+        mode:
+          initialQuery.get("perf") === "1"
+            ? "perf"
+            : initialQuery.get("mock") === "1"
+              ? "mock"
+              : "live",
+      });
+      worker.postMessage({ type: "filters", filters: filters() });
+      worker.postMessage({ type: "prompts", prompts: prompts() });
+      const frame = (): void => {
+        if (disposed) return;
+        if (workerFrameReady && liveGlobe?.isReady) {
+          workerFrameReady = false;
+          worker?.postMessage({ type: "frame" });
+        }
+        workerFrameHandle = requestAnimationFrame(frame);
+      };
+      workerFrameHandle = requestAnimationFrame(frame);
+    })().catch((error) => {
+      if (!disposed) {
+        setConnection("offline");
+        console.error(error);
+      }
+    });
 
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
     void loadAlerts();
@@ -1223,16 +1205,16 @@ export function App() {
     window.addEventListener("keydown", onKey);
     onCleanup(() => {
       window.removeEventListener("keydown", onKey);
+      disposed = true;
+      loadAbort.abort();
+      if (workerFrameHandle !== null) cancelAnimationFrame(workerFrameHandle);
       worker?.terminate();
       worker = null;
-      mockStop?.();
-      mockStop = null;
       liveGlobe?.destroy();
       liveGlobe = null;
       if (clockTimer !== null) clearInterval(clockTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
-      if (filterTimer !== null) clearTimeout(filterTimer);
     });
   });
 
@@ -1262,7 +1244,7 @@ export function App() {
     setSelectedArticle(null);
   };
 
-  const focusTopStory = (story: Story): void => {
+  const focusTopStory = (story: StorySummary): void => {
     liveGlobe?.focusStoryId(story.id);
   };
 
@@ -2220,6 +2202,15 @@ export function App() {
         </Show>
         <Show when={perfOverlay()}>
           <div class="perf-chip mono">
+            FPS {globe().perf?.fps.toFixed(1) ?? "—"} · P95{" "}
+            {globe().perf?.frameMs.p95.toFixed(1) ?? "—"} ms
+            <br />
+            LONG TASKS {globe().perf?.longTasks ?? 0} · JS/FRAME{" "}
+            {globe().perf?.jsMs.mean.toFixed(2) ?? "—"} ms
+            <br />
+            FOCUS {globe().focusLatencyMs?.toFixed(1) ?? "—"} ms · INIT {globe().initCount ?? 0} ·
+            PATCH {globe().patchCount ?? 0}
+            <br />
             QUALITY {globe().quality} · DPR ≤ 2 · {globe().storyCount} stories
           </div>
         </Show>
@@ -2639,6 +2630,7 @@ export function App() {
                             <button onClick={() => liveGlobe?.focusStoryId(hit.story_id)}>
                               {hit.level === "escalated" ? "↑ " : ""}
                               {hit.title}
+                              {approximateLabel(hit.approx)}
                             </button>
                           )}
                         </For>
@@ -2677,6 +2669,7 @@ export function App() {
               <div class="alert-toast glass">
                 <span class="cap">
                   {toast.level === "escalated" ? "Escalated" : "Alert"} · {toast.prompt}
+                  {approximateLabel(toast.approx)}
                 </span>
                 <b>{toast.title}</b>
                 <div class="toast-actions">

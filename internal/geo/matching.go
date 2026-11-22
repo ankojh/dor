@@ -20,6 +20,7 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 		return nil
 	}
 	hint := g.CountryCode(countryHint)
+	sport := sportingText(title + " " + text)
 	found := map[string]Place{}
 	for fieldIndex, field := range []string{dateline, title, text} {
 		words := tokenize(field)
@@ -33,6 +34,9 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 				var atSpan []mention
 				for _, p := range g.byName[phrase] {
 					quality := g.geographicEvidence(p, phrase, words, i, n, fieldIndex == 0, hint)
+					if sport && !p.CountryID && fieldIndex != 0 && !independentQualifier(p, words, i, n, false) && !locativeEvidence(words, i, n) && !geographicHead(words, i, n) {
+						quality = 0
+					}
 					if quality == 0 {
 						continue
 					}
@@ -85,6 +89,23 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 	}
 	sort.Slice(out, func(i, j int) bool { return betterPlace(out[i], out[j]) })
 	return out
+}
+
+func sportingText(text string) bool {
+	words := " " + tokensText(tokenize(text)) + " "
+	for _, marker := range []string{"football", "soccer", "futbol", "cricket", "rugby", "baseball", "basketball", "tennis", "goalkeeper", "midfielder", "striker", "bundesliga", "uefa", "fifa", "nfl", "nba", "nhl", "epl", "wsl", "mlb", "ipl", "atp", "wta", "premier league", "champions league", "liga inggris", "la liga"} {
+		if strings.Contains(words, " "+marker+" ") {
+			return true
+		}
+	}
+	return false
+}
+func locativeEvidence(words []token, start, count int) bool {
+	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") && strings.Contains(" in at near across around within outside into ", " "+words[start-1].norm+" ") {
+		return true
+	}
+	end := start + count
+	return end < len(words) && words[end].norm == "based" && !strings.ContainsAny(words[end].sep, "\n.;:!?")
 }
 
 func validPlaceSpan(words []token, start, count int) bool {
@@ -171,6 +192,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 0
 	}
 	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
+		!(p.Feature == "ADM1" && g.majorPlaceSupported(p)) &&
 		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && strings.Contains(" region province district county ", " "+words[end].norm+" ") || words[end].norm == "park" && p.Population >= 50000 || words[end].norm == "bridge" && g.majorPlaceSupported(p) && !givenNames[phrase] && !familyNames[phrase])) {
 		// A populated-place coordinate does not establish the position of a
 		// separately named river/valley, or an administrative jurisdiction.
@@ -240,11 +262,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	_, ambiguous := g.skip[phrase]
 	// Possessive apostrophe-s is grammar, not a location pattern. Only an
 	// actual preposition or the explicit '-based' construction is locative.
-	locative := start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") &&
-		strings.Contains(" in at near across around within outside into ", " "+words[start-1].norm+" ")
-	if end := start + count; end < len(words) && words[end].norm == "based" && !strings.ContainsAny(words[end].sep, "\n.;:!?") {
-		locative = true
-	}
+	locative := locativeEvidence(words, start, count)
 	explicitCountry := countryName && g.explicitCountryEvidence(p, words, start, count, dateline, hint)
 	if countryName && g.foreignRegionCollision(p) && !explicitCountry {
 		// A locative such as 'living in Georgia' does not distinguish the
@@ -321,7 +339,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 
 // Curated common given/family names: they are lexical ambiguity classes, not
 // headline phrases. Adjacent personal-name structure must not become a city.
-var givenNames = nameVocabulary(`aaron adam austin adrian ahmed ahmad ali amran andi anwar ariel alan alex alexander alfred alice amanda amy andrew andi anna anne anthony arthur barbara ben benjamin bernard bill bob brian carl carlos charles charlotte cheryl christopher daniel david dennis denzel diana diane darwin donna donald dorothy edward ella emily eric eugene evan francis frank florence fred frederick george gerald harold harry helen henry hugh irene irving isaac jack jacob james jane jason jean jeff jeffrey jennifer jeremy jerry jim joan joe john jon jonathan jose joseph joshua joyce judith julie justin karen kathleen kathryn kelly kenneth kevin laura lawrence leo leonard leslie lewis linda lois louis louise luis lynn marco margaret maria marie marilyn mark martha martin mary matthew michael nancy natalie nicholas nicole norman oliver oscar patrick paul paula peter philip raymond rebecca richard robert roger ronald rose roy ruth sam samuel santiago sandra sarah scott sharon shawn shirley simon stephen steven susan thomas timothy tom valerie victoria vincent virginia vladimir walter wayne william yahaya`)
+var givenNames = nameVocabulary(`aaron adam austin adrian ahmed ahmad ali amran andi anwar ariel alan alex alexander alfred alice amanda amy andrew andi anna anne anthony arthur barbara ben benjamin bernard bill bob brian carl carlos charles charlotte cheryl christopher daniel david dennis denzel diana diane darwin donna donald dorothy edward ella emily eric eugene evan francis frank florence fred frederick george gerald harold harry hassan hasan hussein hussain helen henry hugh irene irving isaac jack jacob james jane jason jean jeff jeffrey jennifer jeremy jerry jim joan joe john jon jonathan jose joseph joshua joyce judith julie justin karen kathleen kathryn kelly kenneth kevin laura lawrence leo leonard leslie lewis linda lois louis louise luis lynn marco margaret maria marie marilyn mark martha martin mary matthew michael nancy natalie nicholas nicole norman oliver oscar patrick paul paula peter philip pria priya raymond rebecca richard robert roger ronald rose roy ruth sam samuel santiago sandra sarah scott sharon shawn shirley simon stephen steven susan thomas timothy tom valerie victoria vincent virginia vladimir walter wayne william yahaya`)
 var familyNames = nameVocabulary(`smith johnson williams brown jones garcia miller davis rodriguez martinez hernandez lopez gonzalez wilson anderson thomas taylor moore jackson martin lee perez thompson white harris sanchez clark ramirez lewis robinson walker young allen king wright scott torres nguyen hill flores green adams nelson baker hall rivera campbell mitchell carter roberts gomez phillips evans turner diaz parker cruz edwards collins reyes stewart morris morales murphy cook rogers ortiz morgan cooper peterson reed kelly howard kim ward watson brooks wood bennett gray hughes price myers ross foster perry russell bell butler barnes fisher jordan alexander hamilton graham west hayes ford marshall kennedy clinton lincoln washington bolton rubio shevchenko bello langley lima hilton beckham giuffre berry hollen orden gogh adesanya`)
 
 func nameVocabulary(words string) map[string]bool {
@@ -354,7 +372,7 @@ func geographicHead(words []token, start, count int) bool {
 	if end < len(words) && words[end].norm == "s" && strings.ContainsAny(words[end].sep, "'’") {
 		end++
 	}
-	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && strings.Contains(" mayor governor residents population economy municipal municipality council cbd streets hospitals province region state prefecture ", " "+words[end].norm+" ")
+	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && strings.Contains(" mayor governor residents population economy municipal municipality council cbd streets hospitals schools province region state prefecture marathon olympics olympic open summit conference expo ", " "+words[end].norm+" ")
 }
 
 func adminTypeNoun(word string) bool {

@@ -901,6 +901,47 @@ func TestFullCacheCanonicalMajorCityRecallAndHistoricalRepair(t *testing.T) {
 	}
 }
 
+func TestFullCacheSportsContextNeedsIndependentGeographicEvidence(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	football := p.place(context.Background(), &dorv1.Article{
+		Id: "leeds-football-mention", Title: "Leeds Bare Their Teeth to Batter Chelsea",
+		Lede: "Premier League coverage: Leeds United dominated the match from kickoff.",
+	})
+	for _, loc := range football.Locations {
+		candidate, ok := g.ByID(loc.PlaceId)
+		if !ok {
+			t.Errorf("unknown place ID in football-context result: %s", loc.PlaceId)
+			continue
+		}
+		if candidate.CountryCode == "GB" && strings.EqualFold(candidate.Name, "Leeds") {
+			t.Errorf("football-context mention alone must not resolve Leeds as the city: %+v", loc)
+		}
+	}
+
+	leeds, ok := g.Lookup("Leeds", "GB")
+	if !ok {
+		t.Fatal("full cache must contain Leeds, United Kingdom")
+	}
+	streets := p.place(context.Background(), &dorv1.Article{
+		Id: "leeds-street-repair", Title: "Leeds Streets Repaired",
+		Lede: "The Premier League schedule was released today.",
+	})
+	if len(streets.Locations) == 0 || streets.Locations[0].PlaceId != leeds.ID || streets.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+		t.Fatalf("a clear geographic event head in title should resolve Leeds despite sports lede: %+v; want %s at CITY precision", streets.Locations, leeds.ID)
+	}
+
+	philly, ok := g.Lookup("Philadelphia", "US")
+	if !ok {
+		t.Fatal("full cache must contain Philadelphia, United States")
+	}
+	marathon := p.place(context.Background(), &dorv1.Article{Id: "philly-marathon", Title: "Philadelphia Marathon Raises Funds for Local Charities"})
+	if len(marathon.Locations) == 0 || marathon.Locations[0].PlaceId != philly.ID || marathon.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+		t.Fatalf("an explicit named sports event should remain place-like: %+v; want Philadelphia %s at CITY precision", marathon.Locations, philly.ID)
+	}
+}
+
 func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
 	g := loadFullCacheForPlotTests(t)
 	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
@@ -916,6 +957,9 @@ func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
 		"PM-RAHAT Scheme Provides Housing Assistance", "Fullerton Health Opens a Clinic", "Metro Service Delayed During Repairs",
 		"Como Wins a Football Match", "Natal Gifts Sell Quickly Before Christmas", "Sabha Members Approve the Budget",
 		"Police Investigate the Incident", "Officials Hit by Storm", "The Fountain Film Wins an Award",
+		"República Proclamation Announces New Public Policy", "República Publishes a Public Affairs Editorial",
+		"Pria Hassan Announces New Music", "Hassan Khalid Introduces a New Proposal",
+		"Normal Conditions Expected This Week", "Meta AI Releases a New Model",
 	} {
 		t.Run("unqualified_"+title, func(t *testing.T) {
 			placed := p.place(context.Background(), &dorv1.Article{Id: "word-" + title, Title: title})
@@ -923,6 +967,16 @@ func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
 				t.Errorf("person, commodity, demonym, or unqualified ambiguous word must not become a location: title=%q locations=%+v", title, placed.Locations)
 			}
 		})
+	}
+	hassan, ok := g.ByID("1270239")
+	if !ok || hassan.CountryCode != "IN" {
+		t.Fatalf("full cache must contain Hassan, India: %+v found=%v", hassan, ok)
+	}
+	qualifiedHassan := p.place(context.Background(), &dorv1.Article{
+		Id: "hassan-india-qualified", Title: "Hassan, India, Hosts a Regional Meeting",
+	})
+	if len(qualifiedHassan.Locations) == 0 || qualifiedHassan.Locations[0].PlaceId != hassan.ID || qualifiedHassan.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+		t.Fatalf("explicitly qualified Hassan should resolve to the actual Indian city: %+v; want %s at CITY precision", qualifiedHassan.Locations, hassan.ID)
 	}
 	for _, tc := range []struct {
 		title, country, name string
@@ -1120,6 +1174,37 @@ func TestFullCacheHistoricalKerchBridgeTitleIsReviewOnly(t *testing.T) {
 	}, []geo.TextEvidence{{Title: "Kerch Bridge Reopens After Repairs"}})
 	if decision.Reason != "" || decision.Replacement != nil || decision.ReviewReason == "" {
 		t.Fatalf("canonical Kerch history should be retained for review without inferring a bridge location: %+v", decision)
+	}
+}
+
+func TestFullCacheBiharBridgeCanUseSupportedRegionCoarsely(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	bihar, ok := g.ByID("admin:IN.34")
+	if !ok || !geo.ValidCoordinates(bihar.Lat, bihar.Lon) {
+		t.Fatalf("full cache must contain a valid Bihar ADM1 point: %+v found=%v", bihar, ok)
+	}
+
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	article := &dorv1.Article{Id: "bihar-bridge", Title: "Naming of Bihar Bridge"}
+	placed := p.place(context.Background(), article)
+	found := false
+	for _, loc := range placed.Locations {
+		if loc.PlaceId == bihar.ID {
+			found = true
+			if loc.Precision != dorv1.Precision_PRECISION_REGION {
+				t.Errorf("landmark suffix may keep supported Bihar only at region precision, got %v", loc.Precision)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("bridge title with supported ADM1 should retain Bihar as a coarse region, got %+v", placed.Locations)
+	}
+
+	decision := g.RepairLocation(geo.StoredLocation{
+		PlaceID: bihar.ID, Lat: 0, Lon: 0, Precision: geo.RegionResolution,
+	}, []geo.TextEvidence{{Title: article.Title}})
+	if decision.Reason != "invalid_coordinate" || decision.Replacement == nil || decision.Replacement.ID != bihar.ID || !geo.ValidCoordinates(decision.Replacement.Lat, decision.Replacement.Lon) || decision.Precision != geo.RegionResolution {
+		t.Fatalf("invalid Bihar region coordinates should be repaired to the validated ADM1 point without changing coarse precision: %+v", decision)
 	}
 }
 

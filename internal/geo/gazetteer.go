@@ -935,7 +935,7 @@ func ambiguousNames() map[string]struct{} {
 		"lac", "maritime", "male", "mascara", "oriental", "savannah",
 		"somali", "balkan", "harari", "afar", "falcon", "sud", "tabasco", "quiche",
 		"sunrise", "confederation", "rugby", "metro", "springs", "como", "natal", "sabha", "vitoria", "franca",
-		"police", "hit", "fountain", "safety", "health", "fight", "union", "prospect", "progress", "freedom", "reform", "peace", "justice",
+		"police", "hit", "fountain", "normal", "meta", "republica", "safety", "health", "fight", "union", "prospect", "progress", "freedom", "reform", "peace", "justice",
 	}
 	out := make(map[string]struct{}, len(names))
 	for _, n := range names {

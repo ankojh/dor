@@ -97,7 +97,7 @@ export function sphericalCentroid(points: Vec2[], weightIndex = 0): Vec2 {
   let z = 0;
   points.forEach((point, index) => {
     const v = toUnit(point[0], point[1]);
-    const w = index === weightIndex ? 2 : 1;
+    const w = index === weightIndex ? 3 : 1;
     x += v[0] * w;
     y += v[1] * w;
     z += v[2] * w;

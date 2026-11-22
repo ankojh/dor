@@ -16,6 +16,7 @@ import type { AdjacencyArrays, FakeInit, StreamPatch } from "./fake/protocol";
 import type {
   LinkPatch,
   MatchBytes,
+  MatchSummary,
   StoryPatch,
   WireFilters,
   WorkerInit,
@@ -136,6 +137,7 @@ export class LiveState {
       init: structuredClone(this.init),
       summaries: structuredClone(this.entries),
       recentWire: [...this.wire.values()],
+      match: this.matchSummary(),
     };
   }
 
@@ -305,18 +307,20 @@ export class LiveState {
         updatedAt: story.updatedAt,
         hazard: story.hazard,
         magnitude: story.magnitude,
-        locations: story.locations.map(({ name, lat, lon, role, precision }) => ({
+        locations: story.locations.map(({ name, lat, lon, role, precision, placeId }) => ({
           name,
           lat,
           lon,
           role,
           precision,
+          placeId,
         })),
       },
       parties: story.locations
         .filter((place) => place.role === 2)
         .slice(0, 6)
         .map((place) => ({ lng: place.lon, lat: place.lat, label: place.name })),
+      partyTotal: story.locations.filter((place) => place.role === 2).length,
       degree: old?.degree ?? 0,
       strongestLink: old?.strongestLink ?? 0,
       strongestVerified: old?.strongestVerified ?? 0,
@@ -588,6 +592,22 @@ export class LiveState {
       }
   }
 
+  private matchSummary(): MatchSummary {
+    const f = this.filters;
+    const active =
+      this.prompts.length > 0 ||
+      (!!f &&
+        (f.categories.length > 0 || f.regions.length > 0 || f.minSources > 0 || f.radiusKm > 0));
+    let matched = 0;
+    let total = 0;
+    for (const entry of this.entries) {
+      if (!entry) continue;
+      total++;
+      if (!this.dimmedStories.has(entry.index)) matched++;
+    }
+    return { active, matched, total };
+  }
+
   private refreshMatches(): void {
     const f = this.filters;
     for (const entry of this.entries) {
@@ -642,6 +662,7 @@ export class LiveState {
     )
       return null;
     this.refreshMatches();
+    const match = this.matchSummary();
     const adjacency = this.topology ? this.adjacency() : undefined;
     this.refreshGraphStats();
     const top = this.entries
@@ -684,6 +705,7 @@ export class LiveState {
       stream,
       storyStates: range(this.storyDims),
       linkStates: range(this.linkDims),
+      match,
       ...(adjacency ? { adjacency: structuredClone(adjacency) } : {}),
       topStories: Uint16Array.from(top.map((entry) => entry.index)),
       wire: [...this.dirtyWire.values()],

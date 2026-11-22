@@ -2611,3 +2611,89 @@ body {
   font-size: 8.5px;
   letter-spacing: 0.06em;
 }
+
+/* F5·2 globe and panel clarity */
+.scalebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+.scalebar i {
+  display: block;
+  height: 7px;
+  border: 1px solid rgba(159, 179, 207, 0.7);
+  border-top: 0;
+  border-radius: 0 0 2px 2px;
+}
+.no-matches {
+  position: absolute;
+  top: 112px;
+  left: 20px;
+  z-index: 3;
+  padding: 6px 10px;
+  border-color: rgba(255, 194, 92, 0.4);
+  color: #ffc25c;
+  font-size: 10.5px;
+}
+.part-story {
+  position: absolute;
+  top: 128px;
+  left: 20px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: min(360px, 48%);
+  padding: 8px 11px;
+  border-color: rgba(94, 242, 255, 0.3);
+}
+.part-story b {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.part-story .mono {
+  color: var(--text-3);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+}
+.ev.dotonly {
+  min-width: 8px;
+}
+.ev.dotonly::after {
+  margin-bottom: 0;
+}
+
+/* Keep the stage breadcrumb above the story title, never on top of it. */
+@media (min-width: 781px) {
+  .stage .tl {
+    top: 34px;
+  }
+}
+@media (max-width: 780px) {
+  .stage .tl {
+    top: 28px;
+  }
+  .stage-crumbs {
+    top: 8px;
+  }
+}
+
+/* Edge markers are stacked by their container, not absolutely positioned. */
+.edge-markers .rim {
+  position: static;
+  max-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.approx {
+  color: #ffc25c;
+  letter-spacing: 0.08em;
+}

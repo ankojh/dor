@@ -99,6 +99,7 @@ const COMMON_UNIFORMS = [
   "uAnchorLo",
   "uViewport",
   "uTime",
+  "uFocusAt",
   "uHasFocus",
   "uFloor",
   "uStoryTexWidth",
@@ -125,6 +126,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
   private data: GlobeGpuData | null = null;
   private init: FakeInit | null = null;
   private hasFocus = false;
+  private focusAt = 0;
   private floor = DEFAULT_STRENGTH_FLOOR;
   private linesVisible = true;
   private tethersVisible = true;
@@ -157,6 +159,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     globe: true,
     zoom: 0,
     time: 0,
+    focusAt: 0,
     hasFocus: 0,
     floor: DEFAULT_STRENGTH_FLOOR,
     storyTexWidth: 2048,
@@ -235,6 +238,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     this.arcProgram = createProgram(gl, vertex(ARC_VERT), ARC_FRAG, "arcs", [
       ...COMMON_UNIFORMS,
       "uArcFocusTex",
+      "uArcDirTex",
       "uLinkColors[0]",
     ]);
     this.rippleProgram = createProgram(gl, vertex(RIPPLE_VERT), RIPPLE_FRAG, "ripples", [
@@ -455,6 +459,8 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     if (viewport) gl.uniform2f(viewport, state.width, state.height);
     const time = set("uTime");
     if (time) gl.uniform1f(time, state.time);
+    const focusAt = set("uFocusAt");
+    if (focusAt) gl.uniform1f(focusAt, state.focusAt);
     const hasFocus = set("uHasFocus");
     if (hasFocus) gl.uniform1f(hasFocus, state.hasFocus);
     const floor = set("uFloor");
@@ -503,8 +509,15 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     linkChanges: FocusPatch["linkChanges"],
     focusActive: boolean,
   ): void {
+    if (focusActive !== this.hasFocus) {
+      this.focusAt = this.timeSeconds();
+    }
     this.hasFocus = focusActive;
     this.data?.updateFocusChanges(storyChanges, linkChanges);
+  }
+
+  private timeSeconds(): number {
+    return this.timeOverride ?? (Date.now() - (this.init?.epochMs ?? 0)) / 1000;
   }
 
   /** Worker-followed data: surface tethers for the focused story. */
@@ -698,7 +711,8 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     state.clip.set(projection.clippingPlane);
     state.transition = projection.projectionTransition;
     state.zoom = this.map.getZoom();
-    state.time = this.timeOverride ?? (Date.now() - (this.init?.epochMs ?? 0)) / 1000;
+    state.time = this.timeSeconds();
+    state.focusAt = this.focusAt;
     state.hasFocus = this.hasFocus ? 1 : 0;
     state.floor = this.floor;
     const widths = data.textureWidths;
@@ -760,6 +774,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       gl.bindTexture(gl.TEXTURE_2D, data.arcFocusTex);
       const textureLocation = this.arcProgram.uniforms.get("uArcFocusTex");
       if (textureLocation) gl.uniform1i(textureLocation, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, data.arcDirTex);
+      const dirLocation = this.arcProgram.uniforms.get("uArcDirTex");
+      if (dirLocation) gl.uniform1i(dirLocation, 1);
       const linkColorLocation = this.arcProgram.uniforms.get("uLinkColors[0]");
       if (linkColorLocation) gl.uniform3fv(linkColorLocation, this.linkColors);
       gl.bindVertexArray(data.arcMesh.vao);

@@ -3,7 +3,7 @@ import { categoryColor, categoryLabel } from "./encoding";
 import type { HudFocus } from "../worker/fake/protocol";
 
 export const STORY_LABEL_SOURCE = "dor-story-labels";
-const STORY_LABEL_LAYER = "dor-story-labels";
+export const STORY_LABEL_LAYER = "dor-story-labels";
 
 type LabelFeature = {
   type: "Feature";
@@ -57,7 +57,7 @@ export class StoryLabels {
           "text-allow-overlap": false,
           "text-optional": true,
           "text-padding": 4,
-          "text-variable-anchor": ["top", "bottom", "left", "right"],
+          "text-variable-anchor": ["right", "left", "top", "bottom"],
           "text-radial-offset": 1.1,
           "text-max-width": 14,
         },

@@ -4,7 +4,7 @@
  * Reuses the M0 custom layer, GPU data and focus mirror, but drives them from
  * real dor.v1 snapshot/delta messages. The fake stream is never imported here.
  */
-import { Map as MapLibreMap, ScaleControl, type GeoJSONSource } from "maplibre-gl";
+import { Map as MapLibreMap, type GeoJSONSource, type MapMouseEvent } from "maplibre-gl";
 import type { WorkerInit, WorkerPatch } from "../worker/messages";
 import { growArray } from "./arrays";
 import { PatchHold } from "./gestures";
@@ -13,7 +13,7 @@ import { CameraController, type CameraTarget } from "./camera";
 import { loadGlobeConfig } from "./config";
 import { CustomGlobeLayer } from "./custom/layer";
 import { FocusMirror } from "./focus-mirror";
-import { StoryLabels, type AmbientLabel } from "./labels";
+import { StoryLabels, STORY_LABEL_LAYER, type AmbientLabel } from "./labels";
 import {
   buildLiveTethers,
   type LiveGlobeData,
@@ -21,13 +21,27 @@ import {
   type StorySummary,
 } from "./live-data";
 import { greatCirclePoint } from "./mercator";
+import { categoryColor, linkColor } from "./encoding";
 import { shouldIgnoreGlobeKeys } from "../keyboard";
 import { buildLabelsOnlyStyle } from "./style/dor-labels";
+import { TilePrefetcher } from "./tile-prefetch";
+import { WORLD } from "./world";
+import { countryAt, type WorldFeature } from "./topojson";
 import type { HudFocus } from "../worker/fake/protocol";
 
 const DEFAULT_VIEW: CameraTarget = { center: [6, 22], zoom: 1.55, bearing: 0, pitch: 0 };
 const LINK_LABEL_SOURCE = "dor-link-labels";
 const LINK_LABEL_LAYER = "dor-link-labels";
+const LINK_HOVER_SOURCE = "dor-link-hover-label";
+const LINK_HOVER_LAYER = "dor-link-hover-label";
+const DISTANCE_CHIP_SOURCE = "dor-distance-chips";
+const DISTANCE_CHIP_LAYER = "dor-distance-chips";
+const COUNTRY_SOURCE = "dor-country-tint";
+const COUNTRY_FILL_LAYER = "dor-country-tint-fill";
+const COUNTRY_LINE_LAYER = "dor-country-tint-line";
+const WORLD_SOURCE = "dor-world-land";
+const WORLD_FILL_LAYER = "dor-world-land-fill";
+const WORLD_LINE_LAYER = "dor-world-land-line";
 const AGG_SOURCE = "dor-aggregates";
 const AGG_CIRCLE_LAYER = "dor-aggregate-circles";
 const AGG_COUNT_LAYER = "dor-aggregate-count";
@@ -38,6 +52,13 @@ const AREA_LAYER = "dor-story-areas";
 const RING_SOURCE = "dor-distance-rings";
 const RING_LAYER = "dor-distance-rings";
 const RING_LABEL_SOURCE = "dor-distance-labels";
+
+const SCALE_STEPS = [
+  0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000,
+];
+
+/** Zoom at which a story becomes an area instead of a precise pin (D5). */
+const AREA_ZOOM: Readonly<Record<number, number>> = { 0: 3.8, 1: 5.8, 2: 9.5, 3: 14.2 };
 
 export type LinkInfo = {
   index: number;
@@ -63,16 +84,31 @@ export type EdgeMarker = {
   zoom: number;
 };
 
+export type FocusThreadStory = {
+  storyId: string;
+  title: string;
+  place: string;
+  category: number;
+  firstSeen: number;
+  updatedAt: number;
+};
+
 export type FocusDetails = {
   storyId: string;
   story: StorySummary;
   hud: HudFocus;
   live: LiveStory;
   threadStoryIds: string[];
+  /** The focused story followed by every lit story, with real event times. */
+  thread: FocusThreadStory[];
   secondDegree: boolean;
 };
 
 export type GlobeView = { center: [number, number]; zoom: number };
+
+export type GlobeScale = { km: number; px: number };
+
+export type MatchSummary = { active: boolean; matched: number; total: number };
 
 export type GlobeState = {
   ready: boolean;
@@ -85,6 +121,8 @@ export type GlobeState = {
   secondDegree: boolean;
   quality: number;
   tileFailed: boolean;
+  scale: GlobeScale | null;
+  match: MatchSummary;
   perf?: PerfSnapshot;
   initCount?: number;
   patchCount?: number;
@@ -107,8 +145,47 @@ type AggregateFeature = {
   properties: { count: number; color: string };
 };
 
-function linkColor(type: number): string {
-  return type === 0 ? "#ffc25c" : type === 1 ? "#ff6fd8" : "#5ef2ff";
+function hexColor(rgb: readonly [number, number, number]): string {
+  return `#${rgb.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+const REGIONS: ReadonlyArray<{
+  key: string;
+  label: string;
+  center: [number, number];
+  zoom: number;
+}> = [
+  { key: "asia", label: "ASIA", center: [92, 24], zoom: 1.9 },
+  { key: "americas", label: "AMERICAS", center: [-80, 18], zoom: 1.9 },
+  { key: "europe", label: "EUROPE", center: [16, 48], zoom: 2.4 },
+  { key: "africa", label: "AFRICA", center: [20, 5], zoom: 2.1 },
+  { key: "oceania", label: "OCEANIA", center: [140, -25], zoom: 2.1 },
+];
+
+/** Riyadh is Asia: the Middle East gets its own test before Africa/Europe. */
+function regionFor(lng: number, lat: number): string {
+  if (lng < -30) return "americas";
+  if (lng >= 110 && lat < -8) return "oceania";
+  if (lng >= 45 && lng < 75 && lat >= 10 && lat < 45) return "asia";
+  if (lng >= -25 && lng < 45 && lat >= 34) return "europe";
+  if (lng >= -20 && lng < 55 && lat >= -36 && lat < 34) return "africa";
+  if (lng >= 45) return "asia";
+  return "europe";
+}
+
+function frontHemisphere(lng: number, lat: number, centerLng: number, centerLat: number): boolean {
+  const toRad = Math.PI / 180;
+  const cosine =
+    Math.sin(lat * toRad) * Math.sin(centerLat * toRad) +
+    Math.cos(lat * toRad) * Math.cos(centerLat * toRad) * Math.cos((lng - centerLng) * toRad);
+  return cosine > 0;
+}
+
+function formatKm(km: number): string {
+  if (km >= 1000) return Math.round(km).toLocaleString("en-US");
+  if (km >= 100) return km.toFixed(0);
+  if (km >= 10) return km.toFixed(1);
+  return km.toFixed(2);
 }
 
 export class LiveGlobe {
@@ -150,9 +227,15 @@ export class LiveGlobe {
   private linesVisible = true;
   private tethersVisible = true;
   private heatVisible = true;
+  private coastlineVisible = true;
   private quality = 0;
   private floor = 0.6;
   private tileFailed = false;
+  private scale: GlobeScale | null = null;
+  private match: MatchSummary = { active: false, matched: 0, total: 0 };
+  private hoverLink: number | null = null;
+  private hoverRaf: number | null = null;
+  private readonly tiles: TilePrefetcher;
 
   private frameSamples: number[] = [];
   private lastFrameAt = 0;
@@ -160,6 +243,7 @@ export class LiveGlobe {
   private frameHandle: number | null = null;
   private restoreTimer: ReturnType<typeof setTimeout> | null = null;
   private restoreAttempts = 0;
+  private fadeUntil = 0;
 
   constructor(container: HTMLElement, options: RuntimeOptions = {}) {
     this.options = options;
@@ -167,6 +251,8 @@ export class LiveGlobe {
       (window as unknown as { __dorLive?: LiveGlobe }).__dorLive = this;
     }
     const config = loadGlobeConfig();
+    this.tiles = new TilePrefetcher(config.tilesUrl);
+    this.tiles.preloadGlyphs(config.glyphsUrl);
     this.map = new MapLibreMap({
       container,
       style: config.styleUrl || buildLabelsOnlyStyle(config),
@@ -186,7 +272,6 @@ export class LiveGlobe {
     // canvas keyboard handler would pan the camera on the same keys and mark
     // them defaultPrevented before the window-level handler sees them.
     this.map.keyboard.disable();
-    this.map.addControl(new ScaleControl({ unit: "metric", maxWidth: 110 }), "bottom-right");
     this.labels = new StoryLabels(this.map);
     this.map.on("load", () => this.onLoad());
     this.map.on("error", (event) => {
@@ -195,6 +280,7 @@ export class LiveGlobe {
       if (!this.tileFailed && /tile|vector|glyph|sprite|fetch|network|404|5\d\d/i.test(message)) {
         this.tileFailed = true;
         this.map.getContainer().classList.add("tile-failed");
+        this.showWorldFallback(true);
         void this.addFallbackCities();
         this.emit();
       }
@@ -216,6 +302,8 @@ export class LiveGlobe {
     const firstSymbol = (this.map.getStyle().layers ?? []).find(
       (candidate) => candidate.type === "symbol",
     )?.id;
+    this.addWorldFallback(firstSymbol);
+    this.addCountryLayer(firstSymbol);
     this.addAreaLayer(firstSymbol);
     this.map.addLayer(this.layer, firstSymbol);
     this.layer.setLinesVisible(this.linesVisible);
@@ -224,6 +312,7 @@ export class LiveGlobe {
     this.layer.setQuality(this.quality);
     this.labels.add();
     this.addAnnotations();
+    this.setCoastlineVisible(this.coastlineVisible);
     this.ready = true;
     this.map.on("movestart", () => this.patches.setGestureActive(true));
     this.map.on("moveend", () => {
@@ -231,12 +320,89 @@ export class LiveGlobe {
       this.applyPendingPatches();
       this.onMoveEnd();
     });
+    this.map.on("mousemove", this.onMouseMove);
+    this.map.getCanvas().addEventListener("mouseleave", this.onMouseLeave);
     if (this.pending) {
       const pending = this.pending;
       this.pending = null;
       this.setInit(pending, false);
     }
+    this.updateScale();
     this.emit();
+  }
+
+  /** Bundled Natural Earth land, visible at low zoom and when tiles fail. */
+  private addWorldFallback(beforeId: string | undefined): void {
+    if (this.map.getSource(WORLD_SOURCE)) return;
+    this.map.addSource(WORLD_SOURCE, {
+      type: "geojson",
+      data: WORLD,
+    });
+    this.map.addLayer(
+      {
+        id: WORLD_FILL_LAYER,
+        type: "fill",
+        source: WORLD_SOURCE,
+        maxzoom: 5.5,
+        paint: {
+          "fill-color": "#0b1c33",
+          "fill-opacity": 0.9,
+        },
+      },
+      beforeId,
+    );
+    this.map.addLayer(
+      {
+        id: WORLD_LINE_LAYER,
+        type: "line",
+        source: WORLD_SOURCE,
+        maxzoom: 5.5,
+        paint: {
+          "line-color": "rgba(126,214,236,0.32)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 0, 0.4, 5, 0.7],
+        },
+      },
+      beforeId,
+    );
+  }
+
+  private showWorldFallback(allZooms: boolean): void {
+    if (!this.map.getLayer(WORLD_FILL_LAYER)) return;
+    this.map.setLayerZoomRange(WORLD_FILL_LAYER, 0, allZooms ? 24 : 5.5);
+    this.map.setLayerZoomRange(WORLD_LINE_LAYER, 0, allZooms ? 24 : 5.5);
+  }
+
+  /** Party countries under the custom dots, above the basemap. */
+  private addCountryLayer(beforeId: string | undefined): void {
+    if (this.map.getSource(COUNTRY_SOURCE)) return;
+    this.map.addSource(COUNTRY_SOURCE, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+    this.map.addLayer(
+      {
+        id: COUNTRY_FILL_LAYER,
+        type: "fill",
+        source: COUNTRY_SOURCE,
+        paint: {
+          "fill-color": "#5ef2ff",
+          "fill-opacity": 0.1,
+        },
+      },
+      beforeId,
+    );
+    this.map.addLayer(
+      {
+        id: COUNTRY_LINE_LAYER,
+        type: "line",
+        source: COUNTRY_SOURCE,
+        paint: {
+          "line-color": "rgba(94,242,255,0.52)",
+          "line-width": 0.8,
+        },
+      },
+      beforeId,
+    );
   }
 
   private addAreaLayer(beforeId: string | undefined): void {
@@ -250,13 +416,28 @@ export class LiveGlobe {
           id: AREA_LAYER,
           type: "circle",
           source: AREA_SOURCE,
-          maxzoom: 12,
           paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 0, 12, 4, 18, 8, 26, 14, 36],
+            "circle-radius": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              0,
+              12,
+              4,
+              18,
+              8,
+              26,
+              14,
+              36,
+              17,
+              48,
+            ],
             "circle-color": ["get", "color"],
-            "circle-opacity": 0.07,
+            // D5: an area appears only once the view is past the story's
+            // precision; at globe zoom the same story is a normal dot.
+            "circle-opacity": ["case", [">=", ["zoom"], ["get", "areaZoom"]], 0.08, 0],
             "circle-stroke-color": ["get", "color"],
-            "circle-stroke-opacity": 0.22,
+            "circle-stroke-opacity": ["case", [">=", ["zoom"], ["get", "areaZoom"]], 0.26, 0],
             "circle-stroke-width": 1,
           },
         },
@@ -280,12 +461,67 @@ export class LiveGlobe {
           "text-font": ["Noto Sans Regular"],
           "text-size": 10,
           "text-letter-spacing": 0.08,
-          "text-allow-overlap": true,
+          "text-allow-overlap": false,
+          "text-optional": true,
+          "text-padding": 3,
           "text-offset": [0, -0.7],
+          "symbol-sort-key": ["get", "priority"],
         },
         paint: {
           "text-color": ["get", "color"],
           "text-halo-color": "rgba(3,5,11,0.96)",
+          "text-halo-width": 1.4,
+        },
+      });
+    }
+    if (!this.map.getSource(LINK_HOVER_SOURCE)) {
+      this.map.addSource(LINK_HOVER_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      this.map.addLayer({
+        id: LINK_HOVER_LAYER,
+        type: "symbol",
+        source: LINK_HOVER_SOURCE,
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 10.5,
+          "text-letter-spacing": 0.06,
+          "text-allow-overlap": true,
+          "text-offset": [0, -0.9],
+        },
+        paint: {
+          "text-color": ["get", "color"],
+          "text-halo-color": "rgba(3,5,11,0.98)",
+          "text-halo-width": 1.6,
+        },
+      });
+    }
+    if (!this.map.getSource(DISTANCE_CHIP_SOURCE)) {
+      this.map.addSource(DISTANCE_CHIP_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      this.map.addLayer({
+        id: DISTANCE_CHIP_LAYER,
+        type: "symbol",
+        source: DISTANCE_CHIP_SOURCE,
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 9.5,
+          "text-letter-spacing": 0.06,
+          "text-allow-overlap": false,
+          "text-optional": true,
+          "text-offset": [0, 1.2],
+          "text-anchor": "top",
+          "text-padding": 2,
+          "symbol-sort-key": ["get", "priority"],
+        },
+        paint: {
+          "text-color": "rgba(199,226,255,0.92)",
+          "text-halo-color": "rgba(3,5,11,0.95)",
           "text-halo-width": 1.4,
         },
       });
@@ -455,10 +691,13 @@ export class LiveGlobe {
     }
     const firstSymbol = (style.layers ?? []).find((candidate) => candidate.type === "symbol")?.id;
     try {
+      this.addWorldFallback(firstSymbol);
+      this.addCountryLayer(firstSymbol);
       this.addAreaLayer(firstSymbol);
       if (!this.map.getLayer(this.layer.id)) this.map.addLayer(this.layer, firstSymbol);
       this.labels.add();
       this.addAnnotations();
+      this.setCoastlineVisible(this.coastlineVisible);
     } catch (error) {
       console.warn(`globe: layer restore failed (${String(error)})`);
       this.scheduleLayerRestore();
@@ -516,6 +755,10 @@ export class LiveGlobe {
     this.updateAggregates();
     this.updateEdgeMarkers();
     this.updateDistanceRings();
+    this.updateDistanceChips();
+    this.updateScale();
+    const center = this.map.getCenter();
+    this.tiles.prefetch([center.lng, center.lat], this.map.getZoom());
     this.options.onView?.(this.view);
     this.emit();
   }
@@ -551,11 +794,19 @@ export class LiveGlobe {
     this.layer.setHeatVisible(this.heatVisible);
     this.layer.setQuality(this.quality);
     this.mirror = new FocusMirror(init);
+    this.match = message.match ?? {
+      active: false,
+      matched: summaries.filter(Boolean).length,
+      total: summaries.filter(Boolean).length,
+    };
     this.setAmbientLabels();
     this.updateAreas();
     this.updateAggregates();
     this.updateEdgeMarkers();
     this.updateDistanceRings();
+    this.updateDistanceChips();
+    this.updateCountryTint();
+    this.updateScale();
     if (this.focusId) {
       const index = this.data.storyById.get(this.focusId);
       if (index !== undefined) this.applyFocus(index, false);
@@ -646,6 +897,7 @@ export class LiveGlobe {
       this.patchCount++;
       this.activeStoryCount = patch.storyCount;
       this.activeLinkCount = patch.linkCount;
+      this.match = patch.match;
       this.updateTop(patch.topStories);
       focusDirty ||=
         patch.stories.length > 0 || patch.summaries.length > 0 || patch.links.length > 0;
@@ -675,6 +927,7 @@ export class LiveGlobe {
     this.updateAreas();
     this.updateAggregates();
     this.updateEdgeMarkers();
+    this.updateDistanceChips();
   }
 
   get diagnostics() {
@@ -725,10 +978,14 @@ export class LiveGlobe {
     this.layer.applyTethers([], []);
     this.labels.setFocus(null);
     this.clearLinkLabels();
+    this.clearHoverLabel();
     this.camera.cancel();
     this.focusId = null;
     this.focused = null;
+    this.fadeUntil = performance.now() + 240;
     this.updateDistanceRings();
+    this.updateDistanceChips();
+    this.updateCountryTint();
     this.updateEdgeMarkers();
     this.setAmbientLabels();
     this.options.onFocus?.(null);
@@ -745,6 +1002,7 @@ export class LiveGlobe {
     const nowSec = (Date.now() - data.init.epochMs) / 1000;
     const result = mirror.focus(index, this.secondDegree, nowSec);
     if (!result.hud) return;
+    this.fadeUntil = performance.now() + 240;
     this.layer.writeFocus(result.storyChanges, result.linkChanges, true);
     if (this.tethersVisible) {
       const tethers = buildLiveTethers(entry);
@@ -757,15 +1015,29 @@ export class LiveGlobe {
     const threadStoryIds = [...mirror.litStoryIndices]
       .map((storyIndex) => data.stories[storyIndex]?.story.id)
       .filter((id): id is string => id !== undefined);
+    const thread: FocusThreadStory[] = [...mirror.litStoryIndices]
+      .map((storyIndex) => data.stories[storyIndex])
+      .filter((entry): entry is LiveStory => entry !== undefined)
+      .map((entry) => ({
+        storyId: entry.story.id,
+        title: entry.story.title,
+        place: entry.place,
+        category: entry.category,
+        firstSeen: Number(entry.story.firstSeen),
+        updatedAt: Number(entry.story.updatedAt),
+      }));
     this.focused = {
       storyId: entry.story.id,
       story: entry.story,
       hud: result.hud,
       live: entry,
       threadStoryIds,
+      thread,
       secondDegree: this.secondDegree,
     };
     this.updateDistanceRings();
+    this.updateDistanceChips();
+    this.updateCountryTint();
     this.updateLinkLabels();
     this.updateEdgeMarkers();
     this.options.onFocus?.(this.focused);
@@ -842,9 +1114,14 @@ export class LiveGlobe {
     if (!source) return;
     const data = this.data;
     if (!data) return;
-    const features = this.focused.hud.links
+    // Declutter: label only the strongest handful; MapLibre drops the rest on
+    // collision. Any other link reveals its label on hover.
+    const labelled = this.focused.hud.links
       .filter((link) => link.strength >= 0.3)
-      .map((link) => {
+      .sort((left, right) => right.strength - left.strength)
+      .slice(0, 7);
+    const features = labelled
+      .map((link, rank) => {
         const a = data.init.links.a[link.index];
         const b = data.init.links.b[link.index];
         if (a === undefined || b === undefined) return null;
@@ -857,8 +1134,9 @@ export class LiveGlobe {
           geometry: { type: "Point" as const, coordinates: mid },
           properties: {
             label: `${link.strength.toFixed(2)} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
-            color: linkColor(link.type),
+            color: hexColor(linkColor(link.type)),
             linkIndex: link.index,
+            priority: rank,
           },
         };
       })
@@ -870,6 +1148,61 @@ export class LiveGlobe {
       this.labelsVisible ? "visible" : "none",
     );
   }
+
+  private updateHoverLabel(index: number | null): void {
+    const source = this.map.getSource(LINK_HOVER_SOURCE) as GeoJSONSource | undefined;
+    if (!source) return;
+    if (index === null || !this.focused || !this.data) {
+      this.hoverLink = null;
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const link = this.focused.hud.links.find((candidate) => candidate.index === index);
+    const a = this.data.init.links.a[index];
+    const b = this.data.init.links.b[index];
+    if (!link || a === undefined || b === undefined) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const start = this.data.stories[a];
+    const end = this.data.stories[b];
+    if (!start || !end) return;
+    const mid = greatCirclePoint([start.lng, start.lat], [end.lng, end.lat], 0.5);
+    this.hoverLink = index;
+    source.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: mid },
+          properties: {
+            label: `${link.strength.toFixed(2)} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
+            color: hexColor(linkColor(link.type)),
+          },
+        },
+      ],
+    });
+  }
+
+  private clearHoverLabel(): void {
+    this.updateHoverLabel(null);
+  }
+
+  private readonly onMouseLeave = (): void => {
+    this.clearHoverLabel();
+  };
+
+  private readonly onMouseMove = (event: MapMouseEvent): void => {
+    if (!this.focused || !this.linesVisible) return;
+    if (this.hoverRaf !== null) cancelAnimationFrame(this.hoverRaf);
+    const point = event.point;
+    this.hoverRaf = requestAnimationFrame(() => {
+      this.hoverRaf = null;
+      if (!this.focused) return;
+      const index = this.findArcAt(point.x, point.y);
+      if (index !== this.hoverLink) this.updateHoverLabel(index);
+    });
+  };
 
   private clearLinkLabels(): void {
     if (!this.ready) return;
@@ -884,7 +1217,7 @@ export class LiveGlobe {
     const features = this.data.stories
       .filter((entry) => {
         const location = entry.story.locations[entry.story.primary] ?? entry.story.locations[0];
-        return location !== undefined && location.precision <= 2;
+        return location !== undefined && location.precision <= 3;
       })
       .map((entry) => {
         const location = entry.story.locations[entry.story.primary] ?? entry.story.locations[0]!;
@@ -895,15 +1228,37 @@ export class LiveGlobe {
             coordinates: [location.lon, location.lat] as [number, number],
           },
           properties: {
-            color: `#${entry.color
-              .slice(0, 3)
-              .map((value) => value.toString(16).padStart(2, "0"))
-              .join("")}`,
+            color: hexColor(categoryColor(entry.category)),
             precision: location.precision,
+            areaZoom: AREA_ZOOM[location.precision] ?? 3.8,
           },
         };
       });
     source.setData({ type: "FeatureCollection", features });
+  }
+
+  private findArcAt(x: number, y: number): number | null {
+    const data = this.data;
+    if (!data || !this.linesVisible) return null;
+    let best: number | null = null;
+    let bestDistance = 7;
+    const candidates = this.focused
+      ? this.focused.hud.links.map((link) => link.index)
+      : Array.from({ length: data.init.linkCount }, (_, index) => index);
+    for (const index of candidates) {
+      if ((data.init.links.strength[index] ?? 0) < this.floor) continue;
+      const a = data.stories[data.init.links.a[index]!];
+      const b = data.stories[data.init.links.b[index]!];
+      if (!a || !b) continue;
+      const start = this.map.project([a.lng, a.lat]);
+      const end = this.map.project([b.lng, b.lat]);
+      const distance = distanceToSegment(x, y, start.x, start.y, end.x, end.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    }
+    return best;
   }
 
   private updateDistanceRings(): void {
@@ -911,9 +1266,13 @@ export class LiveGlobe {
     const source = this.map.getSource(RING_SOURCE) as GeoJSONSource | undefined;
     const labels = this.map.getSource(RING_LABEL_SOURCE) as GeoJSONSource | undefined;
     if (!source || !labels) return;
-    const center = this.focused
-      ? [this.focused.live.lng, this.focused.live.lat]
-      : [this.map.getCenter().lng, this.map.getCenter().lat];
+    // Ambient mode has no anchor; rings are focus-only.
+    if (!this.focused) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      labels.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const center: [number, number] = [this.focused.live.lng, this.focused.live.lat];
     const zoom = this.map.getZoom();
     const radii =
       zoom < 4 ? [1000, 5000] : zoom < 8 ? [200, 1000] : zoom < 12 ? [50, 200] : [1, 5, 25];
@@ -941,6 +1300,105 @@ export class LiveGlobe {
     labels.setData({ type: "FeatureCollection", features: labelFeatures });
   }
 
+  private updateDistanceChips(): void {
+    if (!this.ready || !this.data) return;
+    const source = this.map.getSource(DISTANCE_CHIP_SOURCE) as GeoJSONSource | undefined;
+    if (!source) return;
+    const zoom = this.map.getZoom();
+    if (!this.focused && zoom < 3.5) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const anchor = this.focused
+      ? ([this.focused.live.lng, this.focused.live.lat] as [number, number])
+      : ([this.map.getCenter().lng, this.map.getCenter().lat] as [number, number]);
+    const budget = zoom < 8 ? 4 : zoom < 12 ? 6 : 8;
+    const candidates: Array<{ entry: LiveStory; rank: number }> = [];
+    if (this.focused) {
+      this.focused.hud.links.forEach((link, rank) => {
+        const entry = this.data!.stories[link.storyIndex];
+        if (entry) candidates.push({ entry, rank });
+      });
+    } else {
+      for (const index of this.data.init.topStories.slice(0, budget * 2)) {
+        const entry = this.data.stories[index];
+        if (entry) candidates.push({ entry, rank: index });
+      }
+    }
+    const seen = new Set<number>();
+    const features = candidates
+      .filter(({ entry }) => {
+        if (seen.has(entry.index)) return false;
+        seen.add(entry.index);
+        return true;
+      })
+      .slice(0, budget)
+      .map(({ entry, rank }) => {
+        const km = haversineKm(anchor[1], anchor[0], entry.lat, entry.lng);
+        if (km < 0.5) return null;
+        return {
+          type: "Feature" as const,
+          geometry: {
+            type: "Point" as const,
+            coordinates: [entry.lng, entry.lat] as [number, number],
+          },
+          properties: {
+            label: `${formatKm(km)} km`,
+            priority: rank,
+          },
+        };
+      })
+      .filter((feature): feature is NonNullable<typeof feature> => feature !== null);
+    source.setData({ type: "FeatureCollection", features });
+  }
+
+  private updateScale(): void {
+    if (!this.ready) {
+      this.scale = null;
+      return;
+    }
+    const center = this.map.getCenter();
+    const zoom = this.map.getZoom();
+    const metersPerPixel =
+      (156543.03392 * Math.cos((center.lat * Math.PI) / 180)) / Math.pow(2, zoom);
+    if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) {
+      this.scale = null;
+      return;
+    }
+    const targetPx = 110;
+    let km = SCALE_STEPS[0]!;
+    for (const candidate of SCALE_STEPS) {
+      if ((candidate * 1000) / metersPerPixel <= targetPx * 1.2) km = candidate;
+      else break;
+    }
+    const px = Math.max(12, Math.min(150, (km * 1000) / metersPerPixel));
+    this.scale = { km, px };
+  }
+
+  private updateCountryTint(): void {
+    if (!this.ready) return;
+    const source = this.map.getSource(COUNTRY_SOURCE) as GeoJSONSource | undefined;
+    if (!source) return;
+    const parties = this.focused?.hud.parties ?? [];
+    // The boards keep the globe readable beyond six parties: the panel marks
+    // the story multi-region instead of drawing a ring and tint per country.
+    if (!this.focused || parties.length === 0 || (this.focused.live.partyTotal ?? 0) > 6) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const seen = new Set<string>();
+    const features: WorldFeature[] = [];
+    for (const party of parties) {
+      const country = countryAt(WORLD.features, party.lng, party.lat);
+      if (!country) continue;
+      const key = country.id ?? country.properties.name;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      features.push(country);
+    }
+    source.setData({ type: "FeatureCollection", features });
+  }
+
   private updateAggregates(): void {
     if (!this.ready) return;
     const zoom = this.map.getZoom();
@@ -959,30 +1417,47 @@ export class LiveGlobe {
     const cell = zoom < 2 ? 18 : 8;
     const buckets = new Map<
       string,
-      { count: number; lng: number; lat: number; category: number }
+      { count: number; lng: number; lat: number; categories: Float32Array }
     >();
     for (const entry of this.data.stories) {
       if (!entry) continue;
       const key = `${Math.floor(entry.lng / cell)}:${Math.floor(entry.lat / cell)}`;
-      const bucket = buckets.get(key) ?? { count: 0, lng: 0, lat: 0, category: entry.category };
+      const bucket = buckets.get(key) ?? {
+        count: 0,
+        lng: 0,
+        lat: 0,
+        categories: new Float32Array(11),
+      };
       bucket.count++;
       bucket.lng += entry.lng;
       bucket.lat += entry.lat;
+      bucket.categories[entry.category] = (bucket.categories[entry.category] ?? 0) + 1;
       buckets.set(key, bucket);
     }
+    const dominant = (categories: Float32Array): number => {
+      let best = 0;
+      for (let category = 1; category < categories.length; category++) {
+        if ((categories[category] ?? 0) > (categories[best] ?? 0)) best = category;
+      }
+      return best;
+    };
     const features: AggregateFeature[] = [...buckets.values()].map((bucket) => ({
       type: "Feature",
       geometry: {
         type: "Point",
         coordinates: [bucket.lng / bucket.count, bucket.lat / bucket.count],
       },
-      properties: { count: bucket.count, color: linkColor(bucket.category) },
+      properties: {
+        count: bucket.count,
+        color: hexColor(categoryColor(dominant(bucket.categories))),
+      },
     }));
     source.setData({ type: "FeatureCollection", features });
     const hexFeatures = [...buckets.values()].map((bucket) => {
       const centerLng = bucket.lng / bucket.count;
       const centerLat = bucket.lat / bucket.count;
       const radius = cell * 0.55;
+      const color = hexColor(categoryColor(dominant(bucket.categories)));
       const ring: [number, number][] = [];
       for (let i = 0; i <= 6; i++) {
         const angle = (i / 6) * Math.PI * 2;
@@ -995,7 +1470,7 @@ export class LiveGlobe {
       return {
         type: "Feature" as const,
         geometry: { type: "Polygon" as const, coordinates: [ring] },
-        properties: { count: bucket.count, color: linkColor(bucket.category) },
+        properties: { count: bucket.count, color },
       };
     });
     hexSource?.setData({ type: "FeatureCollection", features: hexFeatures });
@@ -1006,19 +1481,29 @@ export class LiveGlobe {
       this.edgeMarkers = [];
       return;
     }
+    const canvas = this.map.getCanvas();
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    const zoom = this.map.getZoom();
+    const center = this.map.getCenter();
+    const visible = (lng: number, lat: number, padX = 40, padTop = 80, padBottom = 80): boolean => {
+      // A far-side story can project into the visible canvas on a globe, so
+      // screen bounds alone are not enough: require the front hemisphere.
+      if (zoom < 5 && !frontHemisphere(lng, lat, center.lng, center.lat)) return false;
+      const point = this.map.project([lng, lat]);
+      return (
+        point.x >= padX &&
+        point.x <= width - padX &&
+        point.y >= padTop &&
+        point.y <= height - padBottom
+      );
+    };
     if (this.focused) {
-      const canvas = this.map.getCanvas();
       const linked: EdgeMarker[] = [];
       for (const link of this.focused.hud.links) {
         const entry = this.data.stories[link.storyIndex];
         if (!entry) continue;
-        const point = this.map.project([entry.lng, entry.lat]);
-        const visible =
-          point.x >= 40 &&
-          point.x <= canvas.clientWidth - 40 &&
-          point.y >= 80 &&
-          point.y <= canvas.clientHeight - 80;
-        if (visible) continue;
+        if (visible(entry.lng, entry.lat)) continue;
         linked.push({
           key: `link-${link.index}`,
           label: `${link.place.toUpperCase()} · ${(link.distanceKm ?? 0).toFixed(0)} km`,
@@ -1030,39 +1515,20 @@ export class LiveGlobe {
       this.edgeMarkers = linked.slice(0, 4);
       return;
     }
-    const regions = [
-      { key: "asia", label: "ASIA", center: [92, 24] as [number, number], zoom: 1.9 },
-      { key: "americas", label: "AMERICAS", center: [-80, 18] as [number, number], zoom: 1.9 },
-      { key: "europe", label: "EUROPE", center: [16, 48] as [number, number], zoom: 2.4 },
-      { key: "africa", label: "AFRICA", center: [20, 5] as [number, number], zoom: 2.1 },
-      { key: "oceania", label: "OCEANIA", center: [140, -25] as [number, number], zoom: 2.1 },
-    ];
     const counts = new Map<string, number>();
     for (const entry of this.data.stories) {
       if (!entry) continue;
-      const point = this.map.project([entry.lng, entry.lat]);
-      const canvas = this.map.getCanvas();
-      const visible =
-        point.x >= 40 &&
-        point.x <= canvas.clientWidth - 40 &&
-        point.y >= 80 &&
-        point.y <= canvas.clientHeight - 80;
-      if (visible) continue;
-      let key = "asia";
-      if (entry.lng < -30) key = "americas";
-      else if (entry.lng >= -25 && entry.lng < 45 && entry.lat >= 34) key = "europe";
-      else if (entry.lng >= -25 && entry.lng < 55 && entry.lat < 34) key = "africa";
-      else if (entry.lng >= 110 && entry.lat < -8) key = "oceania";
+      if (visible(entry.lng, entry.lat)) continue;
+      const key = regionFor(entry.lng, entry.lat);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    this.edgeMarkers = regions
-      .map((region) => ({
-        key: region.key,
-        label: region.label,
-        count: counts.get(region.key) ?? 0,
-        center: region.center,
-        zoom: region.zoom,
-      }))
+    this.edgeMarkers = REGIONS.map((region) => ({
+      key: region.key,
+      label: region.label,
+      count: counts.get(region.key) ?? 0,
+      center: region.center,
+      zoom: region.zoom,
+    }))
       .filter((marker) => marker.count > 0)
       .sort((a, b) => b.count - a.count)
       .slice(0, 3);
@@ -1074,6 +1540,7 @@ export class LiveGlobe {
     this.perf.frame(time);
     this.applyPendingPatches();
     this.refreshAnnotations();
+    if (performance.now() < this.fadeUntil) this.map.triggerRepaint();
     if (time - this.lastPerfAt > 1000) {
       this.lastPerfAt = time;
       this.emit();
@@ -1114,8 +1581,29 @@ export class LiveGlobe {
     this.camera.flyTo(DEFAULT_VIEW);
   }
 
+  /** Zoom rail: anchor on the focused story, otherwise the screen centre. */
+  flyToBand(label: "GLOBE" | "REGION" | "CITY" | "STREET", zoom?: number): void {
+    const targetZoom = zoom ?? { GLOBE: 1.55, REGION: 6, CITY: 11, STREET: 15 }[label];
+    const center = this.focused
+      ? ([this.focused.live.lng, this.focused.live.lat] as [number, number])
+      : ([this.map.getCenter().lng, this.map.getCenter().lat] as [number, number]);
+    this.tiles.prefetch(center, targetZoom);
+    this.camera.flyTo({ center, zoom: targetZoom, bearing: 0, pitch: 0 });
+  }
+
   flyTo(center: [number, number], zoom: number): void {
+    this.tiles.prefetch(center, zoom);
     this.camera.flyTo({ center, zoom, bearing: 0, pitch: 0 });
+  }
+
+  setCoastlineVisible(visible: boolean): void {
+    this.coastlineVisible = visible;
+    if (!this.ready) return;
+    for (const layer of ["coastline", "waterway"]) {
+      if (this.map.getLayer(layer)) {
+        this.map.setLayoutProperty(layer, "visibility", visible ? "visible" : "none");
+      }
+    }
   }
 
   setSecondDegree(on: boolean): void {
@@ -1131,8 +1619,10 @@ export class LiveGlobe {
     this.linesVisible = visible;
     this.layer.setLinesVisible(visible);
     if (!this.ready) return;
-    if (!visible) this.clearLinkLabels();
-    else this.updateLinkLabels();
+    if (!visible) {
+      this.clearLinkLabels();
+      this.clearHoverLabel();
+    } else this.updateLinkLabels();
     this.map.setLayoutProperty(
       LINK_LABEL_LAYER,
       "visibility",
@@ -1163,6 +1653,23 @@ export class LiveGlobe {
       "visibility",
       visible && this.linesVisible ? "visible" : "none",
     );
+    this.map.setLayoutProperty(LINK_HOVER_LAYER, "visibility", visible ? "visible" : "none");
+    this.map.setLayoutProperty(DISTANCE_CHIP_LAYER, "visibility", visible ? "visible" : "none");
+  }
+
+  /** A zero-match filter dims the whole globe, labels included. */
+  setLabelsDimmed(dimmed: boolean): void {
+    if (!this.ready) return;
+    const opacity = dimmed ? 0.2 : 1;
+    for (const [layer, property] of [
+      [STORY_LABEL_LAYER, "text-opacity"],
+      [LINK_LABEL_LAYER, "text-opacity"],
+      [LINK_HOVER_LAYER, "text-opacity"],
+      [DISTANCE_CHIP_LAYER, "text-opacity"],
+      [RING_LABEL_SOURCE, "text-opacity"],
+    ] as const) {
+      if (this.map.getLayer(layer)) this.map.setPaintProperty(layer, property, opacity);
+    }
   }
 
   setStrengthFloor(floor: number): void {
@@ -1185,6 +1692,10 @@ export class LiveGlobe {
 
   setView(center: [number, number], zoom: number): void {
     this.camera.jumpTo({ center, zoom, bearing: 0, pitch: 0 });
+    this.updateScale();
+    this.updateDistanceChips();
+    this.updateDistanceRings();
+    this.updateEdgeMarkers();
   }
 
   searchStories(query: string): LiveStory[] {
@@ -1255,6 +1766,8 @@ export class LiveGlobe {
       secondDegree: this.secondDegree,
       quality: this.quality,
       tileFailed: this.tileFailed,
+      scale: this.scale,
+      match: this.match,
       perf: this.perf.snapshot(),
       initCount: this.initCount,
       patchCount: this.patchCount,
@@ -1271,12 +1784,30 @@ export class LiveGlobe {
     this.destroyed = true;
     if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
     if (this.restoreTimer !== null) clearTimeout(this.restoreTimer);
+    if (this.hoverRaf !== null) cancelAnimationFrame(this.hoverRaf);
     window.removeEventListener("keydown", this.onKeyDown);
     this.map.off("webglcontextlost", this.onContextLost);
     this.map.off("webglcontextrestored", this.onContextRestored);
+    this.map.getCanvas().removeEventListener("mouseleave", this.onMouseLeave);
     this.perf.destroy();
     this.map.remove();
   }
+}
+
+function distanceToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const length = dx * dx + dy * dy;
+  if (length === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
 function destinationPoint(

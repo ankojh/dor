@@ -122,6 +122,7 @@ describe("FocusMirror metadata patches do not disturb focus state", () => {
           locations: [],
         },
         parties: [{ lng: 2, lat: 2, label: "Party" }],
+        partyTotal: 1,
         degree: 0,
         strongestLink: 0,
         strongestVerified: 0,

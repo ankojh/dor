@@ -875,9 +875,24 @@ func placeBackendRank(backend string) int {
 }
 
 func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *storyState {
-	locations := cloneLocations(place.GetLocations())
-	primary := place.GetPrimary()
-	if int(primary) >= len(locations) {
+	source := place.GetLocations()
+	locations := cloneLocations(source)
+	primary := 0
+	if len(source) > 0 {
+		requested := int(place.GetPrimary())
+		if requested < 0 || requested >= len(source) {
+			requested = 0
+		}
+		// Dedupe can move the primary; find the surviving entry by key.
+		key := locationKey(source[requested])
+		for index, location := range locations {
+			if locationKey(location) == key {
+				primary = index
+				break
+			}
+		}
+	}
+	if primary >= len(locations) {
 		primary = 0
 	}
 	story := &dorv1.Story{
@@ -886,7 +901,7 @@ func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticl
 		TitleSource: "source",
 		Category:    category,
 		Locations:   locations,
-		Primary:     primary,
+		Primary:     uint32(primary),
 		SourceCount: 1,
 		Heat:        initialHeat(article),
 		FirstSeen:   now.Unix(),

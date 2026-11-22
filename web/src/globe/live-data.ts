@@ -33,7 +33,11 @@ export type StorySummary = Pick<
   | "hazard"
   | "magnitude"
 > & {
-  locations: Array<Pick<Story["locations"][number], "name" | "lat" | "lon" | "role" | "precision">>;
+  locations: Array<
+    Pick<Story["locations"][number], "name" | "lat" | "lon" | "role" | "precision"> & {
+      placeId?: string;
+    }
+  >;
 };
 export type LiveStory = {
   story: StorySummary;
@@ -44,6 +48,8 @@ export type LiveStory = {
   category: number;
   color: [number, number, number, number];
   parties: Array<{ lng: number; lat: number; label: string }>;
+  /** Total party locations, including those beyond the six tether slots. */
+  partyTotal: number;
   degree: number;
   strongestLink: number;
   /** Strongest link whose relation is not similarity-only/unverified. */
@@ -134,12 +140,13 @@ export function buildLiveGlobe(
         updatedAt: story.updatedAt,
         hazard: story.hazard,
         magnitude: story.magnitude,
-        locations: story.locations.map(({ name, lat, lon, role, precision }) => ({
+        locations: story.locations.map(({ name, lat, lon, role, precision, placeId }) => ({
           name,
           lat,
           lon,
           role,
           precision,
+          placeId,
         })),
       },
       index,
@@ -149,6 +156,7 @@ export function buildLiveGlobe(
       category,
       color: [...categoryColor(category), 255] as [number, number, number, number],
       parties: storyParties(story),
+      partyTotal: story.locations.filter((location) => location.role === 2).length,
       degree: 0,
       strongestLink: 0,
       strongestVerified: 0,

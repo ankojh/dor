@@ -386,6 +386,20 @@ func sameJurisdiction(a, b Place) bool {
 	return a.CountryCode == b.CountryCode && a.AdminCode != "" && a.AdminCode == b.AdminCode
 }
 
+// A region named after its own capital/administrative seat is one jurisdiction,
+// even when GeoNames gives the city and the ADM1 row different codes (for
+// example Taipei city 1668341 and admin:TW.03). Counting that seat as a foreign
+// homonym is what removed valid capital dots such as Taipei.
+func sameSeatRegion(a, b Place) bool {
+	if a.CountryCode == "" || a.CountryCode != b.CountryCode || b.Feature != "ADM1" {
+		return false
+	}
+	if a.Feature != "PPLC" && !strings.HasPrefix(a.Feature, "PPLA") {
+		return false
+	}
+	return expandedPlaceName(a.Name) == expandedPlaceName(b.Name)
+}
+
 func (g *Gazetteer) majorPopulation(p Place) int64 {
 	if p.Feature == "ADM1" {
 		return g.regionPopulation[p.CountryCode+"."+p.AdminCode]
@@ -404,7 +418,8 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 	largestOther := int64(0)
 	conflict := false
 	for _, other := range g.byName[normalize(p.Name)] {
-		if other.RegionAlias != "" || expandedPlaceName(other.Name) != expandedPlaceName(p.Name) || other.ID == p.ID || sameJurisdiction(p, other) {
+		if other.RegionAlias != "" || expandedPlaceName(other.Name) != expandedPlaceName(p.Name) || other.ID == p.ID ||
+			sameJurisdiction(p, other) || sameSeatRegion(p, other) || sameSeatRegion(other, p) {
 			continue
 		}
 		conflict = true
@@ -630,7 +645,7 @@ func (g *Gazetteer) uniqueRegionName(p Place) bool {
 		if other.RegionAlias != "" || normalize(other.Name) != normalize(p.Name) || other.ID == p.ID {
 			continue
 		}
-		if sameJurisdiction(p, other) {
+		if sameJurisdiction(p, other) || sameSeatRegion(p, other) || sameSeatRegion(other, p) {
 			continue
 		}
 		return false

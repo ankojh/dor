@@ -1418,6 +1418,92 @@ func TestFullCacheDistritoFederalRequiresJurisdiction(t *testing.T) {
 	})
 }
 
+func TestFullCacheTaipeiSeatRegionConflicts(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	taipei, ok := g.ByID("1668341")
+	if !ok || taipei.CountryCode != "TW" || taipei.Feature != "PPLC" || !geo.ValidCoordinates(taipei.Lat, taipei.Lon) {
+		t.Fatalf("full cache must contain Taipei 1668341 as a valid TW capital: %+v found=%v", taipei, ok)
+	}
+	region, ok := g.ByID("admin:TW.03")
+	if !ok || region.CountryCode != "TW" || region.Feature != "ADM1" || !geo.ValidCoordinates(region.Lat, region.Lon) {
+		t.Fatalf("full cache must contain admin:TW.03 as a valid TW ADM1: %+v found=%v", region, ok)
+	}
+
+	for _, tc := range []struct{ name, title string }{
+		{"mayoral_candidates", "Taipei mayoral candidates pull out all stops to sway voters"},
+		{"transit_plan", "Taipei announces a new transit plan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "taipei-" + tc.name, Title: tc.title})
+			var found *dorv1.Location
+			for _, loc := range placed.Locations {
+				if loc.PlaceId == taipei.ID {
+					found = loc
+				}
+			}
+			if found == nil {
+				t.Fatalf("bare Taipei with its own-name ADM1 seat should resolve to city 1668341, got %+v", placed.Locations)
+			}
+			if found.Precision != dorv1.Precision_PRECISION_CITY {
+				t.Fatalf("bare Taipei should resolve at city precision, got %+v", found)
+			}
+			candidate, ok := g.ByID(found.PlaceId)
+			if !ok || candidate.CountryCode != "TW" {
+				t.Fatalf("resolved Taipei must be a TW place, got %+v (known=%v)", found, ok)
+			}
+		})
+	}
+
+	for _, title := range []string{
+		"Manchester City held by Fulham",
+		"Real Madrid will never be sold",
+		"Victoria Bushfires spread across the state",
+		"Washington warns officials of new sanctions",
+	} {
+		t.Run("negative_"+normalizePlotName(title), func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "taipei-negative-" + title, Title: title})
+			if len(placed.Locations) != 0 {
+				t.Fatalf("seat-conflict fix must not weaken the negative for %q: %+v", title, placed.Locations)
+			}
+		})
+	}
+
+	t.Run("repair_city_not_deleted", func(t *testing.T) {
+		decision := g.RepairLocation(geo.StoredLocation{
+			PlaceID: taipei.ID, Lat: float64(float32(taipei.Lat)), Lon: float64(float32(taipei.Lon)), Precision: geo.CityResolution,
+		}, []geo.TextEvidence{{Title: "Taipei announces a new transit plan"}})
+		if decision.Reason != "" && (decision.Replacement == nil || decision.Replacement.ID != taipei.ID) {
+			t.Fatalf("canonical Taipei city must not be deleted for supported seat evidence, got %+v", decision)
+		}
+	})
+
+	t.Run("repair_region_supported", func(t *testing.T) {
+		decision := g.RepairLocation(geo.StoredLocation{
+			PlaceID: region.ID, Lat: float64(float32(region.Lat)), Lon: float64(float32(region.Lon)), Precision: geo.RegionResolution,
+		}, []geo.TextEvidence{{Title: "Taipei announces a new transit plan"}})
+		if decision.Reason == "" {
+			return
+		}
+		if decision.Replacement == nil {
+			t.Fatalf("admin:TW.03 must not be removed for its own-name seat evidence, got %+v", decision)
+		}
+		switch decision.Replacement.ID {
+		case region.ID:
+			if decision.Precision != geo.RegionResolution {
+				t.Fatalf("retained admin:TW.03 should stay at region precision, got %+v", decision)
+			}
+		case taipei.ID:
+			if decision.Precision != geo.CityResolution {
+				t.Fatalf("re-plotted Taipei city should be at city precision, got %+v", decision)
+			}
+		default:
+			t.Fatalf("admin:TW.03 should be retained or re-plotted to Taipei city, got %+v", decision)
+		}
+	})
+}
+
 var fullCachePlotGazetteers = struct {
 	sync.Mutex
 	byDir map[string]*geo.Gazetteer

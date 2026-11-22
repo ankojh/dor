@@ -45,7 +45,8 @@ precision are still corrected.
 `review_required` changes and included in the bundle. Most are false dots
 (people, clubs, brands, common words). Keeping one requires an explicit,
 reviewed `--review-allowlist` entry of `table|owner|place_id`; only allowlisted
-rows appear in `reviews` and remain untouched. A zero-change second run after
+rows appear in `reviews`. Kept rows still receive coordinate and precision
+corrections. A zero-change second run after
 the default apply has no review candidates left. Idempotency is not geographic
 completion or permission to serve the proposal live.
 
@@ -73,7 +74,13 @@ go run ./scripts/repair-geocoding --geonames-dir /path/to/geonames \
 
 To keep specific reviewed rows, add
 `--review-allowlist /absolute/path/review-keep.txt`, where each non-comment
-line is `table|owner|place_id`. Without it, every review candidate is removed.
+line is `table|owner|place_id`. Append `|region` when the reviewed evidence
+supports only the surrounding state or district; the wire format has no
+district precision, so both use REGION. The option also caps an already
+automatically supported row. Append `|keep` only when a reviewer explicitly
+retains the original canonical place despite a proposed different replot; the
+stored coordinate must be valid and within 1 km of that place. Without the
+allowlist, every review candidate is removed.
 
 The connected server's `current_database()` must exactly match `--allow-db`.
 The live database `dor` is always refused, even when explicitly allowed. This
@@ -99,6 +106,10 @@ error explicitly says the repair committed; do not treat that as a rollback.
 - `dataset_sha256` and deterministic `run_id` bind the source dataset and plan.
 - Each affected story carries its DB location before hash, complete after
   locations, primary array index and place ID, and an explicit unlocated flag.
+- Votes and before hashes carry the migration 0006 ISO alpha-2 country code.
+  A replot takes its resolved place's code; a coordinate or precision refresh
+  retains the stored value, including unknown. A collision fills an empty
+  target country from the resolved replacement.
 - Each affected article and every stored article attached to an affected story
   carries its DB location before hash, expected story membership, complete
   persisted after votes, and an explicit proposed event place/lat/lon/located.

@@ -428,7 +428,7 @@ func TestRepairExplicitReviewAllowlistKeepsRows(t *testing.T) {
 func TestLoadReviewAllowlistParsesExplicitEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "allow.txt")
-	contents := "# reviewed rows only\n\nstory_locations|story-1|paris\narticle_locations|article-1|boston\n"
+	contents := "# reviewed rows only\n\nstory_locations|story-1|paris|region\narticle_locations|article-1|boston\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestLoadReviewAllowlistParsesExplicitEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load valid allowlist: %v", err)
 	}
-	if len(allow) != 2 || !allow["story_locations|story-1|paris"] || !allow["article_locations|article-1|boston"] {
+	if len(allow) != 3 || !allow["story_locations|story-1|paris"] || !allow["story_locations|story-1|paris|region"] || !allow["article_locations|article-1|boston"] {
 		t.Fatalf("allowlist must contain exactly the two explicit entries: %+v", allow)
 	}
 	if empty, err := loadReviewAllowlist(""); err != nil || len(empty) != 0 {
@@ -575,7 +575,7 @@ func prepareRepairDB(t *testing.T, ctx context.Context, dsn string) (*pgx.Conn, 
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS public.article_locations, public.story_locations, public.articles, public.stories CASCADE`,
-		`CREATE TABLE public.stories (id text PRIMARY KEY, title text NOT NULL, primary_loc text NOT NULL DEFAULT '')`,
+		`CREATE TABLE public.stories (id text PRIMARY KEY, title text NOT NULL, primary_loc text NOT NULL DEFAULT '', brief text NOT NULL DEFAULT '')`,
 		`CREATE TABLE public.articles (id text PRIMARY KEY, story_id text NOT NULL, title text NOT NULL, lede text NOT NULL DEFAULT '', dateline text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now())`,
 		`CREATE TABLE public.story_locations (story_id text NOT NULL, place_id text NOT NULL, name text NOT NULL, lat double precision NOT NULL, lon double precision NOT NULL, precision smallint NOT NULL, role smallint NOT NULL, weight real NOT NULL, UNIQUE(story_id,place_id,role))`,
 		`CREATE TABLE public.article_locations (article_id text NOT NULL, place_id text NOT NULL, name text NOT NULL, lat double precision NOT NULL, lon double precision NOT NULL, precision smallint NOT NULL, role smallint NOT NULL, conf real NOT NULL, UNIQUE(article_id,place_id,role))`,
@@ -589,6 +589,15 @@ func prepareRepairDB(t *testing.T, ctx context.Context, dsn string) (*pgx.Conn, 
 			conn.Close(ctx)
 			t.Fatalf("create test tables and rows: %v", err)
 		}
+	}
+	migration, err := os.ReadFile("../../migrations/0006_enrichment_provenance.up.sql")
+	if err != nil {
+		conn.Close(ctx)
+		t.Fatalf("read migration 0006: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(migration)); err != nil {
+		conn.Close(ctx)
+		t.Fatalf("apply migration 0006: %v", err)
 	}
 	g := repairFixtureGazetteer(t)
 	return conn, g

@@ -15,6 +15,7 @@ type LocationRepairBundle struct {
 type LocationVote struct {
 	PlaceID    string  `json:"place_id"`
 	Name       string  `json:"name"`
+	Country    string  `json:"country"`
 	Lat        float64 `json:"lat"`
 	Lon        float64 `json:"lon"`
 	Precision  int16   `json:"precision"`

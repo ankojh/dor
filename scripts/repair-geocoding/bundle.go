@@ -64,9 +64,19 @@ func plannedRows(before []location, changes []change) map[ownerKey][]geo.Locatio
 		rows[k][voteKey(row.PlaceID, row.Role)] = vote(row)
 	}
 	for _, c := range changes {
+		if c.countryOnly != "" {
+			k := key(c.row)
+			v := rows[k][voteKey(c.row.PlaceID, c.row.Role)]
+			v.Country = c.countryOnly
+			rows[k][voteKey(c.row.PlaceID, c.row.Role)] = v
+			continue
+		}
 		delete(rows[key(c.row)], voteKey(c.row.PlaceID, c.row.Role))
 	}
 	for _, c := range changes {
+		if c.countryOnly != "" {
+			continue
+		}
 		if c.decision.Replacement == nil {
 			continue
 		}
@@ -144,9 +154,13 @@ func buildBundle(ctx context.Context, tx pgx.Tx, g *geo.Gazetteer, before []loca
 		original[key(row)] = append(original[key(row)], vote(row))
 	}
 	stories, articles := map[string]bool{}, map[string]bool{}
+	storyLocationChanges := map[string]bool{}
 	for _, c := range changes {
 		if c.row.Table == "story_locations" {
 			stories[c.row.Owner] = true
+			if c.countryOnly == "" {
+				storyLocationChanges[c.row.Owner] = true
+			}
 		} else {
 			articles[c.row.Owner] = true
 		}
@@ -166,6 +180,10 @@ func buildBundle(ctx context.Context, tx pgx.Tx, g *geo.Gazetteer, before []loca
 		k := ownerKey{"story_locations", id}
 		votes := after[k]
 		idx, primary := primaryVote(votes, previous)
+		if stories[id] && !storyLocationChanges[id] && previous != primary {
+			rows.Close()
+			return bundle, fmt.Errorf("story %s country-only refresh would change primary %q to %q", id, previous, primary)
+		}
 		eventCandidates[id] = wireFromVotes(votes, idx)
 		if !stories[id] {
 			continue

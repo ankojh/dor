@@ -107,9 +107,10 @@ error explicitly says the repair committed; do not treat that as a rollback.
 - Each affected story carries its DB location before hash, complete after
   locations, primary array index and place ID, and an explicit unlocated flag.
 - Votes and before hashes carry the migration 0006 ISO alpha-2 country code.
-  A replot takes its resolved place's code; a coordinate or precision refresh
-  retains the stored value, including unknown. A collision fills an empty
-  target country from the resolved replacement.
+  A replot takes its resolved place's code; a refresh retains a nonempty
+  stored value. A known retained place with no country receives its canonical
+  code, without changing its coordinate, precision, role, weight or primary.
+  A collision fills an empty target country from the resolved replacement.
 - Each affected article and every stored article attached to an affected story
   carries its DB location before hash, expected story membership, complete
   persisted after votes, and an explicit proposed event place/lat/lon/located.

@@ -180,7 +180,7 @@ anywhere else.
 | `story.changed.<0..15>` | clusterer/editor → relation judge/matcher |
 | `link.changed` | relation judge → publisher |
 | `article.placed` | clusterer → matcher |
-| `match.filter.<client>` | matcher → gateway |
+| `match.filter.<client>` | reserved; no producer/consumer in this build |
 | `match.alert` | matcher → notifier |
 | `delta.out` | publisher → gateway |
 | `echo.in` / `echo.out` | dev sample only |
@@ -190,9 +190,11 @@ anywhere else.
 
 Streams are per domain; the full table (subjects, storage, MaxAge, MaxBytes,
 dedupe) is in [decisions.md](decisions.md#bus). Summary: INGEST, ENRICH, STORY,
-ALERT, DELTA, MATCH (memory), DLQ and ECHO. All use Limits retention and
-`DiscardOld`; `MaxBytes` binds before `MaxAge` under load. The processing
-streams use a 20 min dedupe horizon; DELTA 10 min, MATCH 2 min.
+ALERT, DELTA, MATCH (reserved, memory), DLQ and ECHO. All use Limits retention
+and `DiscardOld`; `MaxBytes` binds before `MaxAge` under load. The processing
+streams use a 20 min dedupe horizon; DELTA 10 min, MATCH 2 min. No producer or
+consumer uses the MATCH stream yet; client filters are handled over the
+WebSocket.
 
 Publishing always sets `Nats-Msg-Id`; an agent that can be retried must pass a
 stable stage-namespaced id (for example `clean:<articleID>`). JetStream dedupe
@@ -326,8 +328,9 @@ Vite 7 + SolidJS 1.9 + TypeScript strict (`noUncheckedIndexedAccess`), pnpm,
 ESLint flat config, Prettier, Vitest. The data worker is
 `web/src/worker/index.ts`, loaded with
 `new Worker(new URL("./worker/index.ts", import.meta.url), { type: "module" })`.
-It posts `{type: "ready", ...}` after a protobuf round-trip; the shell renders
-that line. Do not put data work on the main thread.
+It owns the gateway socket, decode, resume and patch path. The old `ready`
+probe is no longer posted or rendered; it remains only as a protobuf-codegen
+round-trip test. Do not put data work on the main thread.
 
 ## Docker
 

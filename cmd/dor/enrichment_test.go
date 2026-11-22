@@ -53,3 +53,29 @@ func TestClaudeCLIModelsEnvOverrides(t *testing.T) {
 		}
 	})
 }
+
+// needsGazetteer gates the GeoNames load. The plotter needs it for placement,
+// but the gateway serves /api/places from the same index, and a publisher
+// implies a gateway. Processes that run neither must not download or parse it.
+func TestNeedsGazetteer(t *testing.T) {
+	tests := []struct {
+		selection string
+		want      bool
+	}{
+		{selection: "plot", want: true},
+		{selection: "gateway", want: true},
+		{selection: "publisher", want: true},
+		{selection: "gateway,echo", want: true},
+		{selection: "echo", want: false},
+		{selection: "none", want: false},
+		{selection: "", want: false},
+		{selection: "all", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.selection, func(t *testing.T) {
+			if got := needsGazetteer(tc.selection); got != tc.want {
+				t.Fatalf("needsGazetteer(%q) = %v, want %v", tc.selection, got, tc.want)
+			}
+		})
+	}
+}

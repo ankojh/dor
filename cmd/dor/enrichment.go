@@ -73,12 +73,12 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	}
 	deps.Text = textsvc.New(b, log, completer)
 
-	if wantsAgent(cfg.agents, agents.PlotDurable) {
+	if needsGazetteer(cfg.agents) {
 		loadCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		g, err := geo.Load(loadCtx, cfg.geonamesDir, log)
 		cancel()
 		if err != nil {
-			log.Warn("gazetteer unavailable; plotter will use hints/dateline fallback", "dir", cfg.geonamesDir, "err", err)
+			log.Warn("gazetteer unavailable; plotter will use hints/dateline fallback and /api/places will report unavailable", "dir", cfg.geonamesDir, "err", err)
 		} else {
 			deps.Gazetteer = g
 		}
@@ -279,6 +279,14 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// needsGazetteer reports whether this process must load the GeoNames index.
+// The plotter uses it to place articles, but the gateway also serves Cmd-K
+// /api/places from the same in-memory index. A gateway-only or publisher
+// process therefore needs it even though it runs no plot agent.
+func needsGazetteer(selection string) bool {
+	return wantsAgent(selection, agents.PlotDurable) || runsGateway(selection)
 }
 
 func wantsAgent(selection, name string) bool {

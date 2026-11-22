@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -126,11 +129,30 @@ func TestBadAgentSelectionExitsNonZero(t *testing.T) {
 	}
 }
 
+// writeTestGeonames creates the three files geo.Load reads so a gateway-only
+// process can load a tiny gazetteer without downloading GeoNames in a test.
+func writeTestGeonames(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"countryInfo.txt":      "# test fixture\nFR\tFRA\t250\tEU\tFrance\tParis\n",
+		"admin1CodesASCII.txt": "FR.11\tIle-de-France\tIle-de-France\t0\n",
+		"cities15000.txt":      "2988507\tParis\tParis\t\t48.85341\t2.34880\tP\tPPL\tFR\t\t11\tIle-de-France\t11\t75000\t2138551\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 func TestGatewayOnlyProcessStartsWithoutPublisher(t *testing.T) {
 	cmd, lines, stderr := spawnDor(t,
 		"--nats-listen", "127.0.0.1:0", "--nats-store", t.TempDir(),
 		"--admin-addr", "", "--agents", "gateway",
 		"--gateway-addr", "127.0.0.1:0", "--db-url", "off", "--tei-url", "",
+		"--geonames-dir", writeTestGeonames(t),
 		"--supervisor=false",
 	)
 	running := waitLog(t, lines, "dor running")
@@ -141,8 +163,36 @@ func TestGatewayOnlyProcessStartsWithoutPublisher(t *testing.T) {
 	if !ok || len(names) != 0 {
 		t.Fatalf("gateway-only selected agents=%v, want empty", running["agents"])
 	}
-	if opsURL, _ := running["ops_url"].(string); !strings.HasPrefix(opsURL, "http://127.0.0.1:") {
+	opsURL, _ := running["ops_url"].(string)
+	if !strings.HasPrefix(opsURL, "http://127.0.0.1:") {
 		t.Fatalf("gateway ops URL=%q, want the ephemeral gateway listener", opsURL)
+	}
+	base := strings.TrimSuffix(opsURL, "/ops")
+	places := struct {
+		Places    []struct{ Name string } `json:"places"`
+		Available bool                    `json:"available"`
+	}{}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp, err := http.Get(base + "/api/places?query=Paris&limit=3")
+		if err == nil {
+			if resp.StatusCode == http.StatusOK {
+				err = json.NewDecoder(resp.Body).Decode(&places)
+			} else {
+				err = fmt.Errorf("status %d", resp.StatusCode)
+			}
+			resp.Body.Close()
+		}
+		if err == nil && places.Available {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("/api/places on a gateway-only process: available=%v places=%v err=%v", places.Available, places.Places, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(places.Places) == 0 || places.Places[0].Name != "Paris" {
+		t.Fatalf("/api/places places=%v, want the test gazetteer's Paris", places.Places)
 	}
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)

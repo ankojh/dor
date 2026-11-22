@@ -77,7 +77,10 @@ Rules the implementation keeps:
 - Restart uses the durable consumer and idempotent writes; it does not promise
   recovery of state held only in a handler's memory.
 - GDELT control is a real producer gate. RSS, plotting, classification and the
-  wire are never paused or shed.
+  wire are never paused or shed. The budget shed order is briefs (80%), "why"
+  prefetch (90%), then thematic link judging (95%); relation pairs with evidence
+  of a causal or reaction link are admitted as default work and survive the
+  thematic stage. A hard daily cap still denies every call at 100%.
 - The shed order is enforced by `budget.Manager.Check`, not by the page. The
   Supervisor only records the real stage transitions.
 - If a control is absent, the action log says `advisory: true` and names the
@@ -143,9 +146,12 @@ The replayer:
 Replay into a stack whose `seen` bucket does not already contain those
 article URLs. On a long-lived local stack the normalizer's 48 h dedupe can drop
 a previously ingested day before it reaches the globe; reset the local NATS
-store (or use a fresh stack) when the goal is downstream load. This is the
-normalizer doing its job, not a replayer failure. The replayer itself never
-fetches an article body.
+store (or use a fresh stack) when the goal is downstream load. There is no
+replayer flag that bypasses normalizer dedupe: the replayer only makes its own
+publish ids repeatable/idempotent. For a split stack, start the stack with a
+fresh store directory (or clear the `seen` and fetch-id keys) before the replay.
+This is the normalizer doing its job, not a replayer failure. The replayer
+itself never fetches an article body.
 
 `make replay` is a convenience wrapper; set `DOR_RECORD_DIR` and optionally
 `DAY=... RATE=...`.
@@ -189,13 +195,15 @@ explicitly attributed step.
 
 ## Production split processes (one process per agent)
 
-Use an external NATS server. Exactly one process is the provisioning owner and
-must run before the others:
+Exactly one process is the provisioning owner and must run before the others.
+On a clean machine let it start the embedded NATS server; when you already run
+an external NATS server, point `DOR_NATS_URL` at it instead and keep
+`--provision` on the owner.
 
 ```bash
-# 1) provisioning owner only
-DOR_NATS_URL=nats://127.0.0.1:4222 \
-  ./bin/dor run --agents=none --provision --admin-addr 127.0.0.1:8091
+# 1) provisioning owner only (embedded NATS on 4222 for a clean-machine run)
+./bin/dor run --agents=none --provision --nats-listen 127.0.0.1:4222 \
+  --admin-addr 127.0.0.1:8091
 
 # 2) fetchers (three RSS shard processes; one GDELT; one hazard)
 DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=rss --rss-shard 0 --admin-addr 127.0.0.1:8101
@@ -217,7 +225,26 @@ DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=relation --relation-sh
 DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=relation --relation-shards 3 --relation-shard 2 --admin-addr 127.0.0.1:8123
 DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=editor --admin-addr 127.0.0.1:8124
 DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=publisher --gateway-addr 127.0.0.1:8080 --admin-addr 127.0.0.1:8125
+
+# 5) prompts/alerts evaluator and notification delivery
+DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=matcher --admin-addr 127.0.0.1:8131
+DOR_NATS_URL=nats://127.0.0.1:4222 ./bin/dor run --agents=notifier --admin-addr 127.0.0.1:8132
 ```
+
+Give the matcher and notifier processes the same `DOR_DATABASE_URL` as the
+provisioning owner. The alert store then reloads saved alerts and records hits
+in Postgres; without it the processes still run, but alert definitions live
+only in the 48-hour live-state KV, so they can disappear on a cold start. The
+delivery queue itself uses its dedicated non-expiring bucket. `notifier` also
+needs the same `DOR_NTFY_URL` and VAPID/push-encryption variables as the gateway
+if external notifications are configured. Missing channels are logged and the
+delivery stays pending rather than being acknowledged as sent.
+
+The gateway process loads the GeoNames gazetteer for `/api/places` itself. A
+gateway-only process (`--agents=gateway`) therefore serves Cmd-K place search
+even when no plot agent runs there; it still needs the same
+`--geonames-dir`/`DOR_GEONAMES_DIR` cache. A process with neither the plotter
+nor the gateway skips the gazetteer load.
 
 Operational notes for this profile:
 

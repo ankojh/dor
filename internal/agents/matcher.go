@@ -133,6 +133,14 @@ func (m *matcherAgent) Start(ctx context.Context) error {
 		return err
 	}
 	m.running.Store(true)
+	m.startRuntime(runCtx)
+	return nil
+}
+
+// startRuntime starts the prompt-refresh ticker and prompt watch for one run
+// context. Start and Restart share it so a restart restores both background
+// loops, not only the durable consumers.
+func (m *matcherAgent) startRuntime(runCtx context.Context) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -162,7 +170,6 @@ func (m *matcherAgent) Start(ctx context.Context) error {
 			}
 		}
 	}()
-	return nil
 }
 
 func (m *matcherAgent) Consume(ctx context.Context) error {

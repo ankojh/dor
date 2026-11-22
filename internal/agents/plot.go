@@ -87,6 +87,7 @@ func (p *plotter) place(ctx context.Context, article *dorv1.Article) (res *dorv1
 			Precision: hints.GetPrecision(),
 			Role:      dorv1.Role_ROLE_VENUE,
 			Weight:    1,
+			Country:   p.countryCode(hints.GetCountry(), countryHint),
 		}}
 		res.Backend = "hints"
 		res.Fallback = true
@@ -122,6 +123,7 @@ func (p *plotter) place(ctx context.Context, article *dorv1.Article) (res *dorv1
 			Precision: hints.GetPrecision(),
 			Role:      dorv1.Role_ROLE_ORIGIN,
 			Weight:    0.8,
+			Country:   p.countryCode(hints.GetCountry(), countryHint),
 		}}
 		res.Backend = "hints"
 		res.Fallback = true
@@ -359,7 +361,23 @@ func placeLocation(c geo.Place, prec dorv1.Precision, role dorv1.Role, weight fl
 		Precision: prec,
 		Role:      role,
 		Weight:    weight,
+		Country:   c.CountryCode,
 	}
+}
+
+// countryCode resolves a hint or gazetteer country to ISO alpha-2. Hint
+// countries are usually already codes; names go through the gazetteer index.
+func (p *plotter) countryCode(hint, countryHint string) string {
+	code := strings.ToUpper(strings.TrimSpace(hint))
+	if len(code) == 2 {
+		return code
+	}
+	if p.deps.Gazetteer != nil {
+		if c := p.deps.Gazetteer.CountryCode(firstNonEmpty(hint, countryHint)); c != "" {
+			return c
+		}
+	}
+	return ""
 }
 
 func precisionFromString(s string) dorv1.Precision {

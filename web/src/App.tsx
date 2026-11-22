@@ -152,10 +152,14 @@ function typeName(type: number): string {
   return type === 0 ? "Causal" : type === 1 ? "Reaction" : "Thematic";
 }
 
+type BriefProvenance = "generated" | "source_snippet" | "none";
+
 type StoryText = {
   loading: boolean;
   available: boolean;
+  title?: string;
   brief?: string;
+  provenance?: BriefProvenance;
   error?: string;
 };
 
@@ -191,7 +195,16 @@ type StoryDetails = {
     title: string;
     brief?: string;
     brief_available?: boolean;
+    brief_source?: BriefProvenance;
+    title_source?: string;
     category: string;
+    category_backend?: string;
+    category_confidence?: number;
+    degraded?: boolean;
+    fallback?: boolean;
+    place_backend?: string;
+    place_degraded?: boolean;
+    place_fallback?: boolean;
     source_count: number;
     first_seen: number;
     updated_at: number;
@@ -814,13 +827,17 @@ export function App() {
       });
       const payload = (await response.json()) as {
         available?: boolean;
+        title?: string;
         brief?: string;
+        provenance?: BriefProvenance;
         error?: string;
       };
       next = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.brief),
+        ...(payload.title ? { title: payload.title } : {}),
         ...(payload.brief ? { brief: payload.brief } : {}),
+        provenance: payload.provenance ?? "none",
         ...(payload.error ? { error: payload.error } : {}),
       };
     } catch (error) {
@@ -2512,7 +2529,7 @@ export function App() {
                 </button>
               </div>
               <div class="sec">
-                <h1>{details().story.title}</h1>
+                <h1>{storyText()?.title || details().story.title}</h1>
                 <div class="facts">
                   <span>
                     first seen <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
@@ -2526,14 +2543,19 @@ export function App() {
                 </div>
               </div>
               <div class="sec">
-                <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
+                <Show when={storyText()?.available && storyText()?.provenance === "generated"}>
+                  <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
+                </Show>
+                <Show when={storyText()?.available && storyText()?.provenance === "source_snippet"}>
+                  <span class="agentk">SOURCE EXCERPT · from {details().hud.story.sources} sources</span>
+                </Show>
                 <Show
                   when={storyText()?.available}
                   fallback={
                     <p class="brief muted">
                       {storyText()?.loading
                         ? "Generating brief…"
-                        : "Brief not available yet. The story remains readable from its sources and places."}
+                        : "No agent brief for this story. The headline and sources stand on their own."}
                     </p>
                   }
                 >
@@ -2694,7 +2716,7 @@ export function App() {
               ×
             </button>
           </div>
-          <h2>{focus()!.story.title}</h2>
+          <h2>{storyText()?.title || focus()!.story.title}</h2>
           <div class="facts">
             <span>
               <b>{focus()!.hud.story.sources}</b> sources

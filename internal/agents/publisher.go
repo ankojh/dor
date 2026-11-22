@@ -416,19 +416,28 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	}
 	category := dorv1.Category_CATEGORY_OTHER
 	wire := &dorv1.WireRow{
-		ArticleId:    a.Id,
-		StoryId:      a.StoryId,
-		Title:        a.Title,
-		Source:       a.SourceId,
-		Place:        place,
-		Category:     category,
-		At:           a.PublishedAt,
-		Join:         join,
-		Lang:         a.Lang,
-		PromptScores: nil,
+		ArticleId:          a.Id,
+		StoryId:            a.StoryId,
+		Title:              a.Title,
+		Source:             a.SourceId,
+		Place:              place,
+		Category:           category,
+		At:                 a.PublishedAt,
+		Join:               join,
+		Lang:               a.Lang,
+		Country:            a.Country,
+		Degraded:           a.Degraded,
+		Fallback:           a.Fallback,
+		CategoryBackend:    a.CategoryBackend,
+		CategoryConfidence: a.CategoryConfidence,
+		PlaceBackend:       a.PlaceBackend,
+		PlaceDegraded:      a.PlaceDegraded,
+		PlaceFallback:      a.PlaceFallback,
 	}
 	if hints := a.Hints; hints != nil {
-		wire.Country = hints.Country
+		if wire.Country == "" {
+			wire.Country = hints.Country
+		}
 		wire.Lat = hints.Lat
 		wire.Lon = hints.Lon
 		wire.Located = hints.Located
@@ -443,6 +452,9 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 			wire.StoryId, wire.Join, wire.Category = prev.StoryId, prev.Join, prev.Category
 			wire.Country, wire.Place = prev.Country, prev.Place
 			wire.Lat, wire.Lon, wire.Located = prev.Lat, prev.Lon, prev.Located
+			wire.Degraded, wire.Fallback = prev.Degraded, prev.Fallback
+			wire.CategoryBackend, wire.CategoryConfidence = prev.CategoryBackend, prev.CategoryConfidence
+			wire.PlaceBackend, wire.PlaceDegraded, wire.PlaceFallback = prev.PlaceBackend, prev.PlaceDegraded, prev.PlaceFallback
 		}
 	}
 	if wire.StoryId != "" {
@@ -651,6 +663,105 @@ func (c *publisherCore) onStory(s *dorv1.Story) {
 		return
 	}
 	c.enqueue("story:"+s.Id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: s}})
+	c.reconcileWireForStory(s)
+}
+
+// reconcileWireForStory updates wire rows that were emitted before their story
+// existed. It repairs the race where a row kept OTHER/no place because the
+// placement arrived after article.placed. Each changed row gets a fresh wire
+// delta so browser tabs converge without a snapshot.
+func (c *publisherCore) reconcileWireForStory(s *dorv1.Story) {
+	if s == nil || s.Id == "" {
+		return
+	}
+	var updates []*dorv1.WireRow
+	c.mu.Lock()
+	for id, row := range c.wireRows {
+		if row == nil || row.StoryId != s.Id {
+			continue
+		}
+		next, changed := wireWithStory(row, s)
+		if !changed {
+			continue
+		}
+		c.wireRows[id] = next
+		updates = append(updates, next)
+	}
+	c.mu.Unlock()
+	for _, row := range updates {
+		c.enqueue("wire:"+row.ArticleId, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: row}})
+	}
+}
+
+// wireWithStory returns an updated copy of the row when the story supplies
+// metadata the row is missing or still has at its zero value.
+func wireWithStory(row *dorv1.WireRow, story *dorv1.Story) (*dorv1.WireRow, bool) {
+	next := proto.Clone(row).(*dorv1.WireRow)
+	changed := false
+	if next.Category != story.Category {
+		next.Category = story.Category
+		changed = true
+	}
+	if next.Degraded != story.Degraded {
+		next.Degraded = story.Degraded
+		changed = true
+	}
+	if next.Fallback != story.Fallback {
+		next.Fallback = story.Fallback
+		changed = true
+	}
+	if next.CategoryBackend != story.CategoryBackend {
+		next.CategoryBackend = story.CategoryBackend
+		changed = true
+	}
+	if next.CategoryConfidence != story.CategoryConfidence {
+		next.CategoryConfidence = story.CategoryConfidence
+		changed = true
+	}
+	if next.PlaceBackend != story.PlaceBackend {
+		next.PlaceBackend = story.PlaceBackend
+		changed = true
+	}
+	if next.PlaceDegraded != story.PlaceDegraded {
+		next.PlaceDegraded = story.PlaceDegraded
+		changed = true
+	}
+	if next.PlaceFallback != story.PlaceFallback {
+		next.PlaceFallback = story.PlaceFallback
+		changed = true
+	}
+	loc := primaryStoryLocation(story)
+	if loc != nil {
+		if next.Country == "" && loc.Country != "" {
+			next.Country = loc.Country
+			changed = true
+		}
+		if next.Place == "" && loc.Name != "" {
+			next.Place = loc.Name
+			changed = true
+		}
+		if !next.Located && (loc.Lat != 0 || loc.Lon != 0) {
+			next.Lat = float64(loc.Lat)
+			next.Lon = float64(loc.Lon)
+			next.Located = true
+			changed = true
+		}
+	}
+	if !changed {
+		return row, false
+	}
+	return next, true
+}
+
+func primaryStoryLocation(story *dorv1.Story) *dorv1.Location {
+	if story == nil || len(story.Locations) == 0 {
+		return nil
+	}
+	idx := int(story.Primary)
+	if idx < 0 || idx >= len(story.Locations) {
+		idx = 0
+	}
+	return story.Locations[idx]
 }
 
 // onMatchScore folds matcher scores into the latest wire row. The publisher

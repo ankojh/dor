@@ -38,21 +38,30 @@ type SourceInfo struct {
 
 // StoryDetail is the durable fallback for GET /api/stories/{id}.
 type StoryDetail struct {
-	ID                string
-	Title             string
-	Brief             string
-	Category          int16
-	SourceCount       int
-	Heat              float64
-	Primary           uint32
-	PrimaryLoc        string
-	FirstSeen         time.Time
-	UpdatedAt         time.Time
-	ExpiresAt         time.Time
-	Locations         []LocationRecord
-	Articles          []StoryArticle
-	Sources           []SourceInfo
-	ArticlesTruncated bool
+	ID                 string
+	Title              string
+	TitleSource        string
+	Brief              string
+	BriefSource        string
+	Category           int16
+	CategoryBackend    string
+	CategoryConfidence float32
+	Degraded           bool
+	Fallback           bool
+	PlaceBackend       string
+	PlaceDegraded      bool
+	PlaceFallback      bool
+	SourceCount        int
+	Heat               float64
+	Primary            uint32
+	PrimaryLoc         string
+	FirstSeen          time.Time
+	UpdatedAt          time.Time
+	ExpiresAt          time.Time
+	Locations          []LocationRecord
+	Articles           []StoryArticle
+	Sources            []SourceInfo
+	ArticlesTruncated  bool
 }
 
 // StorySummary is one search/history row.
@@ -81,10 +90,14 @@ func (s *Store) GetStoryDetail(ctx context.Context, id string, limit int) (Story
 		d StoryDetail
 	)
 	err := s.pool.QueryRow(ctx, `
-SELECT id, title, brief, category, source_count, heat, primary_loc, first_seen, updated_at, expires_at
+SELECT id, title, title_source, brief, brief_source, category, category_backend, cat_conf,
+       degraded, fallback, place_backend, place_degraded, place_fallback,
+       source_count, heat, primary_loc, first_seen, updated_at, expires_at
 FROM stories WHERE id=$1`, id).Scan(
-		&d.ID, &d.Title, &d.Brief, &d.Category, &d.SourceCount, &d.Heat,
-		&d.PrimaryLoc, &d.FirstSeen, &d.UpdatedAt, &d.ExpiresAt,
+		&d.ID, &d.Title, &d.TitleSource, &d.Brief, &d.BriefSource, &d.Category,
+		&d.CategoryBackend, &d.CategoryConfidence, &d.Degraded, &d.Fallback,
+		&d.PlaceBackend, &d.PlaceDegraded, &d.PlaceFallback,
+		&d.SourceCount, &d.Heat, &d.PrimaryLoc, &d.FirstSeen, &d.UpdatedAt, &d.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StoryDetail{}, ErrStoryNotFound
@@ -93,7 +106,7 @@ FROM stories WHERE id=$1`, id).Scan(
 		return StoryDetail{}, fmt.Errorf("store: story detail %s: %w", id, err)
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT place_id, name, lat, lon, precision, role, weight
+SELECT place_id, name, lat, lon, precision, role, weight, country
 FROM story_locations WHERE story_id=$1
 ORDER BY role, weight DESC`, id)
 	if err != nil {
@@ -101,7 +114,7 @@ ORDER BY role, weight DESC`, id)
 	}
 	for rows.Next() {
 		var l LocationRecord
-		if err := rows.Scan(&l.PlaceID, &l.Name, &l.Lat, &l.Lon, &l.Precision, &l.Role, &l.Weight); err != nil {
+		if err := rows.Scan(&l.PlaceID, &l.Name, &l.Lat, &l.Lon, &l.Precision, &l.Role, &l.Weight, &l.Country); err != nil {
 			rows.Close()
 			return StoryDetail{}, err
 		}

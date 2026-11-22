@@ -64,6 +64,13 @@ type StorySink interface {
 	EnqueueStory(record store.StoryRecord) bool
 }
 
+// EnrichmentSink is the optional durable article-enrichment path. It is a
+// separate interface so a test or embedding that only stores stories keeps
+// working. *store.Writer satisfies it.
+type EnrichmentSink interface {
+	EnqueueArticleEnrichment(record store.ArticleEnrichmentRecord) bool
+}
+
 // StoryIndex is the optional pgvector ANN candidate source. *store.Store
 // satisfies it; nil falls back to the loaded in-memory story map.
 type StoryIndex interface {
@@ -109,6 +116,18 @@ type storyState struct {
 	// EventKey is the durable hazard-event -> story map key, when this story
 	// was created or joined by a hazard revision.
 	EventKey string
+
+	// Provenance is process-local: it is copied onto the Story proto on each
+	// write. It never enters storymeta and never changes story identity.
+	CategoryBackend    string
+	CategoryConfidence float32
+	CategoryDegraded   bool
+	CategoryFallback   bool
+	PlaceBackend       string
+	PlaceDegraded      bool
+	PlaceFallback      bool
+	Hazard             string
+	Magnitude          float64
 }
 
 // storyCheckpoint is the single authoritative cluster write: the full story,
@@ -710,6 +729,7 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 		}
 	}
 	story.ArticleIDs = appendUnique(story.ArticleIDs, articleID)
+	c.applyJoinProvenance(story, join.Place, join.Class, article)
 
 	outCtx := context.WithoutCancel(ctx)
 	if err := c.persist(outCtx, story, article); err != nil {
@@ -725,7 +745,7 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	if err := c.publishStory(outCtx, story, article); err != nil {
 		return err
 	}
-	if err := c.publishPlaced(outCtx, article, story, joinKind); err != nil {
+	if err := c.publishPlaced(outCtx, article, story, joinKind, join.Place); err != nil {
 		return err
 	}
 	// Completion is recorded separately from storymeta, so a crash after the
@@ -737,6 +757,7 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	c.articleStory[articleID] = story.Story.Id
 	delete(c.resume, articleID)
 	c.enqueueStore(story, article)
+	c.enqueueEnrichment(join.Place, join.Class, article)
 	_ = kv.Delete(ctx, key)
 	return nil
 }
@@ -797,6 +818,62 @@ func (c *clusterer) markCommitted(ctx context.Context, kv jetstream.KeyValue, st
 	return nil
 }
 
+// applyJoinProvenance folds this article's place/class provenance into the
+// story. Category provenance follows the highest-confidence classification;
+// place provenance follows the strongest backend (a model pick beats a hint or
+// gazetteer fallback).
+func (c *clusterer) applyJoinProvenance(story *storyState, place *dorv1.PlacedArticle, class *dorv1.ClassifiedArticle, article *dorv1.Article) {
+	if story == nil {
+		return
+	}
+	if class != nil {
+		if story.CategoryBackend == "" || class.GetConfidence() >= story.CategoryConfidence {
+			story.CategoryBackend = class.GetBackend()
+			story.CategoryConfidence = class.GetConfidence()
+			story.CategoryDegraded = class.GetDegraded()
+			story.CategoryFallback = class.GetFallback()
+		}
+	}
+	if place != nil {
+		if placeBackendRank(place.GetBackend()) >= placeBackendRank(story.PlaceBackend) {
+			story.PlaceBackend = place.GetBackend()
+			story.PlaceDegraded = place.GetDegraded()
+			story.PlaceFallback = place.GetFallback()
+		}
+	}
+	if hints := article.GetHints(); hints != nil {
+		if hints.GetHazard() != "" && hints.GetMagnitude() >= story.Magnitude {
+			story.Hazard = hints.GetHazard()
+			story.Magnitude = hints.GetMagnitude()
+		}
+	}
+	story.Story.Degraded = story.CategoryDegraded || story.PlaceDegraded
+	story.Story.Fallback = story.CategoryFallback || story.PlaceFallback
+	story.Story.CategoryBackend = story.CategoryBackend
+	story.Story.CategoryConfidence = story.CategoryConfidence
+	story.Story.PlaceBackend = story.PlaceBackend
+	story.Story.PlaceDegraded = story.PlaceDegraded
+	story.Story.PlaceFallback = story.PlaceFallback
+	story.Story.Hazard = story.Hazard
+	story.Story.Magnitude = story.Magnitude
+}
+
+// placeBackendRank orders place sources from model-picked to deterministic.
+func placeBackendRank(backend string) int {
+	switch backend {
+	case "jev":
+		return 4
+	case "claude":
+		return 3
+	case "gazetteer":
+		return 2
+	case "hints":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *storyState {
 	locations := cloneLocations(place.GetLocations())
 	primary := place.GetPrimary()
@@ -806,6 +883,7 @@ func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticl
 	story := &dorv1.Story{
 		Id:          newStoryID(article.Id),
 		Title:       firstNonEmpty(article.GetTitle(), "Untitled"),
+		TitleSource: "source",
 		Category:    category,
 		Locations:   locations,
 		Primary:     primary,
@@ -996,6 +1074,7 @@ func (c *clusterer) persist(ctx context.Context, st *storyState, article *dorv1.
 	if err != nil {
 		return fmt.Errorf("cluster: live_state kv: %w", err)
 	}
+	c.overlayEditorTitle(ctx, live, st)
 	storyData, err := proto.Marshal(st.Story)
 	if err != nil {
 		return err
@@ -1165,10 +1244,21 @@ func (c *clusterer) coolStories(ctx context.Context) {
 	}
 }
 
-func (c *clusterer) publishPlaced(ctx context.Context, article *dorv1.Article, st *storyState, join dorv1.JoinKind) error {
+func (c *clusterer) publishPlaced(ctx context.Context, article *dorv1.Article, st *storyState, join dorv1.JoinKind, place *dorv1.PlacedArticle) error {
 	placed := proto.Clone(article).(*dorv1.Article)
 	placed.StoryId = st.Story.Id
 	placed.Join = join
+	placed.Degraded = st.Story.GetDegraded()
+	placed.Fallback = st.Story.GetFallback()
+	placed.CategoryBackend = st.Story.GetCategoryBackend()
+	placed.CategoryConfidence = st.Story.GetCategoryConfidence()
+	placed.PlaceBackend = st.Story.GetPlaceBackend()
+	placed.PlaceDegraded = st.Story.GetPlaceDegraded()
+	placed.PlaceFallback = st.Story.GetPlaceFallback()
+	placed.Country = placedCountry(place)
+	if placed.Country == "" {
+		placed.Country = primaryCountry(st.Story)
+	}
 	data, err := proto.Marshal(placed)
 	if err != nil {
 		return err
@@ -1192,21 +1282,34 @@ func (c *clusterer) enqueueStore(st *storyState, article *dorv1.Article) {
 	if st.Story.Primary < uint32(len(st.Story.Locations)) && st.Story.Locations[st.Story.Primary] != nil {
 		primaryLoc = st.Story.Locations[st.Story.Primary].PlaceId
 	}
+	titleSource := st.Story.GetTitleSource()
+	if titleSource == "" {
+		titleSource = "source"
+	}
 	if !c.deps.StorySink.EnqueueStory(store.StoryRecord{
-		ID:          st.Story.Id,
-		Title:       st.Story.Title,
-		Brief:       article.GetLede(),
-		Category:    int16(st.Story.Category),
-		PrimaryLoc:  primaryLoc,
-		SourceCount: int(st.Story.SourceCount),
-		Heat:        float64(st.Story.Heat),
-		Centroid:    append([]float32(nil), st.Embedding...),
-		Entities:    append([]string(nil), st.Entities...),
-		FirstSeen:   time.Unix(st.FirstSeen, 0).UTC(),
-		UpdatedAt:   time.Unix(st.UpdatedAt, 0).UTC(),
-		ExpiresAt:   st.ExpiresAt,
-		Locations:   locationRecords(st.Story.Locations),
-		ArticleIDs:  []string{article.Id},
+		ID:                 st.Story.Id,
+		Title:              st.Story.Title,
+		TitleSource:        titleSource,
+		Brief:              "",
+		BriefSource:        live.BriefNone,
+		Category:           int16(st.Story.Category),
+		CategoryBackend:    st.CategoryBackend,
+		CategoryConfidence: st.CategoryConfidence,
+		PrimaryLoc:         primaryLoc,
+		SourceCount:        int(st.Story.SourceCount),
+		Heat:               float64(st.Story.Heat),
+		Degraded:           st.Story.Degraded,
+		Fallback:           st.Story.Fallback,
+		PlaceBackend:       st.PlaceBackend,
+		PlaceDegraded:      st.PlaceDegraded,
+		PlaceFallback:      st.PlaceFallback,
+		Centroid:           append([]float32(nil), st.Embedding...),
+		Entities:           append([]string(nil), st.Entities...),
+		FirstSeen:          time.Unix(st.FirstSeen, 0).UTC(),
+		UpdatedAt:          time.Unix(st.UpdatedAt, 0).UTC(),
+		ExpiresAt:          st.ExpiresAt,
+		Locations:          locationRecords(st.Story.Locations),
+		ArticleIDs:         []string{article.Id},
 	}) {
 		c.log.Debug("cluster: store queue full", "story_id", st.Story.Id)
 	}
@@ -1227,6 +1330,7 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 		}
 		if json.Unmarshal(entry.Value(), &marker) == nil && strings.TrimSpace(marker.Title) != "" {
 			st.Story.Title = marker.Title
+			st.Story.TitleSource = "editor"
 			return
 		}
 	}
@@ -1246,6 +1350,7 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 	if fd := latest.ProtoReflect().Descriptor().Fields().ByName("title_source"); fd != nil {
 		if latest.ProtoReflect().Get(fd).String() == "editor" {
 			st.Story.Title = latest.Title
+			st.Story.TitleSource = "editor"
 		}
 	}
 }
@@ -1257,6 +1362,31 @@ func sameStoryContentIgnoringHeat(a, b *dorv1.Story) bool {
 	ca, cb := proto.Clone(a).(*dorv1.Story), proto.Clone(b).(*dorv1.Story)
 	ca.Heat, cb.Heat = 0, 0
 	return proto.Equal(ca, cb)
+}
+
+// enqueueEnrichment persists the place votes and classification that arrived
+// with this article. It is separate from story assignment and never writes
+// story_id.
+func (c *clusterer) enqueueEnrichment(place *dorv1.PlacedArticle, class *dorv1.ClassifiedArticle, article *dorv1.Article) {
+	sink, ok := c.deps.StorySink.(EnrichmentSink)
+	if !ok || sink == nil || article == nil || article.Id == "" || (place == nil && class == nil) {
+		return
+	}
+	rec := store.ArticleEnrichmentRecord{
+		ID:        article.Id,
+		Locations: locationRecords(place.GetLocations()),
+	}
+	if class != nil {
+		rec.Category = int16(class.GetCategory())
+		rec.CategoryConfidence = class.GetConfidence()
+		rec.Lang = class.GetLang()
+	}
+	if rec.Lang == "" {
+		rec.Lang = article.GetLang()
+	}
+	if !sink.EnqueueArticleEnrichment(rec) {
+		c.log.Debug("cluster: enrichment queue full", "article_id", article.Id)
+	}
 }
 
 func (c *clusterer) load(ctx context.Context) error {
@@ -1311,17 +1441,26 @@ func (c *clusterer) load(ctx context.Context) error {
 				continue
 			}
 			st := &storyState{
-				Story:      &s,
-				ArticleIDs: cp.ArticleIDs,
-				SourceIDs:  cp.SourceIDs,
-				Embedding:  cp.Embedding,
-				Entities:   cp.Entities,
-				Cell:       cp.Cell,
-				ExpiresAt:  time.Unix(0, cp.ExpiresAt).UTC(),
-				FirstSeen:  cp.FirstSeen,
-				UpdatedAt:  cp.UpdatedAt,
-				CooledAt:   c.now().UnixNano(),
-				EventKey:   cp.EventKey,
+				Story:              &s,
+				ArticleIDs:         cp.ArticleIDs,
+				SourceIDs:          cp.SourceIDs,
+				Embedding:          cp.Embedding,
+				Entities:           cp.Entities,
+				Cell:               cp.Cell,
+				ExpiresAt:          time.Unix(0, cp.ExpiresAt).UTC(),
+				FirstSeen:          cp.FirstSeen,
+				UpdatedAt:          cp.UpdatedAt,
+				CooledAt:           c.now().UnixNano(),
+				EventKey:           cp.EventKey,
+				CategoryBackend:    s.CategoryBackend,
+				CategoryConfidence: s.CategoryConfidence,
+				CategoryDegraded:   s.CategoryBackend == "rule",
+				CategoryFallback:   s.Fallback,
+				PlaceBackend:       s.PlaceBackend,
+				PlaceDegraded:      s.PlaceDegraded,
+				PlaceFallback:      s.PlaceFallback,
+				Hazard:             s.Hazard,
+				Magnitude:          s.Magnitude,
 			}
 			if st.ExpiresAt.IsZero() && st.UpdatedAt > 0 {
 				st.ExpiresAt = time.Unix(st.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
@@ -1372,10 +1511,19 @@ func (c *clusterer) load(ctx context.Context) error {
 				continue
 			}
 			st := &storyState{
-				Story:     &s,
-				FirstSeen: s.FirstSeen,
-				UpdatedAt: s.UpdatedAt,
-				ExpiresAt: time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
+				Story:              &s,
+				FirstSeen:          s.FirstSeen,
+				UpdatedAt:          s.UpdatedAt,
+				ExpiresAt:          time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
+				CategoryBackend:    s.CategoryBackend,
+				CategoryConfidence: s.CategoryConfidence,
+				CategoryDegraded:   s.CategoryBackend == "rule",
+				CategoryFallback:   s.Fallback,
+				PlaceBackend:       s.PlaceBackend,
+				PlaceDegraded:      s.PlaceDegraded,
+				PlaceFallback:      s.PlaceFallback,
+				Hazard:             s.Hazard,
+				Magnitude:          s.Magnitude,
 				// Resume cooling from the persisted heat at process start.
 				CooledAt: c.now().UnixNano(),
 			}
@@ -1517,6 +1665,36 @@ func initialHeat(article *dorv1.Article) float32 {
 	return float32(clamp01(heat))
 }
 
+// placedCountry returns the canonical country of the article's resolved place.
+func placedCountry(place *dorv1.PlacedArticle) string {
+	if place == nil || len(place.Locations) == 0 {
+		return ""
+	}
+	idx := int(place.Primary)
+	if idx < 0 || idx >= len(place.Locations) {
+		idx = 0
+	}
+	if loc := place.Locations[idx]; loc != nil {
+		return loc.Country
+	}
+	return ""
+}
+
+// primaryCountry returns the canonical country of the story's primary place.
+func primaryCountry(story *dorv1.Story) string {
+	if story == nil || len(story.Locations) == 0 {
+		return ""
+	}
+	idx := int(story.Primary)
+	if idx < 0 || idx >= len(story.Locations) {
+		idx = 0
+	}
+	if loc := story.Locations[idx]; loc != nil {
+		return loc.Country
+	}
+	return ""
+}
+
 func primaryLocation(place *dorv1.PlacedArticle) *dorv1.Location {
 	if place == nil || len(place.Locations) == 0 {
 		return nil
@@ -1625,6 +1803,7 @@ func locationRecords(in []*dorv1.Location) []store.LocationRecord {
 		out = append(out, store.LocationRecord{
 			PlaceID: l.PlaceId, Name: l.Name, Lat: float64(l.Lat), Lon: float64(l.Lon),
 			Precision: int16(l.Precision), Role: int16(l.Role), Weight: l.Weight,
+			Confidence: l.Weight, Country: l.Country,
 		})
 	}
 	return out

@@ -22,7 +22,16 @@ import {
 /** Display-only metadata; protobuf messages stay in the worker. */
 export type StorySummary = Pick<
   Story,
-  "id" | "title" | "category" | "primary" | "sourceCount" | "heat" | "firstSeen" | "updatedAt"
+  | "id"
+  | "title"
+  | "category"
+  | "primary"
+  | "sourceCount"
+  | "heat"
+  | "firstSeen"
+  | "updatedAt"
+  | "hazard"
+  | "magnitude"
 > & {
   locations: Array<Pick<Story["locations"][number], "name" | "lat" | "lon" | "role" | "precision">>;
 };
@@ -37,6 +46,8 @@ export type LiveStory = {
   parties: Array<{ lng: number; lat: number; label: string }>;
   degree: number;
   strongestLink: number;
+  /** Strongest link whose relation is not similarity-only/unverified. */
+  strongestVerified: number;
 };
 
 export type LiveGlobeData = {
@@ -58,6 +69,31 @@ export function storyLocation(
   if (story.locations.length === 0) return null;
   const primary = story.locations[story.primary] ?? story.locations[0]!;
   return { lng: primary.lon, lat: primary.lat, place: primary.name || "Unknown" };
+}
+
+/** Below this magnitude a single-source earthquake is a micro-quake. */
+const MICRO_QUAKE_MAGNITUDE = 4.5;
+
+/**
+ * Live-thread rank: heat × source count × strongest verified link. Unverified
+ * similarity-only links do not earn the verified factor, single-source
+ * micro-quakes are demoted hard, and multi-story threads get a small bonus.
+ */
+export function threadRankScore(entry: LiveStory): number {
+  const heat = Math.max(0, Math.min(1, entry.story.heat));
+  const sources = Math.min(30, Math.max(1, entry.story.sourceCount));
+  const verified = Math.max(0, Math.min(1, entry.strongestVerified));
+  let score = heat * sources * (0.25 + 0.75 * verified);
+  if (entry.degree > 0) score *= 1.15;
+  if (
+    entry.story.sourceCount <= 1 &&
+    entry.story.hazard === "earthquake" &&
+    entry.story.magnitude > 0 &&
+    entry.story.magnitude < MICRO_QUAKE_MAGNITUDE
+  ) {
+    score *= 0.05;
+  }
+  return score;
 }
 
 function storyParties(story: StorySummary): LiveStory["parties"] {
@@ -96,6 +132,8 @@ export function buildLiveGlobe(
         heat: story.heat,
         firstSeen: story.firstSeen,
         updatedAt: story.updatedAt,
+        hazard: story.hazard,
+        magnitude: story.magnitude,
         locations: story.locations.map(({ name, lat, lon, role, precision }) => ({
           name,
           lat,
@@ -113,6 +151,7 @@ export function buildLiveGlobe(
       parties: storyParties(story),
       degree: 0,
       strongestLink: 0,
+      strongestVerified: 0,
     });
   }
 
@@ -248,17 +287,24 @@ export function buildLiveGlobe(
     cursor[b] = atB + 1;
   }
 
+  for (const entry of located) {
+    entry.degree = adjStart[entry.index + 1]! - adjStart[entry.index]!;
+  }
+  for (let i = 0; i < linkCount; i++) {
+    const strength = linkStrength[i]!;
+    const a = located[linkA[i]!]!;
+    const b = located[linkB[i]!]!;
+    a.strongestLink = Math.max(a.strongestLink, strength);
+    b.strongestLink = Math.max(b.strongestLink, strength);
+    if (linkUnverified[i] === 0) {
+      a.strongestVerified = Math.max(a.strongestVerified, strength);
+      b.strongestVerified = Math.max(b.strongestVerified, strength);
+    }
+  }
+
   const top = located
     .slice()
-    .sort((left, right) => {
-      const leftDegree = adjStart[left.index + 1]! - adjStart[left.index]!;
-      const rightDegree = adjStart[right.index + 1]! - adjStart[right.index]!;
-      const score = (entry: LiveStory, degree: number): number =>
-        entry.story.heat * 2 +
-        Math.min(10, degree) * 0.15 +
-        Math.min(30, entry.story.sourceCount) * 0.01;
-      return score(right, rightDegree) - score(left, leftDegree);
-    })
+    .sort((left, right) => threadRankScore(right) - threadRankScore(left))
     .slice(0, 300);
   const topStories = Uint16Array.from(top.map((entry) => entry.index));
   const hudTop: HudStory[] = top.slice(0, 24).map((entry) => ({
@@ -269,17 +315,6 @@ export function buildLiveGlobe(
     sources: entry.story.sourceCount,
     heat: entry.story.heat,
   }));
-
-  for (const entry of located) {
-    entry.degree = adjStart[entry.index + 1]! - adjStart[entry.index]!;
-  }
-  for (let i = 0; i < linkCount; i++) {
-    const strength = linkStrength[i]!;
-    const a = located[linkA[i]!]!;
-    const b = located[linkB[i]!]!;
-    a.strongestLink = Math.max(a.strongestLink, strength);
-    b.strongestLink = Math.max(b.strongestLink, strength);
-  }
   const arcs = buildArcArrays(located, linkA, linkB, linkType);
   const ripples = emptyRipples();
   const strengths = linkStrength.filter((strength) => strength >= 0.6).sort((a, b) => b - a);

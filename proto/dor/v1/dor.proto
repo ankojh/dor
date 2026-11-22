@@ -75,6 +75,9 @@ message Location {
   Precision precision = 5;
   Role role = 6;
   float weight = 7;
+  // ISO 3166-1 alpha-2 country code when the resolved place knows one. Empty
+  // means unknown; the publisher uses it as the canonical region-filter code.
+  string country = 8;
 }
 
 // Article is the normalized ingest record. The full text is never stored.
@@ -95,6 +98,18 @@ message Article {
   // values. Append-only so the existing publisher can still decode Article.
   string story_id = 11;
   JoinKind join = 12;
+  // Provenance carried on article.placed so the wire can label guesses. Zero
+  // values mean unknown/not degraded.
+  bool degraded = 13;
+  bool fallback = 14;
+  string category_backend = 15;   // jev, claude, rule, or empty
+  float category_confidence = 16; // 0..1; 0 is unknown
+  string place_backend = 17;      // jev, claude, gazetteer, hints, none
+  bool place_degraded = 18;
+  bool place_fallback = 19;
+  // Canonical country of the resolved place (ISO 3166-1 alpha-2), not the
+  // raw feed hint.
+  string country = 20;
 }
 
 // PlacedArticle is the plotter's output on article.place. It carries the
@@ -145,6 +160,22 @@ message Story {
   float heat = 7;
   int64 first_seen = 8;  // unix seconds
   int64 updated_at = 9;  // unix seconds
+  // Append-only provenance for displayed values. Zero values mean unknown or
+  // not degraded. The UI marks degraded metadata "approx".
+  bool degraded = 10;
+  bool fallback = 11;
+  string category_backend = 12;   // jev, claude, rule, or empty
+  float category_confidence = 13; // 0..1; 0 is unknown
+  string place_backend = 14;      // jev, claude, gazetteer, hints, none
+  bool place_degraded = 15;
+  bool place_fallback = 16;
+  // Hazard metadata from the article hints. Used to demote micro-quakes in
+  // live-thread ranking; not part of story identity.
+  string hazard = 17;   // earthquake, flood, cyclone, ...
+  double magnitude = 18; // upstream magnitude, 0 when unknown
+  // title_source is "editor" when the Editor's neutral title is applied, or
+  // "source" when the title is a source headline.
+  string title_source = 19;
 }
 
 // Link is a typed relationship between two stories, with a < b.
@@ -199,6 +230,15 @@ message WireRow {
   bool located = 14;
   // Prompts scored without a jev answer (embedding/lexical only).
   repeated string approx_prompts = 15;
+  // Append-only metadata provenance, mirrored from the placed article and its
+  // story when the story arrives. Zero values mean unknown/not degraded.
+  bool degraded = 16;
+  bool fallback = 17;
+  string category_backend = 18;
+  float category_confidence = 19;
+  string place_backend = 20;
+  bool place_degraded = 21;
+  bool place_fallback = 22;
 }
 
 // Delta is one numbered change pushed to browsers.

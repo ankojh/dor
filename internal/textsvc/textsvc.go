@@ -7,12 +7,15 @@ package textsvc
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
@@ -88,7 +91,7 @@ func (s *Service) nowString() string { return s.now().UTC().Format(time.RFC3339)
 func (s *Service) Story(ctx context.Context, id string) (live.StoryText, bool) {
 	kv := s.keyValue(ctx)
 	if t, ok := live.LoadStoryText(ctx, kv, id); ok {
-		return t, true
+		return withProvenance(t), true
 	}
 	story, ok := live.LoadStory(ctx, kv, id)
 	if !ok {
@@ -100,6 +103,7 @@ func (s *Service) Story(ctx context.Context, id string) (live.StoryText, bool) {
 		Title:       story.Title,
 		SourceCount: int(story.SourceCount),
 		Available:   false,
+		Provenance:  live.BriefNone,
 	}, true
 }
 
@@ -122,10 +126,10 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 			// A successful brief is kept until the story changes; a fallback
 			// is retried after 5 minutes or when the story updates.
 			if cached.Available && !generated.Before(updated) {
-				return cached, true
+				return withProvenance(cached), true
 			}
 			if !cached.Available && s.now().Sub(generated) < 5*time.Minute && !generated.Before(updated) {
-				return cached, true
+				return withProvenance(cached), true
 			}
 		}
 	}
@@ -161,18 +165,58 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 	if title == "" {
 		title = story.Title
 	}
+	brief := strings.TrimSpace(draft.Brief)
 	out := live.StoryText{
 		Kind:        "story",
 		ID:          id,
 		Title:       title,
-		Brief:       strings.TrimSpace(draft.Brief),
-		Available:   strings.TrimSpace(draft.Brief) != "",
+		Brief:       brief,
+		Available:   brief != "",
+		Provenance:  live.BriefGenerated,
 		SourceCount: int(story.SourceCount),
 		GeneratedAt: s.nowString(),
 		Model:       res.Model,
 	}
+	s.applyEditorTitle(ctx, kv, story, title)
 	s.putStoryText(ctx, kv, out)
 	return out, true
+}
+
+// applyEditorTitle makes the Editor's neutral title the live story title:
+// story.<id> carries title_source="editor", story.changed reaches the
+// publisher and browser, and the storytitle marker lets cluster recovery
+// restore it after a crash.
+func (s *Service) applyEditorTitle(ctx context.Context, kv jetstream.KeyValue, story *dorv1.Story, title string) {
+	title = strings.TrimSpace(title)
+	if story == nil || story.Id == "" || title == "" {
+		return
+	}
+	if story.Title == title && story.TitleSource == "editor" {
+		return
+	}
+	story.Title = title
+	story.TitleSource = "editor"
+	if !live.PutStory(ctx, kv, story) {
+		s.log.Warn("text: could not write editor title to live state", "story", story.Id)
+		return
+	}
+	marker, err := json.Marshal(map[string]string{
+		"title":        title,
+		"generated_at": s.nowString(),
+	})
+	if err == nil {
+		if _, err := kv.Put(ctx, live.StoryTitleKey(story.Id), marker); err != nil {
+			s.log.Debug("text: editor title marker write failed", "story", story.Id, "err", err)
+		}
+	}
+	data, err := proto.Marshal(story)
+	if err != nil {
+		return
+	}
+	if _, err := s.bus.Publish(ctx, bus.StoryChangedSubject(story.Id), data,
+		bus.WithMsgID(fmt.Sprintf("title:%s:%d", story.Id, s.now().UnixNano()))); err != nil {
+		s.log.Warn("text: story.changed for editor title failed", "story", story.Id, "err", err)
+	}
 }
 
 // Link returns the cached "why", or an unavailable placeholder for a known
@@ -260,7 +304,18 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 func (s *Service) putStoryText(ctx context.Context, kv jetstream.KeyValue, t live.StoryText) {
 	live.PutStoryText(ctx, kv, t)
 	if s.sink != nil {
-		s.sink.EnqueueStoryText(store.StoryTextRecord{ID: t.ID, Brief: t.Brief})
+		titleSource := ""
+		if t.Provenance == live.BriefGenerated {
+			titleSource = "editor"
+		}
+		briefSource := t.Provenance
+		if briefSource == "" {
+			briefSource = live.BriefNone
+		}
+		s.sink.EnqueueStoryText(store.StoryTextRecord{
+			ID: t.ID, Title: t.Title, TitleSource: titleSource,
+			Brief: t.Brief, BriefSource: briefSource,
+		})
 	}
 }
 
@@ -357,6 +412,7 @@ func fallbackStory(story *dorv1.Story, sources []llm.Source, sourceCount int, ge
 		Title:       title,
 		Brief:       "",
 		Available:   false,
+		Provenance:  live.BriefNone,
 		SourceCount: sourceCount,
 		GeneratedAt: generated,
 	}
@@ -371,6 +427,24 @@ func primaryPlace(story *dorv1.Story) string {
 		idx = 0
 	}
 	return story.Locations[idx].Name
+}
+
+// withProvenance fills provenance for caches written before the field existed.
+// A cached brief with a model name is a generated brief; any other available
+// brief is legacy source text, never an agent brief.
+func withProvenance(t live.StoryText) live.StoryText {
+	if t.Provenance != "" {
+		return t
+	}
+	switch {
+	case !t.Available:
+		t.Provenance = live.BriefNone
+	case t.Model != "":
+		t.Provenance = live.BriefGenerated
+	default:
+		t.Provenance = live.BriefSourceSnippet
+	}
+	return t
 }
 
 func categoryName(c dorv1.Category) string {

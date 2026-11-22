@@ -28,6 +28,10 @@ const (
 	LinkPrefix      = "link."
 	StoryTextPrefix = "storytext."
 	LinkTextPrefix  = "linktext."
+	// StoryTitlePrefix marks an Editor-applied neutral title. It is a small
+	// JSON marker so recovery can restore the title without trusting a newer
+	// derived story write.
+	StoryTitlePrefix = "storytitle."
 )
 
 // kv is the subset of jetstream.KeyValue used here.
@@ -72,6 +76,9 @@ func LinkKey(a, b string) string {
 	return LinkPrefix + sanitize(a) + "." + sanitize(b)
 }
 
+// StoryTitleKey is the KV key for the Editor-title marker.
+func StoryTitleKey(id string) string { return StoryTitlePrefix + sanitize(id) }
+
 // StoryTextKey is the KV key for a story brief cache.
 func StoryTextKey(id string) string { return StoryTextPrefix + sanitize(id) }
 
@@ -95,14 +102,25 @@ type StoryMeta struct {
 	UpdatedAt  int64     `json:"updated_at"`
 }
 
+// Brief provenance values. Only a model-written brief may be labelled an
+// agent brief in the UI.
+const (
+	BriefGenerated     = "generated"
+	BriefSourceSnippet = "source_snippet"
+	BriefNone          = "none"
+)
+
 // StoryText is the cached editor output. Available=false means the fallback
-// (best headline, no brief) is in force.
+// (best headline, no brief) is in force. Provenance says who wrote the brief:
+// "generated" (a model), "source_snippet" (legacy durable source text), or
+// "none" (no brief).
 type StoryText struct {
 	Kind        string `json:"kind"`
 	ID          string `json:"id"`
 	Title       string `json:"title"`
 	Brief       string `json:"brief"`
 	Available   bool   `json:"available"`
+	Provenance  string `json:"provenance"`
 	SourceCount int    `json:"source_count"`
 	GeneratedAt string `json:"generated_at"`
 	Model       string `json:"model,omitempty"`
@@ -156,6 +174,18 @@ func LoadStory(ctx context.Context, k kv, id string) (*dorv1.Story, bool) {
 		return nil, false
 	}
 	return &s, true
+}
+
+// PutStory writes a story protobuf.
+func PutStory(ctx context.Context, k kv, s *dorv1.Story) bool {
+	if s == nil || s.Id == "" {
+		return false
+	}
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(s)
+	if err != nil {
+		return false
+	}
+	return put(ctx, k, StoryKey(s.Id), data)
 }
 
 // LoadStoryMeta reads story metadata.
@@ -249,6 +279,25 @@ func PutStoryText(ctx context.Context, k kv, t StoryText) bool {
 		return false
 	}
 	return put(ctx, k, StoryTextKey(t.ID), data)
+}
+
+// StoryTitle is the Editor-title marker. GeneratedAt is informational.
+type StoryTitle struct {
+	Title       string `json:"title"`
+	GeneratedAt string `json:"generated_at,omitempty"`
+}
+
+// LoadStoryTitle reads the Editor-title marker.
+func LoadStoryTitle(ctx context.Context, k kv, id string) (StoryTitle, bool) {
+	data, ok := get(ctx, k, StoryTitleKey(id))
+	if !ok {
+		return StoryTitle{}, false
+	}
+	var t StoryTitle
+	if json.Unmarshal(data, &t) != nil {
+		return StoryTitle{}, false
+	}
+	return t, true
 }
 
 // LoadLinkText reads the cached "why".

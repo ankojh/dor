@@ -45,6 +45,13 @@ func PublicProjection(snapshot *dorv1.Snapshot) *dorv1.Snapshot {
 		row.Lat = q(row.Lat)
 		row.Lon = q(row.Lon)
 	}
+	wire := r.RecentWire[:0]
+	for _, row := range r.RecentWire {
+		if !WireSuppressed(row) {
+			wire = append(wire, row)
+		}
+	}
+	r.RecentWire = wire
 	return r
 }
 

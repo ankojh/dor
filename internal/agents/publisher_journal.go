@@ -12,6 +12,7 @@ import (
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/publication"
 	"github.com/nats-io/nats.go/jetstream"
@@ -25,6 +26,15 @@ func (c *publisherCore) restore(ctx context.Context) error {
 	kv, err := c.bus.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
 		return err
+	}
+	control, _, err := maintenance.ReadControl(ctx, kv)
+	if err != nil {
+		return err
+	}
+	if control.Blocked() {
+		// A maintenance run must never race an old or restarted publisher. The
+		// gate is released only after the corrected snapshot and floor exist.
+		return fmt.Errorf("publisher: maintenance fence active (phase %s)", control.Phase)
 	}
 	entry, getErr := kv.Get(ctx, publisherCheckpointKey)
 	var header struct {
@@ -63,6 +73,9 @@ func (c *publisherCore) restore(ctx context.Context) error {
 		defer c.flushMu.Unlock()
 		c.storage, c.owner, c.committed = store, store.Owner, state
 		c.installCommitted(state, pending)
+		if err = c.loadWirePolicy(ctx); err != nil {
+			return err
+		}
 		return nil
 	}
 	// Validate and claim the legacy checkpoint exactly as before. Migration must
@@ -105,6 +118,27 @@ func (c *publisherCore) restore(ctx context.Context) error {
 	}
 	c.storage, c.committed = store, state
 	c.installCommitted(state, pending)
+	if err = c.loadWirePolicy(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadWirePolicy refreshes the durable per-article timestamp policy. The
+// maintenance adapter is the only writer, so loading at restore is sufficient:
+// the publisher is fenced while a policy changes.
+func (c *publisherCore) loadWirePolicy(ctx context.Context) error {
+	kv, err := c.bus.KV(ctx, bus.KVBucketPublisher)
+	if err != nil {
+		return err
+	}
+	policy, err := maintenance.LoadPolicy(ctx, kv)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.policy = policy
+	c.mu.Unlock()
 	return nil
 }
 
@@ -114,7 +148,12 @@ func (c *publisherCore) installCommitted(state *publication.State, pending *publ
 	defer c.mu.Unlock()
 	c.seq = state.Seq
 	c.stories, c.links, c.wireRows = maps.Clone(state.Stories), maps.Clone(state.Links), maps.Clone(state.Rows)
-	c.wire = append([]*dorv1.WireRow(nil), state.RecentWire...)
+	c.wire = c.wire[:0]
+	for _, row := range state.RecentWire {
+		if !publication.WireSuppressed(row) {
+			c.wire = append(c.wire, row)
+		}
+	}
 	c.wireOrder = append([]string(nil), state.WireOrder...)
 	c.revisions, c.committedRevisions = maps.Clone(state.Revisions), maps.Clone(state.Revisions)
 	c.scores = cloneScores(state.Scores)

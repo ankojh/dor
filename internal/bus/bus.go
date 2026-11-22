@@ -78,6 +78,11 @@ const (
 	// label. No TTL: a report stays until the eval workflow consumes it.
 	KVBucketEvalPending = "eval_pending"
 	KVEvalPendingTTL    = 0
+	// KVBucketGatewayLease carries short-lived gateway serving heartbeats used
+	// only by the maintenance exclusion barrier. A TTL keeps heartbeat history
+	// bounded in a non-expiring deployment.
+	KVBucketGatewayLease = "gateway_lease"
+	KVGatewayLeaseTTL    = 15 * time.Second
 
 	KVLiveStateSnapshotKey = "snapshot"
 	KVPublisherSeqKey      = "publisher.seq"
@@ -401,6 +406,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketAlertDelivery, KVAlertDeliveryTTL, 0},
 		{KVBucketSourceHealth, KVSourceHealthTTL, 0},
 		{KVBucketEvalPending, KVEvalPendingTTL, 0},
+		{KVBucketGatewayLease, KVGatewayLeaseTTL, 0},
 		{KVBucketSession, KVBucketSessionTTL, 0},
 	}
 }

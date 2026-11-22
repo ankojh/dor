@@ -14,9 +14,9 @@ import (
 
 	"github.com/ankojh/dor/internal/agents"
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/maintenance"
 	dorv1 "github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,13 +32,14 @@ type candidate struct {
 }
 
 type report struct {
-	Database    string       `json:"database"`
-	AsOf        time.Time    `json:"as_of"`
-	IngestFirst uint64       `json:"ingest_first"`
-	IngestLast  uint64       `json:"ingest_last"`
-	Changes     []*candidate `json:"changes"`
-	Committed   bool         `json:"committed"`
-	Warning     string       `json:"warning"`
+	Database    string            `json:"database"`
+	AsOf        time.Time         `json:"as_of"`
+	IngestFirst uint64            `json:"ingest_first"`
+	IngestLast  uint64            `json:"ingest_last"`
+	Changes     []*candidate      `json:"changes"`
+	Committed   bool              `json:"committed"`
+	Plan        *maintenance.Plan `json:"maintenance_plan,omitempty"`
+	Warning     string            `json:"warning"`
 }
 
 func rawID(raw *dorv1.RawArticle) string {
@@ -62,7 +63,8 @@ func run() error {
 	natsURL := flag.String("nats", "nats://127.0.0.1:4222", "NATS URL (read-only direct message fetches)")
 	apply := flag.Bool("apply", false, "apply candidate changes to an explicitly named copy only")
 	allowDB := flag.String("allow-db", "", "exact copy database name; dor is forbidden")
-	confirm := flag.Bool("confirm-candidates", false, "operator has verified each retained raw fetch time is the original")
+	confirm := flag.Bool("confirm-candidates", false, "operator has verified each retained raw fetch time is the original; also authorizes a plan override")
+	planOut := flag.String("plan-out", "", "write the deterministic revision-bound maintenance plan to this file (read-only)")
 	flag.Parse()
 	if *dbURL == "" {
 		return errors.New("database URL required")
@@ -106,16 +108,12 @@ func run() error {
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	nc, err := nats.Connect(*natsURL)
+	b, err := bus.Connect(ctx, bus.Options{URL: *natsURL})
 	if err != nil {
 		return err
 	}
-	defer nc.Close()
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
-	}
-	stream, err := js.Stream(ctx, bus.StreamIngest)
+	defer b.Close()
+	stream, err := b.StreamNamed(ctx, bus.StreamIngest)
 	if err != nil {
 		return err
 	}
@@ -158,6 +156,33 @@ func run() error {
 		}
 	}
 	out := report{Database: name, AsOf: asOf, IngestFirst: info.State.FirstSeq, IngestLast: info.State.LastSeq, Changes: changes, Warning: "Raw retention is limited; later refetch is not necessarily the original. Publisher snapshots, journal and derived state require a separate fenced reconciliation; no live cutover is authorized."}
+	if *planOut != "" {
+		audit := make([]maintenance.AuditArticle, 0, len(changes))
+		for _, c := range changes {
+			audit = append(audit, maintenance.AuditArticle{
+				ID:         c.ID,
+				Published:  c.Published.Unix(),
+				Created:    c.Created.Unix(),
+				StoryID:    c.StoryID,
+				FetchTimes: c.FetchTimes,
+			})
+		}
+		plan, err := maintenance.BuildPlan(ctx, b, name, asOf, audit, *confirm)
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(plan, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*planOut, append(data, '\n'), 0o600); err != nil {
+			return err
+		}
+		out.Plan = plan
+		if !*confirm {
+			out.Warning += " The exported plan suppresses every audited identity because --confirm-candidates was not supplied."
+		}
+	}
 	if *apply {
 		tx, err = db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {

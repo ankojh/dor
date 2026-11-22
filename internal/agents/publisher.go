@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/publication"
 )
@@ -368,6 +369,10 @@ type publisherCore struct {
 	committedRevisions map[string]uint64
 	scores             map[string]*dorv1.MatchScore
 	placed             map[string]bool
+	// policy is the durable per-article timestamp authority loaded from the
+	// publisher bucket. It governs redelivered and future wire rows so stale
+	// retained input cannot reintroduce an unrepaired time.
+	policy *maintenance.WireTimePolicy
 	// cooledAt is the process-local time Heat was last emitted for a story.
 	// Cooling accumulates against this, not against UpdatedAt, so repeated
 	// ticks do not re-apply the same decay.
@@ -444,6 +449,9 @@ func (c *publisherCore) onArticle(a *dorv1.Article, placed bool) {
 	c.mu.Lock()
 	// A placement update rebuilds story/category in place. Keep prompt scores
 	// already computed for this article; they are prompt-keyed and portable.
+	if policy := c.policy; policy != nil {
+		wire.At = maintenance.ApplyPolicy(policy, a.Id, wire.At)
+	}
 	if prev, ok := c.wireRows[a.Id]; ok && prev != nil {
 		wire.PromptScores = prev.PromptScores
 		wire.ApproxPrompts = prev.ApproxPrompts

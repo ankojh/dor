@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/publication"
 )
 
 const (
@@ -135,6 +136,15 @@ func (c *client) filterState() filterState {
 func filterWire(row *dorv1.WireRow, f filterState, stories map[string]*dorv1.Story) (*dorv1.WireRow, bool) {
 	if row == nil {
 		return nil, false
+	}
+	// A suppression tombstone must reach every client, including one with
+	// filters that no longer match the hidden row. Prompt scores are still
+	// projected away because they are per-client data.
+	if publication.WireSuppressed(row) {
+		out := proto.Clone(row).(*dorv1.WireRow)
+		out.PromptScores = nil
+		out.ApproxPrompts = nil
+		return out, true
 	}
 	if !matchesFilters(row, f.filters, stories) {
 		return nil, false
@@ -330,6 +340,9 @@ func filterSnapshot(snap *dorv1.Snapshot, f filterState, stories map[string]*dor
 	out := proto.Clone(snap).(*dorv1.Snapshot)
 	out.RecentWire = out.RecentWire[:0]
 	for _, row := range snap.RecentWire {
+		if publication.WireSuppressed(row) {
+			continue
+		}
 		if filtered, ok := filterWire(row, f, stories); ok {
 			out.RecentWire = append(out.RecentWire, filtered)
 		}

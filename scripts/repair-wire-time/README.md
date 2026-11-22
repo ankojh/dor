@@ -17,13 +17,69 @@ go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" --nats "$COPY_
 
 In a serializable transaction the command moves publication and partition timestamps for verified candidates; it preserves unknown-time source records and writes an explicit suppression audit for each identity. Article details and the histogram exclude suppressed identities. Key conflicts or changed candidate rows abort the transaction. This copy-only database operation does **not** reconcile publisher checkpoints, journal, DELTA, gateway snapshots, cluster state, or live processes. Those require a separately fenced, coordinated reconciliation, including removing suppressed identities from retained wire and preventing stale replay. Cluster story timestamps use processing time in current code, but historical and hot state must be inspected before assuming they are unaffected. No live apply, restart, or cutover is authorized by this command.
 
-## Release blocker: hot-state cutover is not implemented
+## Deterministic maintenance plan export
+
+A read-only plan can be exported without touching the live service:
+
+```sh
+go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
+  --nats "$COPY_NATS_URL" --plan-out /absolute/path/wire-time-plan.json
+```
+
+The plan binds the audit instant, the actual active publisher root/head/global/raw
+revisions, the public snapshot revision, INGEST and DELTA stream tails, and each
+affected article's complete before hash. `run_id` is SHA-256 over the canonical
+plan with its run id and generation time cleared; appending another audit article
+or changing a root revision changes the identity. An override is emitted only for
+exactly one independently identified original raw fetch time when
+`--confirm-candidates` is supplied; every other identity is an audited
+suppression. `created_at == published_at` is never treated as independent
+evidence. Export does not authorize or perform the live reconciliation.
+
+## Implemented maintenance protocol
+
+`internal/maintenance` implements the durable cross-store protocol referenced by
+the release blocker:
+
+- `maintenance/control` is the fleet fence and forward-only phase journal
+  pointer. Once maintenance starts, a missing/corrupt control or floor record
+  holds gateways unready; it never falls back to zero.
+- `maintenance/floor` is the distinct, monotonic, non-expiring gateway baseline
+  `(minimum_resume_seq T, bootstrap_stream_seq D)`. Gateways bootstrap the DELTA
+  consumer at raw `D+1` and require a decoded snapshot at or beyond `T`; clients
+  below `T` receive Resync plus the corrected snapshot even when retained
+  history covers their old range.
+- `maintenance/wire_time_policy` is the durable per-article override/suppression
+  authority. The publisher applies it to restored state, redelivered input and
+  future articles. DELTA has no dedicated removal event, so suppression is a
+  forward-only tombstone (`at < 0`) filtered from snapshots, gateways and the
+  web client.
+- `maintenance/journal` and `maintenance/plan` make the drain, plan, DB repair,
+  policy, forward publication, corrected snapshot, floor and admission phases
+  crash-resumable. `maintenance.VerifyQuiesce` requires stable producer tails,
+  every durable consumer's pending/ack-pending counters, no pending durable
+  joins, an empty publisher outbox and an injected DB writer queue snapshot.
+  Floor-aware gateways heartbeat into the short-lived `gateway_lease` bucket;
+  the coordinator waits until every live heartbeat reports `serving=false`
+  before claiming the publisher root.
+- The forward repair writes through the existing `publication.Store`
+  reserve/publish/commit path with fresh contiguous global and raw sequences.
+  An uncertain outbox or PubAck is settled unchanged. Source consumers,
+  positions and retained DELTA history are never reset or purged.
+
+`maintenance.Apply` is the orchestration entry point. It accepts the
+already-authorized copy-only DB callback and the in-process writer barrier.
+Nothing in this repository automatically invokes it; live application still
+requires a separate approval, a real quiesce, and an isolated rehearsal.
+
+
+## Release blocker: hot-state cutover remains approval-gated
 
 Timestamp repair #4 remains a release/live-repair blocker. A successful audit or
-copy-only DB transaction is not a safe hot-state cutover. The
-[accepted cross-store cutover direction](../repair-geocoding/README.md#live-cutover-is-blocked)
-describes required future work, not an available adapter. Functional closure
-requires these boundaries together:
+copy-only DB transaction is not a safe hot-state cutover. The accepted
+cross-store cutover direction is implemented as the `internal/maintenance`
+protocol described above; this command itself does not invoke it and no live
+apply is authorized. Functional closure requires these boundaries together:
 
 - A finite drain and fleet fence must bind producer tails, consumer pending and
   acknowledgement floors, durable joins, DB-writer queues, and exclusion of all
@@ -50,5 +106,7 @@ requires these boundaries together:
 
 Retain DELTA history and source consumer positions. No source reset/purge,
 repair-time timestamp substitution, or old-checkpoint rollback is permitted.
-This script implements none of these maintenance controls and must not be used
-to claim timestamp repair completion or authorize live application.
+The `internal/maintenance` adapter implements these controls, but this script
+does not invoke it. Do not use either the script or the adapter to claim
+timestamp repair completion or authorize live application without the separate
+approval, rehearsal and fleet barrier.

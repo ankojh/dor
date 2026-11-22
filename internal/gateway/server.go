@@ -16,10 +16,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nuid"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/alert"
@@ -27,6 +29,7 @@ import (
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/httpguard"
 	"github.com/ankojh/dor/internal/live"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/pb/dorv1"
@@ -133,6 +136,13 @@ type Server struct {
 	lastErr error
 	mu      sync.Mutex
 
+	readyOnce     sync.Once
+	serving       atomic.Bool
+	activated     atomic.Bool
+	maintenanceKV jetstream.KeyValue
+	leaseKV       jetstream.KeyValue
+	gatewayID     string
+
 	guard       *httpguard.Allowlist
 	sessions    *session.Signer
 	alertLimit  *httpguard.Limiter
@@ -178,9 +188,14 @@ func New(cfg Config) (*Server, error) {
 		pushLimit:   httpguard.NewLimiter(10, 3),
 		apiBackstop: httpguard.NewLimiter(600, 120),
 		generation:  make(chan struct{}, maxGenerationConcurrency),
+		gatewayID:   nuid.Next(),
 	}
 	s.hub = newHub(cfg.Bus, s.log)
 	s.hub.alertOwner = s.resolveAlertOwner
+	// Start preflight gates the real listener. The default keeps an
+	// unstarted handler usable for in-process tests and embedding callers that
+	// mount s.http.Handler directly.
+	s.serving.Store(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /api/session", s.handleSession)
@@ -216,7 +231,7 @@ func New(cfg Config) (*Server, error) {
 	// Order: trusted Host/origin boundary, then the anonymous session, then
 	// the coarse IP backstop, so per-route session limits and handlers can
 	// both see the session id.
-	handler := s.guard.Middleware(s.sessions.Middleware(s.apiBackstop.Middleware(mux)))
+	handler := s.guard.Middleware(s.sessions.Middleware(s.apiBackstop.Middleware(s.servingMiddleware(mux))))
 	s.http = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
@@ -224,6 +239,29 @@ func New(cfg Config) (*Server, error) {
 // Start binds the listener and starts the delta consumer. It returns once the
 // consumer is established, so a successful Start means deltas will be served.
 func (s *Server) Start(ctx context.Context) error {
+	kv, err := s.cfg.Bus.KV(ctx, bus.KVBucketPublisher)
+	if err != nil {
+		return fmt.Errorf("gateway: maintenance control: %w", err)
+	}
+	s.maintenanceKV = kv
+	leaseKV, err := s.cfg.Bus.KV(ctx, bus.KVBucketGatewayLease)
+	if err != nil {
+		return fmt.Errorf("gateway: gateway lease bucket: %w", err)
+	}
+	s.leaseKV = leaseKV
+	gate, err := maintenance.ReadGate(ctx, kv)
+	if err != nil {
+		return fmt.Errorf("gateway: maintenance control: %w", err)
+	}
+	if gate.Initialized {
+		s.activated.Store(true)
+	}
+	if !gate.Serving() {
+		return fmt.Errorf("gateway: maintenance fence active (phase %s)", gate.Control.Phase)
+	}
+	if _, err := s.prepareBaseline(ctx, gate); err != nil {
+		return err
+	}
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("gateway: listen %s: %w", s.cfg.Addr, err)
@@ -239,7 +277,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log.Error("gateway http server stopped", "err", err)
 		}
 	}()
-	go s.consumeDeltas(runCtx)
+	go s.consumeLoop(runCtx)
 	select {
 	case <-s.ready:
 		s.mu.Lock()
@@ -260,6 +298,26 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = ln.Close()
 		return errors.New("gateway: delta consumer did not start within 10s")
 	}
+}
+
+// prepareBaseline installs the floor-aware snapshot before any client or delta
+// can be served. A missing/short snapshot fails closed instead of lowering the
+// floor.
+func (s *Server) prepareBaseline(ctx context.Context, gate maintenance.Gate) (maintenance.Floor, error) {
+	if !gate.Floor.Valid() {
+		return gate.Floor, nil
+	}
+	_, snap, err := s.hub.fetchSnapshot(ctx)
+	if err != nil {
+		return gate.Floor, fmt.Errorf("gateway: maintenance snapshot: %w", err)
+	}
+	if snap.Seq < gate.Floor.MinimumResumeSeq {
+		return gate.Floor, fmt.Errorf("gateway: snapshot seq %d is below maintenance floor %d", snap.Seq, gate.Floor.MinimumResumeSeq)
+	}
+	if err := s.hub.installBaseline(snap, gate.Floor); err != nil {
+		return gate.Floor, err
+	}
+	return gate.Floor, nil
 }
 
 // Addr returns the bound address (useful when Addr used port 0).
@@ -284,6 +342,7 @@ func (s *Server) Stop(ctx context.Context) error {
 			s.cc.Stop()
 		}
 		s.hub.closeAll()
+		s.deleteLease()
 	})
 	return err
 }
@@ -294,27 +353,183 @@ func (s *Server) setError(err error) {
 	s.mu.Unlock()
 }
 
-func (s *Server) consumeDeltas(ctx context.Context) {
-	stream, err := s.cfg.Bus.StreamNamed(ctx, bus.StreamDelta)
-	if err != nil {
-		s.setError(fmt.Errorf("gateway: delta stream: %w", err))
-		s.log.Error("gateway: delta stream unavailable", "err", err)
-		close(s.ready)
+// servingMiddleware is the request-level half of the fleet fence. Health
+// remains observable while every serving/API route fails closed.
+func (s *Server) servingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.serving.Load() || r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "maintenance fence active"})
+	})
+}
+
+// consumeLoop reconciles the durable maintenance control before serving. It
+// rebuilds the baseline and DELTA consumer from raw D+1 after an advance, and
+// suspends all local serving as soon as the fence closes.
+func (s *Server) consumeLoop(ctx context.Context) {
+	var current maintenance.Gate
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		gate, err := maintenance.ReadGate(ctx, s.maintenanceKV)
+		if err != nil {
+			s.failClosed(fmt.Errorf("gateway: maintenance control: %w", err))
+			s.wait(ctx, time.Second)
+			continue
+		}
+		if s.activated.Load() && !gate.Initialized {
+			s.failClosed(errors.New("gateway: active maintenance control disappeared"))
+			s.wait(ctx, time.Second)
+			continue
+		}
+		if gate.Initialized {
+			s.activated.Store(true)
+		}
+		if !gate.Serving() {
+			s.serving.Store(false)
+			s.publishLease(gate.Control, false, gate.Floor)
+			s.hub.suspend()
+			s.hub.closeAll()
+			s.wait(ctx, time.Second)
+			continue
+		}
+		if _, err := s.prepareBaseline(ctx, gate); err != nil {
+			s.failClosed(err)
+			s.wait(ctx, time.Second)
+			continue
+		}
+		cc, err := s.startDeltaConsumer(ctx, gate.Floor)
+		if err != nil {
+			s.failClosed(err)
+			s.wait(ctx, time.Second)
+			continue
+		}
+		s.serving.Store(true)
+		s.mu.Lock()
+		s.cc = cc
+		s.lastErr = nil
+		s.mu.Unlock()
+		s.publishLease(gate.Control, true, gate.Floor)
+		s.readyOnce.Do(func() { close(s.ready) })
+		s.log.Info("gateway consuming deltas", "subject", bus.SubjectDeltaOut, "floor_t", gate.Floor.MinimumResumeSeq, "floor_d", gate.Floor.BootstrapStreamSeq)
+		current = gate
+		for {
+			if !s.wait(ctx, time.Second) {
+				if cc != nil {
+					cc.Stop()
+				}
+				return
+			}
+			next, err := maintenance.ReadGate(ctx, s.maintenanceKV)
+			if err != nil {
+				s.publishLease(maintenance.Control{}, false, maintenance.Floor{})
+			} else {
+				s.publishLease(next.Control, next.Serving(), next.Floor)
+			}
+			if err != nil || !next.Serving() || (s.activated.Load() && !next.Initialized) {
+				s.serving.Store(false)
+				s.hub.suspend()
+				s.hub.closeAll()
+				if cc != nil {
+					cc.Stop()
+				}
+				break
+			}
+			if next.Floor.MinimumResumeSeq != current.Floor.MinimumResumeSeq || next.Floor.BootstrapStreamSeq != current.Floor.BootstrapStreamSeq || next.Control.FleetEpoch != current.Control.FleetEpoch {
+				s.serving.Store(false)
+				s.hub.suspend()
+				if cc != nil {
+					cc.Stop()
+				}
+				break
+			}
+		}
+	}
+}
+
+func (s *Server) wait(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+func (s *Server) failClosed(err error) {
+	s.serving.Store(false)
+	s.setError(err)
+	s.publishLease(maintenance.Control{}, false, maintenance.Floor{})
+	s.hub.suspend()
+	s.hub.closeAll()
+	s.readyOnce.Do(func() { close(s.ready) })
+}
+
+// publishLease advertises this process's serving state for the maintenance
+// exclusion barrier. A lease write failure is deliberately non-fatal: the
+// external quiesce barrier remains authoritative.
+func (s *Server) publishLease(control maintenance.Control, serving bool, floor maintenance.Floor) {
+	if s.leaseKV == nil {
 		return
 	}
-	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = maintenance.WriteGatewayLease(ctx, s.leaseKV, maintenance.GatewayLease{
+		ID:      s.gatewayID,
+		Epoch:   control.FleetEpoch,
+		Serving: serving,
+		FloorT:  floor.MinimumResumeSeq,
+		FloorD:  floor.BootstrapStreamSeq,
+	})
+}
+
+func (s *Server) deleteLease() {
+	if s.leaseKV == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = maintenance.DeleteGatewayLease(ctx, s.leaseKV, s.gatewayID)
+}
+
+// startDeltaConsumer starts at the raw position after the installed floor. The
+// retained pre-floor DELTA prefix remains on the server but is never replayed.
+func (s *Server) startDeltaConsumer(ctx context.Context, floor maintenance.Floor) (jetstream.ConsumeContext, error) {
+	stream, err := s.cfg.Bus.StreamNamed(ctx, bus.StreamDelta)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: delta stream: %w", err)
+	}
+	config := jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckNonePolicy,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		FilterSubject: bus.SubjectDeltaOut,
 		MaxAckPending: 8192,
-	})
+	}
+	if floor.Valid() {
+		config.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		start := floor.BootstrapStreamSeq + 1
+		if info, err := stream.Info(ctx); err == nil && info.State.FirstSeq > start {
+			// Retention may have removed the exact raw successor while the
+			// snapshot already covers it. Start at the oldest retained raw
+			// message; addBatch discards deltas at or below the snapshot seq.
+			start = info.State.FirstSeq
+		}
+		config.OptStartSeq = start
+	}
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, config)
 	if err != nil {
-		s.setError(fmt.Errorf("gateway: delta consumer: %w", err))
-		s.log.Error("gateway: delta consumer failed", "err", err)
-		close(s.ready)
-		return
+		return nil, fmt.Errorf("gateway: delta consumer: %w", err)
 	}
 	cc, err := consumer.Consume(func(msg jetstream.Msg) {
+		if !s.serving.Load() {
+			return
+		}
 		var batch dorv1.DeltaBatch
 		if err := proto.Unmarshal(msg.Data(), &batch); err != nil {
 			s.log.Warn("gateway: undecodable delta batch", "err", err)
@@ -323,18 +538,9 @@ func (s *Server) consumeDeltas(ctx context.Context) {
 		s.hub.addBatch(&batch)
 	})
 	if err != nil {
-		s.setError(fmt.Errorf("gateway: consume: %w", err))
-		s.log.Error("gateway: consume failed", "err", err)
-		close(s.ready)
-		return
+		return nil, fmt.Errorf("gateway: consume: %w", err)
 	}
-	s.mu.Lock()
-	s.cc = cc
-	s.mu.Unlock()
-	close(s.ready)
-	s.log.Info("gateway consuming deltas", "subject", bus.SubjectDeltaOut)
-	<-ctx.Done()
-	cc.Stop()
+	return cc, nil
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {

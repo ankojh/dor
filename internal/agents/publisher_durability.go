@@ -302,6 +302,9 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 		c.links[link.A+"|"+link.B] = link
 	}
 	for _, row := range snap.RecentWire {
+		if publication.WireSuppressed(row) {
+			continue
+		}
 		c.wire = append(c.wire, row)
 		c.wireRows[row.ArticleId] = row
 		c.wireOrder = append(c.wireOrder, row.ArticleId)
@@ -621,6 +624,9 @@ func (c *publisherCore) applyDeltaLocked(d *dorv1.Delta) {
 			if c.wireRows[row.ArticleId] == nil {
 				c.wireRows[row.ArticleId] = row
 				c.wireOrder = append(c.wireOrder, row.ArticleId)
+			}
+			if publication.WireSuppressed(row) {
+				return
 			}
 			c.wire = append(c.wire, row)
 			if len(c.wire) > publisherWireHistory {

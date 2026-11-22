@@ -194,8 +194,15 @@ export class LiveState {
         this.removeLink(linkKey(delta.body.value.a, delta.body.value.b));
         break;
       case "wire": {
-        this.arrivals.accept(rowKey(delta.body.value), Date.now(), false);
-        const row = this.remember(delta.body.value);
+        const next = delta.body.value;
+        if (Number(next.at) < 0) {
+          // Suppression tombstone: publish the removal to the UI without
+          // counting it as a new arrival or spawning a globe ripple.
+          this.remember(next);
+          break;
+        }
+        this.arrivals.accept(rowKey(next), Date.now(), false);
+        const row = this.remember(next);
         this.rippleRows.set(rowKey(row), row);
         while (this.rippleRows.size > WIRE_LIMIT)
           this.rippleRows.delete(this.rippleRows.keys().next().value!);
@@ -210,6 +217,18 @@ export class LiveState {
 
   private remember(row: WireRow): WireRow {
     const key = rowKey(row);
+    // A negative timestamp is a forward-only suppression tombstone. Keep it
+    // out of the live wire and match caches, but publish it through dirtyWire
+    // so the UI can remove the row it may already show.
+    if (Number(row.at) < 0) {
+      this.wire.delete(key);
+      this.pendingMatches.delete(key);
+      this.retainedMatches.delete(row.storyId);
+      this.dirtyWire.set(key, row);
+      while (this.dirtyWire.size > WIRE_LIMIT)
+        this.dirtyWire.delete(this.dirtyWire.keys().next().value!);
+      return row;
+    }
     const old = this.wire.get(key);
     const merged = old ? mergeWireRow(old, row) : row;
     this.wire.set(key, merged);

@@ -222,7 +222,7 @@ function linkOrder(link: LinkInfo): {
   const a = { title: link.aTitle, place: link.aPlace };
   const b = { title: link.bTitle, place: link.bPlace };
   if (link.direction === 1) return { first: b, second: a, arrow: "→" };
-  if (link.direction === 2) return { first: a, second: b, arrow: "↔" };
+  if (link.direction === 2) return { first: a, second: b, arrow: "·" };
   return { first: a, second: b, arrow: "→" };
 }
 
@@ -742,6 +742,7 @@ export function App() {
         const at = Math.min(end, Math.max(start, stamp || start));
         return {
           at,
+          storyId: story.storyId,
           left: 4 + ((at - start) / span) * 92,
           label:
             story.storyId === details.storyId ? "first seen" : `→ ${compactPlaceName(story.place)}`,
@@ -761,6 +762,13 @@ export function App() {
   });
 
   const places = createMemo(() => displayPlaces(focus()?.story.locations ?? []));
+  const threadStartLabel = createMemo(() => {
+    const details = focus();
+    if (!details) return "first seen";
+    const firstSeen = details.thread.map((story) => story.firstSeen).filter((at) => at > 0);
+    if (!firstSeen.length) return "first seen";
+    return `${clockText(Math.min(...firstSeen) * 1000).slice(0, 5)} first seen`;
+  });
   const distanceRows = createMemo(() => {
     const seen = new Set<string>();
     return (focus()?.hud.links ?? []).filter((link) => {
@@ -2480,7 +2488,10 @@ export function App() {
                     <p class="ttl">{story.story.title}</p>
                     <div class="foot">
                       <span>{story.place}</span>
-                      <span>strongest {story.strongestLink.toFixed(2)}</span>
+                      <span title="Strongest verified link">
+                        strongest{" "}
+                        {story.strongestVerified > 0 ? story.strongestVerified.toFixed(2) : "—"}
+                      </span>
                     </div>
                   </button>
                 )}
@@ -2556,22 +2567,10 @@ export function App() {
         </div>
         <Show when={zoomBand().label !== "GLOBE"}>
           <div class="stage-crumbs cap">
-            {zoomBand().label} · {focus() ? compactPlaceName(focus()!.hud.story.place) : "Global"}
+            {focus()
+              ? `${zoomBand().label} · ${compactPlaceName(focus()!.hud.story.place)}`
+              : zoomBand().label}
           </div>
-        </Show>
-        <Show when={globe().match.active && globe().match.matched === 0}>
-          <div class="no-matches glass mono">No stories match this filter · globe dimmed</div>
-        </Show>
-        <Show when={partOfStory()}>
-          {(part) => (
-            <div class="part-story glass">
-              <span class="cap">● Part of story</span>
-              <b>{part().title}</b>
-              <span class="mono">
-                {part().precision} · centre {part().direction}
-              </span>
-            </div>
-          )}
         </Show>
         <div class="tl">
           <span class="cap">{focus() ? "FOCUSED THREAD" : "AMBIENT · NO SELECTION"}</span>
@@ -2585,6 +2584,20 @@ export function App() {
             <span class="back">
               {focus()!.hud.story.sources} sources · {focus()!.hud.links.length} direct links
             </span>
+          </Show>
+          <Show when={globe().match.active && globe().match.matched === 0}>
+            <div class="no-matches glass mono">No stories match this filter · globe dimmed</div>
+          </Show>
+          <Show when={partOfStory()}>
+            {(part) => (
+              <div class="part-story glass">
+                <span class="cap">● Part of story</span>
+                <b>{part().title}</b>
+                <span class="mono">
+                  {part().precision} · centre {part().direction}
+                </span>
+              </div>
+            )}
           </Show>
         </div>
         <div class="tr">
@@ -2945,7 +2958,7 @@ export function App() {
                           <span>{story.place}</span>
                           <span>
                             strongest{" "}
-                            {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
+                            {story.strongestVerified > 0 ? story.strongestVerified.toFixed(2) : "—"}
                           </span>
                         </div>
                       </button>
@@ -2989,7 +3002,10 @@ export function App() {
               </div>
               <Show when={view().zoom >= 8 && distanceRows().length > 0}>
                 <div class="sec distance-list">
-                  <span class="cap">Distances from here</span>
+                  <span class="cap">
+                    Distances from{" "}
+                    {focus() ? compactPlaceName(focus()!.live.place) : "the focused story"}
+                  </span>
                   <For each={distanceRows().slice(0, 4)}>
                     {(link) => (
                       <span class="distance-row">
@@ -3119,7 +3135,7 @@ export function App() {
                             >
                               <span class="k">
                                 {typeName(link.type)}{" "}
-                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "·"}{" "}
                                 {link.unverified ? "unverified · " : ""}
                                 {link.place.toUpperCase()}
                               </span>
@@ -3223,7 +3239,7 @@ export function App() {
                             <span class="mobile-link-main">
                               <span class="mobile-link-k">
                                 {typeName(link.type)}{" "}
-                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "·"}{" "}
                                 {link.place}
                               </span>
                               <span class="mobile-link-t">{link.title}</span>
@@ -3504,15 +3520,9 @@ export function App() {
                 </span>
                 <div class="bars">
                   <For each={timeline().bars}>{(height) => <i style={`height:${height}%`} />}</For>
-                  <span class="win" />
                   <span class="now" />
                 </div>
-                <button
-                  class="chip"
-                  aria-pressed="true"
-                  title="Jump to the newest articles"
-                  onClick={goLive}
-                >
+                <button class="chip" title="Jump to the newest articles" onClick={goLive}>
                   ● Live
                 </button>
               </div>
@@ -3538,6 +3548,7 @@ export function App() {
                     style={`left:${event.left}%;--c:${event.color}`}
                     title={event.title}
                     aria-label={event.title}
+                    onClick={() => liveGlobe?.focusStoryId(event.storyId)}
                   >
                     {event.showLabel ? event.label : ""}
                   </button>
@@ -3546,7 +3557,7 @@ export function App() {
             </div>
           </div>
           <div class="ticks">
-            <span>first seen</span>
+            <span>{threadStartLabel()}</span>
             <span>linked stories at their last update</span>
             <span>now</span>
           </div>

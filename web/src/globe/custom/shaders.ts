@@ -130,6 +130,17 @@ float dorFocusOpacity(float state) {
   float level = mix(start, target, clamp((uTime - uFocusAt) / DOR_FOCUS_FADE, 0.0, 1.0));
   return mix(1.0, DOR_AMBIENT_ALPHA, level);
 }
+
+/** Shared by the visible and ID passes so click targets match what is drawn. */
+float dorArcZoomVisibility(float arcLength) {
+  float arcKm = arcLength * 0.001;
+  float maxArcKm = uZoom > 13.0 ? 2.0 : uZoom > 10.0 ? 25.0 : uZoom > 8.0 ? 250.0 : 14000.0;
+  return 1.0 - smoothstep(maxArcKm * 0.8, maxArcKm, arcKm);
+}
+
+float dorArcStreetVisibility(float strength) {
+  return uZoom > 13.0 ? smoothstep(0.52, 0.68, strength) : 1.0;
+}
 `;
 
 export const DOT_VERT = /* glsl */ `${COMMON_HEADER}
@@ -310,10 +321,8 @@ void main() {
   float len = length(dir);
   // At street zoom a link between cities would be a screen-long line; keep
   // only links that are local to the viewport, tapering with zoom.
-  float arcKm = aArcLength * 0.001;
-  float maxArcKm = uZoom > 13.0 ? 2.0 : uZoom > 10.0 ? 25.0 : uZoom > 8.0 ? 250.0 : 14000.0;
-  alpha *= 1.0 - smoothstep(maxArcKm * 0.8, maxArcKm, arcKm);
-  if (uZoom > 13.0) alpha *= smoothstep(0.52, 0.68, strength);
+  alpha *= dorArcZoomVisibility(aArcLength);
+  alpha *= dorArcStreetVisibility(strength);
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;
@@ -649,8 +658,8 @@ void main() {
   if (strength < DOR_MIN_STRENGTH) alpha = 0.0;
   if (uHasFocus < 0.5 && strength < uFloor) alpha = 0.0;
   if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
-  if (uZoom > 11.5) alpha *= 1.0 - smoothstep(15000.0, 40000.0, aArcLength);
-  if (uZoom > 13.0) alpha *= smoothstep(0.52, 0.68, strength);
+  alpha *= dorArcZoomVisibility(aArcLength);
+  alpha *= dorArcStreetVisibility(strength);
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;

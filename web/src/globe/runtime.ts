@@ -27,6 +27,7 @@ import { buildLabelsOnlyStyle } from "./style/dor-labels";
 import { TilePrefetcher } from "./tile-prefetch";
 import { WORLD } from "./world";
 import { countryAt, type WorldFeature } from "./topojson";
+import { regionFor } from "./regions";
 import type { HudFocus } from "../worker/fake/protocol";
 
 const DEFAULT_VIEW: CameraTarget = { center: [6, 22], zoom: 1.55, bearing: 0, pitch: 0 };
@@ -163,15 +164,6 @@ const REGIONS: ReadonlyArray<{
 ];
 
 /** Riyadh is Asia: the Middle East gets its own test before Africa/Europe. */
-function regionFor(lng: number, lat: number): string {
-  if (lng < -30) return "americas";
-  if (lng >= 110 && lat < -8) return "oceania";
-  if (lng >= 45 && lng < 75 && lat >= 10 && lat < 45) return "asia";
-  if (lng >= -25 && lng < 45 && lat >= 34) return "europe";
-  if (lng >= -20 && lng < 55 && lat >= -36 && lat < 34) return "africa";
-  if (lng >= 45) return "asia";
-  return "europe";
-}
 
 function frontHemisphere(lng: number, lat: number, centerLng: number, centerLat: number): boolean {
   const toRad = Math.PI / 180;
@@ -1233,7 +1225,11 @@ export class LiveGlobe {
     this.hoverRaf = requestAnimationFrame(() => {
       this.hoverRaf = null;
       if (!this.focused) return;
-      const index = this.findArcAt(point.x, point.y);
+      // Use the same GPU ID pass as click: it honours focus visibility, the
+      // shared zoom cull and occlusion, so every drawn link can reveal its
+      // label, including links below the ambient strength floor.
+      const pick = this.layer.pickNow(point.x, point.y);
+      const index = pick?.kind === "link" ? pick.index : null;
       if (index !== this.hoverLink) this.updateHoverLabel(index);
     });
   };
@@ -1271,30 +1267,6 @@ export class LiveGlobe {
         };
       });
     source.setData({ type: "FeatureCollection", features });
-  }
-
-  private findArcAt(x: number, y: number): number | null {
-    const data = this.data;
-    if (!data || !this.linesVisible) return null;
-    let best: number | null = null;
-    let bestDistance = 7;
-    const candidates = this.focused
-      ? this.focused.hud.links.map((link) => link.index)
-      : Array.from({ length: data.init.linkCount }, (_, index) => index);
-    for (const index of candidates) {
-      if ((data.init.links.strength[index] ?? 0) < this.floor) continue;
-      const a = data.stories[data.init.links.a[index]!];
-      const b = data.stories[data.init.links.b[index]!];
-      if (!a || !b) continue;
-      const start = this.map.project([a.lng, a.lat]);
-      const end = this.map.project([b.lng, b.lat]);
-      const distance = distanceToSegment(x, y, start.x, start.y, end.x, end.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = index;
-      }
-    }
-    return best;
   }
 
   private updateDistanceRings(): void {
@@ -1393,21 +1365,28 @@ export class LiveGlobe {
       this.scale = null;
       return;
     }
-    const center = this.map.getCenter();
-    const zoom = this.map.getZoom();
-    const metersPerPixel =
-      (156543.03392 * Math.cos((center.lat * Math.PI) / 180)) / Math.pow(2, zoom);
-    if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) {
+    const canvas = this.map.getCanvas();
+    const width = canvas.clientWidth || 800;
+    const height = canvas.clientHeight || 600;
+    // Measure the projection itself instead of assuming 256-px Mercator
+    // tiles: MapLibre's globe and 512-px zoom scale both change metres/pixel.
+    const referencePx = Math.min(110, Math.max(24, width / 4));
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const start = this.map.unproject([centerX, centerY]);
+    const end = this.map.unproject([centerX + referencePx, centerY]);
+    const referenceMeters = start.distanceTo(end);
+    if (!Number.isFinite(referenceMeters) || referenceMeters <= 0) {
       this.scale = null;
       return;
     }
-    const targetPx = 110;
+    const referenceKm = referenceMeters / 1000;
     let km = SCALE_STEPS[0]!;
     for (const candidate of SCALE_STEPS) {
-      if ((candidate * 1000) / metersPerPixel <= targetPx * 1.2) km = candidate;
+      if (candidate <= referenceKm * 1.2) km = candidate;
       else break;
     }
-    const px = Math.max(12, Math.min(150, (km * 1000) / metersPerPixel));
+    const px = Math.max(12, Math.min(150, (referencePx * km) / referenceKm));
     this.scale = { km, px };
   }
 
@@ -1832,22 +1811,6 @@ export class LiveGlobe {
     this.perf.destroy();
     this.map.remove();
   }
-}
-
-function distanceToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const length = dx * dx + dy * dy;
-  if (length === 0) return Math.hypot(px - ax, py - ay);
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
 function destinationPoint(

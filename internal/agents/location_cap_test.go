@@ -35,14 +35,14 @@ func TestCapLocationsDedupesByPlaceAndMergesEvidence(t *testing.T) {
 		t.Fatalf("len(locations) = %d, want 2 (duplicates collapsed)", len(out))
 	}
 	berlin := out[0]
-	if berlin.PlaceId != "gaz-berlin" {
-		t.Errorf("primary PlaceId = %q, want the first row %q", berlin.PlaceId, "gaz-berlin")
+	if berlin.PlaceId != "wikidata-berlin" {
+		t.Errorf("primary PlaceId = %q, want the point row %q", berlin.PlaceId, "wikidata-berlin")
 	}
 	if berlin.Name != "Berlin, Berlin, Germany" {
 		t.Errorf("primary name = %q, want the first row's name", berlin.Name)
 	}
-	if berlin.Lat != 52.5201 || berlin.Lon != 13.4041 {
-		t.Errorf("primary coords = (%v, %v), want the first row's coords", berlin.Lat, berlin.Lon)
+	if berlin.Lat != 52.52 || berlin.Lon != 13.405 {
+		t.Errorf("primary coords = (%v, %v), want the point row's coords", berlin.Lat, berlin.Lon)
 	}
 	if berlin.Role != dorv1.Role_ROLE_VENUE {
 		t.Errorf("role = %v, want venue (the most decisive role)", berlin.Role)
@@ -162,8 +162,8 @@ func TestBuildStoryRemapsPrimaryAfterDedupe(t *testing.T) {
 	if st.Story.GetPrimary() != 0 {
 		t.Fatalf("primary = %d, want 0 (the surviving Berlin row)", st.Story.GetPrimary())
 	}
-	if locations[0].GetPlaceId() != "dup-a" {
-		t.Errorf("locations[0] = %q, want dup-a", locations[0].GetPlaceId())
+	if locations[0].GetPlaceId() != "dup-b" {
+		t.Errorf("locations[0] = %q, want dup-b (point row)", locations[0].GetPlaceId())
 	}
 	if locations[1].GetPlaceId() != "paris" {
 		t.Errorf("locations[1] = %q, want paris", locations[1].GetPlaceId())

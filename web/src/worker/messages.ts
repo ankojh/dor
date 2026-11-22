@@ -131,7 +131,7 @@ export type WireFilters = {
 
 /** Main -> worker controls. */
 export type WorkerCommand =
-  | { type: "start"; mode: "live" | "mock" | "perf" }
+  | { type: "start"; mode: "live" | "mock" | "perf" | "wirefixture" }
   | { type: "frame" }
   | { type: "refresh" }
   | { type: "focus"; storyId: string }

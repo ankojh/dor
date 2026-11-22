@@ -421,13 +421,16 @@ function mockMessage(message: FeedMessage): void {
   } else if (message.type === "deltas") message.deltas.forEach((delta) => state.apply(delta));
   else statusScope.postMessage(message);
 }
-async function start(mode: "live" | "mock" | "perf"): Promise<void> {
+async function start(mode: "live" | "mock" | "perf" | "wirefixture"): Promise<void> {
   if (started) return;
   started = true;
   liveMode = mode === "live";
   if (mode === "mock") {
     const { startMock } = await import("../live/mock");
     stopFeed = startMock(mockMessage).stop;
+  } else if (mode === "wirefixture") {
+    const { startWireFixture } = await import("../live/wire-fixture");
+    stopFeed = startWireFixture(mockMessage).stop;
   } else if (mode === "perf") {
     const { startPerfFeed } = await import("./perf-feed");
     stopFeed = startPerfFeed(mockMessage);

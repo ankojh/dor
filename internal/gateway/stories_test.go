@@ -27,14 +27,14 @@ func TestDedupeLocationJSONCollapsesBerlinRows(t *testing.T) {
 		t.Fatalf("len(locations) = %d, want 2 (three Berlin rows collapse)", len(out))
 	}
 	berlin := out[0]
-	if berlin.PlaceID != "gaz-berlin" {
-		t.Errorf("primary PlaceID = %q, want the first row %q", berlin.PlaceID, "gaz-berlin")
+	if berlin.PlaceID != "wikidata-berlin" {
+		t.Errorf("primary PlaceID = %q, want the point row %q", berlin.PlaceID, "wikidata-berlin")
 	}
 	if berlin.Name != "Berlin, Berlin, Germany" {
 		t.Errorf("primary name = %q, want the first row's name", berlin.Name)
 	}
-	if !near(berlin.Lat, 52.5201) || !near(berlin.Lon, 13.4041) {
-		t.Errorf("primary coords = (%v, %v), want the first row's coords", berlin.Lat, berlin.Lon)
+	if !near(berlin.Lat, 52.52) || !near(berlin.Lon, 13.405) {
+		t.Errorf("primary coords = (%v, %v), want the point row's coords", berlin.Lat, berlin.Lon)
 	}
 	if berlin.Role != "venue" {
 		t.Errorf("role = %q, want venue (the most decisive)", berlin.Role)
@@ -107,8 +107,8 @@ func TestStoryFromProtoRemapsPrimaryAfterDedupe(t *testing.T) {
 	if out.Primary != 0 {
 		t.Fatalf("primary = %d, want 0 (the surviving Berlin row)", out.Primary)
 	}
-	if out.Locations[0].PlaceID != "dup-a" {
-		t.Errorf("locations[0] = %q, want dup-a", out.Locations[0].PlaceID)
+	if out.Locations[0].PlaceID != "dup-b" {
+		t.Errorf("locations[0] = %q, want dup-b (point row)", out.Locations[0].PlaceID)
 	}
 	if out.Locations[0].Role != "venue" {
 		t.Errorf("surviving Berlin role = %q, want venue", out.Locations[0].Role)

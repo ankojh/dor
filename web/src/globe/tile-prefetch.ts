@@ -57,6 +57,13 @@ export function tileUrlsAround(
   return urls;
 }
 
+/** Resolve a TileJSON template without losing its {z}/{x}/{y} placeholders. */
+export function resolveTileTemplate(template: string, base: string): string {
+  return new URL(template, base)
+    .toString()
+    .replace(/%7B(z|x|y|ratio|r)%7D/gi, (_, token: string) => `{${token.toLowerCase()}}`);
+}
+
 export function glyphRangeUrls(template: string, fonts: string[], ranges: string[]): string[] {
   const urls: string[] = [];
   for (const font of fonts) {
@@ -122,7 +129,7 @@ export class TilePrefetcher {
     const body = (await response.json()) as TileTemplate;
     const template = body.tiles?.[0];
     if (!template) return;
-    this.template = new URL(template, this.tilejsonUrl).toString();
+    this.template = resolveTileTemplate(template, this.tilejsonUrl);
     this.maxZoom = body.maxzoom ?? 14;
   }
 

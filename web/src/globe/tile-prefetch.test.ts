@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { glyphRangeUrls, tileUrlsAround, tileX, tileY } from "./tile-prefetch";
+import {
+  glyphRangeUrls,
+  resolveTileTemplate,
+  TilePrefetcher,
+  tileUrlsAround,
+  tileX,
+  tileY,
+} from "./tile-prefetch";
 
 function tiles(urls: string[], template: string): Array<{ z: number; x: number; y: number }> {
   // Template uses the same placeholders as tileUrlsAround; parse by removing
@@ -101,5 +108,56 @@ describe("glyphRangeUrls", () => {
   it("crosses every font with every range", () => {
     const urls = glyphRangeUrls("https://glyphs/{fontstack}/{range}.pbf", ["A B", "C"], ["0-255"]);
     expect(urls).toEqual(["https://glyphs/A%20B/0-255.pbf", "https://glyphs/C/0-255.pbf"]);
+  });
+});
+
+describe("resolveTileTemplate", () => {
+  it("keeps {z}/{x}/{y} literal after resolving a relative TileJSON template", () => {
+    expect(resolveTileTemplate("planet/{z}/{x}/{y}.pbf", "https://tiles.example/tiles.json")).toBe(
+      "https://tiles.example/planet/{z}/{x}/{y}.pbf",
+    );
+    expect(
+      resolveTileTemplate("https://cdn.example/{z}/{x}/{y}.pbf", "https://tiles.example/"),
+    ).toBe("https://cdn.example/{z}/{x}/{y}.pbf");
+  });
+
+  it("restores tokens that URL resolution percent-encoded", () => {
+    expect(
+      resolveTileTemplate("https://cdn.example/%7Bz%7D/%7Bx%7D/%7By%7D.pbf", "https://x/"),
+    ).toBe("https://cdn.example/{z}/{x}/{y}.pbf");
+  });
+});
+
+describe("TilePrefetcher full path", () => {
+  it("resolves TileJSON and fetches numeric tile URLs, not encoded placeholders", async () => {
+    const calls: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      calls.push(url);
+      if (url.endsWith("tiles.json")) {
+        return new Response(
+          JSON.stringify({
+            tiles: ["https://cdn.example/planet/{z}/{x}/{y}.pbf"],
+            minzoom: 0,
+            maxzoom: 14,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(new Uint8Array([1]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const prefetcher = new TilePrefetcher("https://tiles.example/tiles.json");
+      prefetcher.prefetch([13.4, 52.5], 11);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(calls[0]).toBe("https://tiles.example/tiles.json");
+      const tileCalls = calls.filter((url) => url.includes("/planet/"));
+      expect(tileCalls.length).toBeGreaterThan(0);
+      expect(tileCalls.every((url) => /\/(?:11|12)\/\d+\/\d+\.pbf$/.test(url))).toBe(true);
+      expect(tileCalls.some((url) => url.includes("%7B") || url.includes("{"))).toBe(false);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

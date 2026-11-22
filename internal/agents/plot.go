@@ -444,6 +444,12 @@ func capLocations(in []*dorv1.Location) []*dorv1.Location {
 			}
 			if location.Precision > previous.Precision {
 				previous.Precision = location.Precision
+				previous.Lat = location.Lat
+				previous.Lon = location.Lon
+				previous.PlaceId = location.PlaceId
+				if location.Country != "" {
+					previous.Country = location.Country
+				}
 			}
 			if previous.Country == "" {
 				previous.Country = location.Country

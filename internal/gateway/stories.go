@@ -361,6 +361,12 @@ func dedupeLocationJSON(in []locationJSON) []locationJSON {
 			}
 			if precisionPriority(location.Precision) > precisionPriority(previous.Precision) {
 				previous.Precision = location.Precision
+				previous.Lat = location.Lat
+				previous.Lon = location.Lon
+				previous.PlaceID = location.PlaceID
+				if location.Country != "" {
+					previous.Country = location.Country
+				}
 			}
 			if previous.Country == "" {
 				previous.Country = location.Country

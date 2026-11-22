@@ -2990,3 +2990,12 @@ body {
 .alert-channel {
   text-transform: none;
 }
+
+/* Keep the zoom rail clear of story labels at the globe centre. */
+@media (min-width: 781px) {
+  .zoom-rail {
+    top: auto;
+    bottom: 150px;
+    transform: none;
+  }
+}

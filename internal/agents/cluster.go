@@ -979,6 +979,11 @@ func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticl
 func (c *clusterer) mergeStory(st *storyState, article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *storyState {
 	if st.Story.Category == dorv1.Category_CATEGORY_OTHER && category != dorv1.Category_CATEGORY_OTHER {
 		st.Story.Category = category
+		// Confidence and backend belonged to OTHER, not the new category.
+		st.CategoryBackend = ""
+		st.CategoryConfidence = 0
+		st.CategoryDegraded = false
+		st.CategoryFallback = false
 	}
 	st.Story.Locations = mergeLocations(st.Story.Locations, place)
 	st.Story.Primary = 0

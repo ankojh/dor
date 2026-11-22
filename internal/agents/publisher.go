@@ -28,11 +28,6 @@ const (
 	// publisherWireHistory is the bounded cold-start wire history placed in
 	// every snapshot. It is not a replay of old deltas; rows carry no seq.
 	publisherWireHistory = 500
-	// maxReconciledWireRows bounds the extra wire deltas one story update can
-	// enqueue, so a wide story cannot build a flush batch past the payload
-	// budget. Later story updates reconcile any rows left over.
-	maxReconciledWireRows = 256
-
 	// Heat cooling and link eviction run from the expiry loop. Quiet stories
 	// cool visibly; a story that reaches its 48 h content TTL drops its links
 	// from the snapshot in the same tick.
@@ -537,6 +532,20 @@ func (c *publisherCore) storyForWireLocked(id string) *dorv1.Story {
 		if story := delta.GetStoryUpsert(); story != nil {
 			return story
 		}
+		if delta.GetStoryExpire() != "" {
+			return nil
+		}
+	}
+	if c.inflight != nil {
+		for i := len(c.inflight.deltas) - 1; i >= 0; i-- {
+			d := c.inflight.deltas[i]
+			if story := d.GetStoryUpsert(); story != nil && story.Id == id {
+				return story
+			}
+			if d.GetStoryExpire() == id {
+				return nil
+			}
+		}
 	}
 	return c.stories[id]
 }
@@ -717,8 +726,8 @@ func (c *publisherCore) reconcileWireForStory(s *dorv1.Story) {
 	if s == nil || s.Id == "" {
 		return
 	}
-	var updates []*dorv1.WireRow
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	for id, row := range c.wireRows {
 		if row == nil || row.StoryId != s.Id {
 			continue
@@ -728,14 +737,7 @@ func (c *publisherCore) reconcileWireForStory(s *dorv1.Story) {
 			continue
 		}
 		c.wireRows[id] = next
-		updates = append(updates, next)
-		if len(updates) >= maxReconciledWireRows {
-			break
-		}
-	}
-	c.mu.Unlock()
-	for _, row := range updates {
-		c.enqueue("wire:"+row.ArticleId, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: row}})
+		c.enqueueLocked("wire:"+id, &dorv1.Delta{Body: &dorv1.Delta_Wire{Wire: next}})
 	}
 }
 

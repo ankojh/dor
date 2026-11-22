@@ -206,14 +206,25 @@ func (c *publisherCore) flush(ctx context.Context) error {
 	c.ingestMu.Lock()
 	c.mu.Lock()
 	if c.inflight == nil && (len(c.pending) > 0 || len(c.waiters) > 0) {
-		batch := &publisherBatch{waiters: c.waiters, revisions: maps.Clone(c.revisions), scores: cloneScores(c.scores)}
+		batch := &publisherBatch{}
 		next := c.seq
+		taken := 0
 		for _, key := range c.order {
 			d := proto.Clone(c.pending[key]).(*dorv1.Delta)
 			next++
 			d.Seq = next
 			quantizeDelta(d)
 			batch.deltas = append(batch.deltas, d)
+			if int64(proto.Size(&dorv1.DeltaBatch{Deltas: batch.deltas}))+1024 > c.bus.NC().MaxPayload() {
+				batch.deltas = batch.deltas[:len(batch.deltas)-1]
+				if taken == 0 {
+					c.mu.Unlock()
+					c.ingestMu.Unlock()
+					return fmt.Errorf("publisher: individual DELTA exceeds payload limit")
+				}
+				break
+			}
+			taken++
 		}
 		var err error
 		batch.data, err = proto.MarshalOptions{Deterministic: true}.Marshal(&dorv1.DeltaBatch{Deltas: batch.deltas})
@@ -225,12 +236,39 @@ func (c *publisherCore) flush(ctx context.Context) error {
 			c.ingestMu.Unlock()
 			return err
 		}
-		batch.record = c.makeRecord(c.committed, batch.data, batch.revisions, batch.scores, c.wireOrder, c.scoreOrder)
+		// Intermediate chunks must not acknowledge input revisions or scores:
+		// replay after a crash must regenerate any uncommitted reconciliation.
+		// Keep the committed order plus rows in this chunk until the final chunk
+		// applies the complete order and releases all input barriers.
+		final := taken == len(c.order)
+		wireOrder := append([]string(nil), c.committed.WireOrder...)
+		scoreOrder := c.committed.ScoreOrder
+		batch.revisions = maps.Clone(c.committed.Revisions)
+		batch.scores = cloneScores(c.committed.Scores)
+		if final {
+			batch.waiters = c.waiters
+			batch.revisions = maps.Clone(c.revisions)
+			batch.scores = cloneScores(c.scores)
+			wireOrder, scoreOrder = c.wireOrder, c.scoreOrder
+		} else {
+			for _, d := range batch.deltas {
+				if row := d.GetWire(); row != nil && !slices.Contains(wireOrder, row.ArticleId) {
+					wireOrder = append(wireOrder, row.ArticleId)
+				}
+			}
+		}
+		batch.record = c.makeRecord(c.committed, batch.data, batch.revisions, batch.scores, wireOrder, scoreOrder)
 		c.inflight = batch
-		c.pending, c.order, c.waiters = map[string]*dorv1.Delta{}, nil, nil
-		c.pendingCredit = 0
-		close(c.capacity)
-		c.capacity = make(chan struct{})
+		for _, key := range c.order[:taken] {
+			delete(c.pending, key)
+		}
+		c.order = c.order[taken:]
+		if final {
+			c.waiters = nil
+			c.pendingCredit = 0
+			close(c.capacity)
+			c.capacity = make(chan struct{})
+		}
 	}
 	c.mu.Unlock()
 	c.ingestMu.Unlock()

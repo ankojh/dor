@@ -197,11 +197,11 @@ func TestRelationStalePairWriteCannotOverwrite(t *testing.T) {
 	core := relationCoreForTest(t, ctx, b, d, now)
 
 	newer := &relationPairRecord{A: a, B: bb, SeqA: 20, SeqB: 20, Outcome: "none"}
-	rev, err := core.storePairRecord(ctx, relationPairKey(a, bb), newer, 0, false)
+	rev, stored, err := core.storePairRecord(ctx, relationPairKey(a, bb), newer, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rev == 0 {
+	if rev == 0 || !stored {
 		t.Fatal("pair record was not created")
 	}
 	// Stale in-memory entries claim revisions 10/10.

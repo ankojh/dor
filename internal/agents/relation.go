@@ -1141,9 +1141,18 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) error
 	} else {
 		pr.Outcome = "none"
 	}
-	rev, err = c.storePairRecord(ctx, key, pr, rev, exists)
+	rev, stored, err := c.storePairRecord(ctx, key, pr, rev, exists)
 	if err != nil {
 		return err
+	}
+	if !stored {
+		// A concurrent writer owns this pair at a newer revision. Apply its
+		// record if its output is still pending; never publish ours.
+		winner, winnerRev, ok, loadErr := c.loadPairRecord(ctx, key)
+		if loadErr != nil || !ok || winner.Published {
+			return loadErr
+		}
+		return c.applyPairOutput(ctx, key, winner, winnerRev)
 	}
 	return c.applyPairOutput(ctx, key, pr, rev)
 }
@@ -1306,30 +1315,30 @@ func (c *relationCore) loadPairRecord(ctx context.Context, key string) (*relatio
 
 // storePairRecord writes the durable judgement with CAS. An older sequence
 // pair never overwrites a newer record.
-func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *relationPairRecord, rev uint64, exists bool) (uint64, error) {
+func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *relationPairRecord, rev uint64, exists bool) (uint64, bool, error) {
 	data, err := json.Marshal(rec)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if c.kv == nil {
 		c.mu.Lock()
 		cp := *rec
 		c.pairs[key] = &cp
 		c.mu.Unlock()
-		return 0, nil
+		return 0, true, nil
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		if exists {
 			if updated, err := c.kv.Update(ctx, key, data, rev); err == nil {
 				c.rememberPair(key, rec)
-				return updated, nil
+				return updated, true, nil
 			}
 		} else {
 			if created, err := c.kv.Create(ctx, key, data); err == nil {
 				c.rememberPair(key, rec)
-				return created, nil
+				return created, true, nil
 			} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
-				return 0, err
+				return 0, false, err
 			}
 		}
 		// Reconcile with the winner.
@@ -1339,20 +1348,20 @@ func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *rel
 				exists = false
 				continue
 			}
-			return 0, err
+			return 0, false, err
 		}
 		var current relationPairRecord
 		if json.Unmarshal(entry.Value(), &current) == nil {
 			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
-				return entry.Revision(), nil
+				return entry.Revision(), false, nil
 			}
 			if current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
-				return entry.Revision(), nil
+				return entry.Revision(), false, nil
 			}
 		}
 		rev, exists = entry.Revision(), true
 	}
-	return 0, errors.New("relation: pair record contention")
+	return 0, false, errors.New("relation: pair record contention")
 }
 
 func (c *relationCore) rememberPair(key string, rec *relationPairRecord) {
@@ -1594,15 +1603,16 @@ func linkMessageID(link *dorv1.Link) string {
 func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 	a, b = live.SortPair(a, b)
 	key := pairKey(a, b)
+	pkey := relationPairKey(a, b)
 	c.mu.Lock()
 	existing := c.links[key]
 	delete(c.links, key)
 	delete(c.judged, key)
-	delete(c.pairs, key)
-	delete(c.dirty, key)
+	delete(c.pairs, pkey)
+	delete(c.dirty, pkey)
 	c.mu.Unlock()
 	if c.kv != nil && existing != nil {
-		_ = c.kv.Delete(ctx, relationPairKey(a, b))
+		_ = c.kv.Delete(ctx, pkey)
 	}
 	if existing == nil {
 		return

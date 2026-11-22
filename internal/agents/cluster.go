@@ -1231,7 +1231,16 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 		}
 	}
 	latest, ok := live.LoadStory(ctx, kv, st.Story.Id)
-	if !ok || latest == nil || latest.Title == "" {
+	if !ok || latest == nil {
+		return
+	}
+	// Heat is derived and cooling writes only story.<id>. Adopt it only when
+	// the derived story's content matches the checkpoint; a torn, uncommitted
+	// merge must not contribute its heat before the join is replayed.
+	if sameStoryContentIgnoringHeat(st.Story, latest) {
+		st.Story.Heat = latest.Heat
+	}
+	if latest.Title == "" {
 		return
 	}
 	if fd := latest.ProtoReflect().Descriptor().Fields().ByName("title_source"); fd != nil {
@@ -1239,6 +1248,15 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 			st.Story.Title = latest.Title
 		}
 	}
+}
+
+func sameStoryContentIgnoringHeat(a, b *dorv1.Story) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	ca, cb := proto.Clone(a).(*dorv1.Story), proto.Clone(b).(*dorv1.Story)
+	ca.Heat, cb.Heat = 0, 0
+	return proto.Equal(ca, cb)
 }
 
 func (c *clusterer) load(ctx context.Context) error {

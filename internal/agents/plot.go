@@ -418,17 +418,69 @@ func normalizeWords(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// maxStoryLocations bounds one story's place list. The primary is first and
+// six party tethers are drawn; the remainder stay available to the panel so a
+// multi-region story can list more than six parties without extra tethers.
+const maxStoryLocations = 12
+
+// capLocations collapses repeated place rows produced by different source
+// articles, keeps the most decisive role and most precise coordinate, and
+// bounds the list. It never moves the first (primary) location.
 func capLocations(in []*dorv1.Location) []*dorv1.Location {
-	out := make([]*dorv1.Location, 0, 6)
-	for _, loc := range in {
-		if loc != nil && geo.ValidCoordinates(float64(loc.Lat), float64(loc.Lon)) {
-			out = append(out, loc)
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]*dorv1.Location, 0, len(in))
+	seen := make(map[string]int, len(in))
+	for _, location := range in {
+		if location == nil || !geo.ValidCoordinates(float64(location.Lat), float64(location.Lon)) {
+			continue
 		}
-		if len(out) == 6 {
-			break
+		key := locationKey(location)
+		if at, ok := seen[key]; ok {
+			previous := out[at]
+			if rolePriority(location.Role) < rolePriority(previous.Role) {
+				previous.Role = location.Role
+			}
+			if location.Precision > previous.Precision {
+				previous.Precision = location.Precision
+			}
+			previous.Weight += location.Weight
+			continue
 		}
+		seen[key] = len(out)
+		out = append(out, proto.Clone(location).(*dorv1.Location))
+	}
+	if len(out) > maxStoryLocations {
+		out = out[:maxStoryLocations]
 	}
 	return out
+}
+
+func locationKey(location *dorv1.Location) string {
+	name := location.Name
+	if at := strings.IndexByte(name, ','); at >= 0 {
+		name = name[:at]
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	// ~1 km rounding: the gazetteer centroid and Photon's result for the same
+	// city collapse without changing where the dot sits.
+	return name + "|" + fmt.Sprintf("%.2f,%.2f", location.Lat, location.Lon)
+}
+
+func rolePriority(role dorv1.Role) int {
+	switch role {
+	case dorv1.Role_ROLE_VENUE:
+		return 0
+	case dorv1.Role_ROLE_ORIGIN:
+		return 1
+	case dorv1.Role_ROLE_PARTY:
+		return 2
+	case dorv1.Role_ROLE_AFFECTED:
+		return 3
+	default:
+		return 4
+	}
 }
 
 func multiCountry(candidates []geo.Place, locations []*dorv1.Location) bool {

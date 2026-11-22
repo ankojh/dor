@@ -71,6 +71,7 @@ function entry(
     category: 0,
     color: [0, 0, 0, 0],
     parties: [],
+    partyTotal: 0,
     degree: degree ?? 0,
     strongestLink: strongestVerified ?? 0,
     strongestVerified: strongestVerified ?? 0,

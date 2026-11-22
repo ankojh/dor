@@ -90,6 +90,7 @@ export class GlobeGpuData {
   readonly storyTex: WebGLTexture;
   readonly focusTex: WebGLTexture;
   readonly arcFocusTex: WebGLTexture;
+  readonly arcDirTex: WebGLTexture;
   storyCapacity: number;
   linkCapacity: number;
   readonly storyPool: CapacityPool;
@@ -109,6 +110,7 @@ export class GlobeGpuData {
   private storyData: Float32Array;
   private focusData: Float32Array;
   private arcData: Float32Array;
+  private arcDirData: Float32Array;
   private storyMercX: Float64Array;
   private storyMercY: Float64Array;
   private storyActive: Uint8Array;
@@ -175,6 +177,10 @@ export class GlobeGpuData {
     this.storyData = new Float32Array(this.storyCapacity * 4);
     this.focusData = new Float32Array(this.storyCapacity * 4);
     this.arcData = new Float32Array(this.linkCapacity * 4);
+    this.arcDirData = new Float32Array(this.linkCapacity * 4);
+    for (let i = 0; i < this.linkCount; i++) {
+      this.arcDirData[i * 4] = links.direction?.[i] ?? 0;
+    }
     for (let i = 0; i < this.storyCount; i++) {
       this.storyData[i * 4] = dotSizeFactor(stories.sources[i]!, stories.heat[i]!);
       this.storyData[i * 4 + 1] = stories.heat[i]!;
@@ -193,9 +199,11 @@ export class GlobeGpuData {
     const storyTexture = createTexture(gl, this.storyCapacity, this.storyData);
     const focusTexture = createTexture(gl, this.storyCapacity, this.focusData);
     const arcTexture = createTexture(gl, this.linkCapacity, this.arcData);
+    const arcDirTexture = createTexture(gl, this.linkCapacity, this.arcDirData);
     this.storyTex = storyTexture.texture;
     this.focusTex = focusTexture.texture;
     this.arcFocusTex = arcTexture.texture;
+    this.arcDirTex = arcDirTexture.texture;
     this.storyTexWidth = storyTexture.width;
     this.storyTexHeight = storyTexture.height;
     this.linkTexWidth = arcTexture.width;
@@ -330,6 +338,7 @@ export class GlobeGpuData {
     }
     if (links > this.linkCapacity) {
       this.arcData = growArray(this.arcData, links * 4);
+      this.arcDirData = growArray(this.arcDirData, links * 4);
       this.linkActive = growArray(this.linkActive, links);
       this.linkDimmed = growArray(this.linkDimmed, links);
       this.linkPool.grow(links);
@@ -342,6 +351,7 @@ export class GlobeGpuData {
             (["startHi", "startLo", "endHi", "endLo"].includes(key) ? 2 : 1),
         );
       this.linkTexWidth = texture(this.arcFocusTex, links, this.arcData);
+      texture(this.arcDirTex, links, this.arcDirData);
       this.linkCapacity = links;
       this.arcMesh.instanceCount = links * this.arcSegments;
     }
@@ -404,6 +414,7 @@ export class GlobeGpuData {
     gl.deleteTexture(this.storyTex);
     gl.deleteTexture(this.focusTex);
     gl.deleteTexture(this.arcFocusTex);
+    gl.deleteTexture(this.arcDirTex);
     this.tetherMesh = null;
     this.ringMesh = null;
   }
@@ -542,6 +553,7 @@ export class GlobeGpuData {
         this.arcData[index * 4 + 2]!,
         strength,
       );
+      if (op.direction !== undefined) this.uploadArcDirection(index, op.direction);
     } else {
       this.linkActive[index] = 0;
       this.linkPool.free(index);
@@ -607,6 +619,28 @@ export class GlobeGpuData {
     pixel[2] = at;
     pixel[3] = strength;
     this.gl.bindTexture(this.gl.TEXTURE_2D, this.arcFocusTex);
+    this.gl.texSubImage2D(
+      this.gl.TEXTURE_2D,
+      0,
+      texel.x,
+      texel.y,
+      1,
+      1,
+      this.gl.RGBA,
+      this.gl.FLOAT,
+      pixel,
+    );
+  }
+
+  private uploadArcDirection(index: number, direction: number): void {
+    this.arcDirData[index * 4] = direction;
+    const texel = texelOf(index, this.linkTexWidth);
+    const pixel = this.arcPixel;
+    pixel[0] = direction;
+    pixel[1] = 0;
+    pixel[2] = 0;
+    pixel[3] = 0;
+    this.gl.bindTexture(this.gl.TEXTURE_2D, this.arcDirTex);
     this.gl.texSubImage2D(
       this.gl.TEXTURE_2D,
       0,

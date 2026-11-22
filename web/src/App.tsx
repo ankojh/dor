@@ -60,6 +60,8 @@ const EMPTY_GLOBE: GlobeState = {
   secondDegree: false,
   quality: 0,
   tileFailed: false,
+  scale: null,
+  match: { active: false, matched: 0, total: 0 },
 };
 
 /** Briefs/details appear after the Editor writes them; retry soon, not never. */
@@ -146,6 +148,95 @@ function directionLabel(link: LinkInfo): string {
   if (link.direction === 0) return `${link.aPlace} → ${link.bPlace}`;
   if (link.direction === 1) return `${link.bPlace} → ${link.aPlace}`;
   return `${link.aPlace} · ${link.bPlace}`;
+}
+
+type PlaceRow = {
+  key: string;
+  name: string;
+  fullName: string;
+  role: Role;
+  precision: Precision;
+  count: number;
+};
+
+const ROLE_PRIORITY: Record<number, number> = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4 };
+
+function shortPlaceName(name: string): string {
+  const parts = name
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return "Unknown place";
+  const filtered: string[] = [parts[0]!];
+  for (const part of parts.slice(1)) {
+    if (part.toLowerCase() === filtered[0]!.toLowerCase()) continue;
+    filtered.push(part);
+  }
+  if (filtered.length <= 2) return filtered.join(", ");
+  return `${filtered[0]}, ${filtered[filtered.length - 1]}`;
+}
+
+/** Collapse the same place repeated by different source articles. */
+function displayPlaces(locations: StorySummary["locations"]): PlaceRow[] {
+  const rows = new Map<string, PlaceRow>();
+  for (const location of locations) {
+    const key =
+      location.placeId ||
+      `${shortPlaceName(location.name).toLowerCase()}|${location.lat.toFixed(2)},${location.lon.toFixed(2)}`;
+    const existing = rows.get(key);
+    if (existing) {
+      if ((ROLE_PRIORITY[location.role] ?? 4) < (ROLE_PRIORITY[existing.role] ?? 4)) {
+        existing.role = location.role;
+      }
+      if (location.precision > existing.precision) existing.precision = location.precision;
+      existing.count++;
+      continue;
+    }
+    rows.set(key, {
+      key,
+      name: shortPlaceName(location.name),
+      fullName: location.name,
+      role: location.role,
+      precision: location.precision,
+      count: 1,
+    });
+  }
+  return [...rows.values()];
+}
+
+function linkOrder(link: LinkInfo): {
+  first: { title: string; place: string };
+  second: { title: string; place: string };
+  arrow: string;
+} {
+  const a = { title: link.aTitle, place: link.aPlace };
+  const b = { title: link.bTitle, place: link.bPlace };
+  if (link.direction === 1) return { first: b, second: a, arrow: "→" };
+  if (link.direction === 2) return { first: a, second: b, arrow: "↔" };
+  return { first: a, second: b, arrow: "→" };
+}
+
+function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function bearingLabel(lat1: number, lon1: number, lat2: number, lon2: number): string {
+  const toRad = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * toRad) * Math.cos(lat2 * toRad);
+  const x =
+    Math.cos(lat1 * toRad) * Math.sin(lat2 * toRad) -
+    Math.sin(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.cos((lon2 - lon1) * toRad);
+  const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  if (bearing >= 45 && bearing < 135) return "east";
+  if (bearing >= 135 && bearing < 225) return "south";
+  if (bearing >= 225 && bearing < 315) return "west";
+  return "north";
 }
 
 function typeName(type: number): string {
@@ -236,6 +327,16 @@ type BacktestResult = {
   error?: string;
 };
 
+type HistogramPayload = {
+  start: number;
+  end: number;
+  hours: number;
+  bins: number[];
+  count: number;
+  available: boolean;
+  error?: string;
+};
+
 // Must match the gateway's maxClientPrompts/maxPromptRunes and the matcher's
 // bounds so the chip the UI looks up scores by is the prompt the server
 // actually evaluated.
@@ -285,6 +386,7 @@ export function App() {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let freshTimer: ReturnType<typeof setTimeout> | null = null;
   let clockTimer: ReturnType<typeof setInterval> | null = null;
+  let histogramTimer: ReturnType<typeof setInterval> | null = null;
 
   const [now, setNow] = createSignal(Date.now());
   const [connection, setConnection] = createSignal<ConnectionState>("connecting");
@@ -390,6 +492,8 @@ export function App() {
     reason?: string;
   }>({ loading: false, available: null });
   const [mobileTab, setMobileTab] = createSignal<"wire" | "threads" | "near" | "alerts">("wire");
+  const [histogram, setHistogram] = createSignal<HistogramPayload | null>(null);
+  const [layerCoastline, setLayerCoastline] = createSignal(true);
   const [view, setView] = createSignal<{ center: [number, number]; zoom: number }>({
     center: [6, 22],
     zoom: 1.55,
@@ -433,6 +537,9 @@ export function App() {
   const linkCount = createMemo(() => globe().linkCount);
   const topStories = createMemo(() => globe().topStories.slice(0, 6));
   const threadIds = createMemo(() => new Set(focus()?.threadStoryIds ?? []));
+  createEffect(() => {
+    liveGlobe?.setLabelsDimmed(globe().match.active && globe().match.matched === 0);
+  });
   const activeScore = (row: WireRow): number => {
     let score = 0;
     for (const prompt of prompts()) score = Math.max(score, row.promptScores[prompt] ?? 0);
@@ -555,36 +662,99 @@ export function App() {
 
   const rateBars = createMemo(() => rollingMinuteBars(wireRows(), now()));
 
-  const timelineBars = createMemo(() => {
+  const timeline = createMemo(() => {
+    const payload = histogram();
+    if (payload?.available && payload.bins.length > 0) {
+      const max = Math.max(1, ...payload.bins);
+      return {
+        real: true,
+        total: payload.count,
+        error: null as string | null,
+        bars: payload.bins.map((value) =>
+          Math.max(value > 0 ? 5 : 2, Math.round((value / max) * 100)),
+        ),
+      };
+    }
+    // Readable fallback while the history read is unavailable: last hour of
+    // wire rows, never presented as the durable 24 h count.
     const rows = wireRows();
-    if (rows.length === 0) return new Array(36).fill(0);
+    const bins = new Array(36).fill(0);
     const end = now();
     const binMs = (24 * 60 * 60 * 1000) / 36;
-    const bins = new Array(36).fill(0);
     for (const item of rows) {
       const at = Number(item.row.at) * 1000 || item.receivedAt;
       const bin = Math.floor((at - (end - 24 * 60 * 60 * 1000)) / binMs);
       if (bin >= 0 && bin < 36) bins[bin] = (bins[bin] ?? 0) + 1;
     }
+    const total = bins.reduce((sum, value) => sum + value, 0);
     const max = Math.max(1, ...bins);
-    return bins.map((value) => Math.max(2, Math.round((value / max) * 100)));
+    return {
+      real: false,
+      total,
+      error: payload?.error ?? "Loading history…",
+      bars: bins.map((value) => Math.max(value > 0 ? 5 : 2, Math.round((value / max) * 100))),
+    };
   });
 
   const focusTimeline = createMemo(() => {
     const details = focus();
     if (!details) return [];
-    const links = details.hud.links.slice(0, 5);
-    const events = [
-      { left: 4, label: "first seen", color: "#ffc25c" },
-      ...links.map((link, index) => ({
-        left: 38 + (index * 46) / Math.max(1, links.length - 1),
-        label: `→ ${link.place}`,
-        color: link.type === 0 ? "#ffc25c" : link.type === 1 ? "#ff6fd8" : "#5ef2ff",
-      })),
-      { left: 96, label: "now", color: "#ff4f6e" },
-    ];
+    const nowSeconds = Math.floor(now() / 1000);
+    const stories = details.thread.length
+      ? details.thread
+      : [
+          {
+            storyId: details.storyId,
+            title: details.story.title,
+            place: details.live.place,
+            category: details.live.category,
+            firstSeen: Number(details.story.firstSeen),
+            updatedAt: Number(details.story.updatedAt),
+          },
+        ];
+    const firstSeen = stories.map((story) => story.firstSeen).filter((at) => at > 0);
+    const start = firstSeen.length ? Math.min(...firstSeen) : nowSeconds - 3600;
+    const end = Math.max(nowSeconds, ...stories.map((story) => story.updatedAt));
+    const span = Math.max(60, end - start);
+    const events = stories
+      .map((story, index) => {
+        const stamp =
+          story.storyId === details.storyId ? story.firstSeen : story.updatedAt || story.firstSeen;
+        const at = Math.min(end, Math.max(start, stamp || start));
+        return {
+          at,
+          left: 4 + ((at - start) / span) * 92,
+          label:
+            story.storyId === details.storyId ? "first seen" : `→ ${shortPlaceName(story.place)}`,
+          title: `${story.title} · ${clockText(at * 1000)} UTC`,
+          color: hexColor(story.category),
+          showLabel: index === 0,
+        };
+      })
+      .sort((left, right) => left.at - right.at);
+    // Keep only labels that fit; every event still has a dot and a title.
+    let lastLabelAt = -100;
+    for (const event of events) {
+      event.showLabel = event.left - lastLabelAt >= 13;
+      if (event.showLabel) lastLabelAt = event.left;
+    }
     return events;
   });
+
+  const places = createMemo(() => displayPlaces(focus()?.story.locations ?? []));
+  const primaryPlaceKey = createMemo(() => {
+    const details = focus();
+    if (!details) return null;
+    const primary = details.story.locations[details.story.primary] ?? details.story.locations[0];
+    if (!primary) return null;
+    return (
+      primary.placeId ||
+      `${shortPlaceName(primary.name).toLowerCase()}|${primary.lat.toFixed(2)},${primary.lon.toFixed(2)}`
+    );
+  });
+  const partyCount = createMemo(
+    () => (focus()?.story.locations ?? []).filter((place) => place.role === 2).length,
+  );
 
   const enqueueWire = (rows: WireRow[]): void => {
     let added = 0;
@@ -905,6 +1075,23 @@ export function App() {
       setAlertList(payload.alerts ?? []);
     } catch {
       setAlertList([]);
+    }
+  };
+
+  const loadHistogram = async (): Promise<void> => {
+    try {
+      const payload = await apiJson<HistogramPayload>("/api/histogram?hours=24&bins=36");
+      setHistogram(payload);
+    } catch (error) {
+      setHistogram({
+        start: Math.floor(Date.now() / 1000) - 86_400,
+        end: Math.floor(Date.now() / 1000),
+        hours: 24,
+        bins: [],
+        count: 0,
+        available: false,
+        error: String(error),
+      });
     }
   };
 
@@ -1242,6 +1429,8 @@ export function App() {
       await ensureSession();
       if (disposed) return;
       void loadAlerts();
+      void loadHistogram();
+      histogramTimer = setInterval(() => void loadHistogram(), 60_000);
       const { LiveGlobe } = await import("./globe/runtime");
       if (disposed) return;
       liveGlobe = new LiveGlobe(mapContainer, {
@@ -1410,6 +1599,7 @@ export function App() {
       liveGlobe?.destroy();
       liveGlobe = null;
       if (clockTimer !== null) clearInterval(clockTimer);
+      if (histogramTimer !== null) clearInterval(histogramTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
       if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
@@ -1467,6 +1657,34 @@ export function App() {
     setSelectedArticle(null);
     setSelectedLink(null);
   };
+
+  const goLive = (): void => {
+    setNow(Date.now());
+    void loadHistogram();
+    resumeAndFlush();
+  };
+
+  const partOfStory = createMemo(() => {
+    const details = focus();
+    if (!details || view().zoom < 13.5) return null;
+    const primary = details.story.locations[details.story.primary] ?? details.story.locations[0];
+    if (!primary) return null;
+    const km = distanceKm(view().center[1], view().center[0], primary.lat, primary.lon);
+    const direction =
+      km < 0.05
+        ? "here"
+        : `${km.toFixed(km >= 10 ? 0 : 1)} km ${bearingLabel(
+            view().center[1],
+            view().center[0],
+            primary.lat,
+            primary.lon,
+          )} ←`;
+    return {
+      title: details.story.title,
+      precision: precisionLabel(primary.precision).toLowerCase(),
+      direction,
+    };
+  });
 
   const focusTopStory = (story: StorySummary): void => {
     liveGlobe?.focusStoryId(story.id);
@@ -2186,7 +2404,7 @@ export function App() {
             {([label, zoom]) => (
               <button
                 aria-current={zoomBand().label === label}
-                onClick={() => liveGlobe?.flyTo(view().center, zoom)}
+                onClick={() => liveGlobe?.flyToBand(label, zoom)}
               >
                 {label}
               </button>
@@ -2194,15 +2412,27 @@ export function App() {
           </For>
           <span class="cap">{view().zoom.toFixed(1)}</span>
         </div>
-        <div class="stage-crumbs cap">
-          {zoomBand().label} · {focus()?.hud.story.place ?? "Global"}
-        </div>
+        <Show when={zoomBand().label !== "GLOBE"}>
+          <div class="stage-crumbs cap">
+            {zoomBand().label} · {focus()?.hud.story.place ?? "Global"}
+          </div>
+        </Show>
+        <Show when={globe().match.active && globe().match.matched === 0}>
+          <div class="no-matches glass mono">No stories match this filter · globe dimmed</div>
+        </Show>
+        <Show when={partOfStory()}>
+          {(part) => (
+            <div class="part-story glass">
+              <span class="cap">● Part of story</span>
+              <b>{part().title}</b>
+              <span class="mono">
+                {part().precision} · centre {part().direction}
+              </span>
+            </div>
+          )}
+        </Show>
         <div class="tl">
-          <span class="cap">
-            {focus()
-              ? `Focused · ${focus()!.hud.story.place.toUpperCase()}`
-              : "Ambient · no selection"}
-          </span>
+          <span class="cap">{focus() ? "FOCUSED THREAD" : "AMBIENT · NO SELECTION"}</span>
           <Show when={focus()}>
             <button class="back" onClick={clearFocus}>
               ← GLOBAL VIEW (Esc)
@@ -2323,7 +2553,17 @@ export function App() {
               />
             </div>
             <div class="ln2">
-              Coastline when zoomed in <span class="kbd">M5</span>
+              Coastline when zoomed in
+              <button
+                class={`sw2 ${layerCoastline() ? "" : "off"}`}
+                aria-pressed={layerCoastline()}
+                aria-label="Toggle coastline"
+                onClick={() => {
+                  const next = !layerCoastline();
+                  setLayerCoastline(next);
+                  liveGlobe?.setCoastlineVisible(next);
+                }}
+              />
             </div>
             <div class="ln2">
               Perf overlay
@@ -2382,6 +2622,14 @@ export function App() {
               strong
             </span>
           </div>
+          <Show when={globe().scale}>
+            {(scale) => (
+              <div class="scalebar mono" title="Map scale">
+                <i style={`width:${Math.round(scale().px)}px`} />
+                <span>{scale().km >= 1 ? `${scale().km} km` : `${scale().km * 1000} m`}</span>
+              </div>
+            )}
+          </Show>
         </div>
         <div class="br">
           <button class="ibtn" title="Zoom in" onClick={() => liveGlobe?.zoomIn()}>
@@ -2422,8 +2670,10 @@ export function App() {
                   ×
                 </button>
               </div>
-              <h3>{link().aTitle}</h3>
-              <h4>→ {link().bTitle}</h4>
+              <h3>{linkOrder(link()).first.title}</h3>
+              <h4>
+                {linkOrder(link()).arrow} {linkOrder(link()).second.title}
+              </h4>
               <div class="facts">
                 <span>
                   <b>{link().strength.toFixed(2)}</b> strength
@@ -2523,6 +2773,9 @@ export function App() {
               <div class="sec side-head">
                 <span class="cap" style={`color:${hexColor(details().story.category)}`}>
                   {categoryLabel(details().story.category)} · Story
+                  <Show when={storyDetails()?.story.category_backend === "rule"}>
+                    <span class="approx"> · approx</span>
+                  </Show>
                 </span>
                 <button class="text-btn" onClick={clearFocus}>
                   Global view ×
@@ -2567,25 +2820,35 @@ export function App() {
                 </Show>
               </div>
               <div class="sec">
-                <span class="cap">Places</span>
-                <For each={details().story.locations.slice(0, 6)}>
-                  {(place, index) => (
+                <span class="cap">
+                  Places
+                  <Show when={storyDetails()?.story.place_degraded}>
+                    <span class="approx"> · approx</span>
+                  </Show>
+                </span>
+                <For each={places().slice(0, 8)}>
+                  {(place) => (
                     <div class="place">
                       <span
-                        class={index() === details().story.primary ? "fill" : "ring"}
+                        class={place.key === primaryPlaceKey() ? "fill" : "ring"}
                         style={`--c:${hexColor(details().story.category)}`}
                       />
                       <span class="role">{roleLabel(place.role)}</span>
-                      <span class="place-name">{place.name || "Unknown place"}</span>
-                      <span class="prec">{precisionLabel(place.precision)}</span>
+                      <span class="place-name" title={place.fullName}>
+                        {place.name}
+                      </span>
+                      <span class="prec">
+                        {precisionLabel(place.precision)}
+                        {place.count > 1 ? ` ×${place.count}` : ""}
+                      </span>
                     </div>
                   )}
                 </For>
-                <Show when={details().story.locations.length > 6}>
-                  <span class="cap">+{details().story.locations.length - 6} more places</span>
+                <Show when={places().length > 8}>
+                  <span class="cap">+{places().length - 8} more places</span>
                 </Show>
-                <Show when={details().hud.parties.length > 3}>
-                  <span class="cap">Multi-region · {details().hud.parties.length} parties</span>
+                <Show when={partyCount() > 6}>
+                  <span class="cap">Multi-region · {partyCount()} parties</span>
                 </Show>
               </div>
               <Show when={storyDetails()}>
@@ -2964,15 +3227,28 @@ export function App() {
           fallback={
             <>
               <div class="tlrow">
-                <span class="cap" style="width:78px">
+                <span
+                  class="cap"
+                  style="width:78px"
+                  title={
+                    timeline().real
+                      ? `${timeline().total.toLocaleString()} articles in the last 24 h (database)`
+                      : (timeline().error ?? "History unavailable")
+                  }
+                >
                   Last 24h
                 </span>
                 <div class="bars">
-                  <For each={timelineBars()}>{(height) => <i style={`height:${height}%`} />}</For>
+                  <For each={timeline().bars}>{(height) => <i style={`height:${height}%`} />}</For>
                   <span class="win" />
                   <span class="now" />
                 </div>
-                <button class="chip" aria-pressed="true">
+                <button
+                  class="chip"
+                  aria-pressed="true"
+                  title="Jump to the newest articles"
+                  onClick={goLive}
+                >
                   ● Live
                 </button>
               </div>
@@ -2994,11 +3270,11 @@ export function App() {
               <For each={focusTimeline()}>
                 {(event) => (
                   <button
-                    class="ev"
+                    class={`ev ${event.showLabel ? "" : "dotonly"}`}
                     style={`left:${event.left}%;--c:${event.color}`}
-                    title={event.label}
+                    title={event.title}
                   >
-                    {event.label}
+                    {event.showLabel ? event.label : ""}
                   </button>
                 )}
               </For>
@@ -3006,7 +3282,7 @@ export function App() {
           </div>
           <div class="ticks">
             <span>first seen</span>
-            <span>linked stories</span>
+            <span>linked stories at their last update</span>
             <span>now</span>
           </div>
         </Show>

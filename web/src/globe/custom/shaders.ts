@@ -83,6 +83,7 @@ uniform vec2 uAnchorHi;
 uniform vec2 uAnchorLo;
 uniform vec2 uViewport;
 uniform float uTime;
+uniform float uFocusAt;
 uniform float uStoryTexWidth;
 uniform float uLinkTexWidth;
 uniform float uHasFocus;
@@ -121,7 +122,13 @@ float dorFocusOpacity(float state) {
   if (state > 1.5 && state < 2.5) return DOR_FOCUSED_ALPHA;
   if (state > 0.5 && state < 1.5) return DOR_LINKED_ALPHA;
   if (state > 2.5) return DOR_SECOND_ALPHA;
-  return mix(1.0, DOR_AMBIENT_ALPHA, uHasFocus);
+  // Ambient stories do not get a per-instance focus texel, so the global
+  // off-thread dim must fade too (200 ms, plan §4). A focus toggle is the only
+  // transition; switching story while focused leaves the level at its target.
+  float target = uHasFocus;
+  float start = 1.0 - target;
+  float level = mix(start, target, clamp((uTime - uFocusAt) / DOR_FOCUS_FADE, 0.0, 1.0));
+  return mix(1.0, DOR_AMBIENT_ALPHA, level);
 }
 `;
 
@@ -255,6 +262,7 @@ layout(location = 10) in vec2 aCorner;
 layout(location = 11) in float aArcLength;
 
 uniform sampler2D uArcFocusTex;
+uniform sampler2D uArcDirTex;
 uniform vec3 uLinkColors[3];
 
 out float vSidePx;
@@ -264,12 +272,13 @@ out float vAlpha;
 out float vStrength;
 out float vDashed;
 out float vPulse;
-out float vReaction;
+out float vDirection;
 out float vSeed;
 out vec3 vColor;
 
 void main() {
   vec4 focus = texelFetch(uArcFocusTex, dorTexel(aLink, uLinkTexWidth), 0);
+  float direction = texelFetch(uArcDirTex, dorTexel(aLink, uLinkTexWidth), 0).x;
   float state = focus.x;
   float prev = focus.y;
   float at = focus.z;
@@ -320,7 +329,7 @@ void main() {
   vAlpha = alpha;
   vStrength = strength;
   vDashed = step(1.5, aType);
-  vReaction = step(0.5, aType) * step(aType, 1.5);
+  vDirection = direction;
   vPulse = (1.0 - vDashed) * (1.0 - second) * step(DOR_PULSE_1, strength) *
     (1.0 - (1.0 - step(0.5, state)) * uHasFocus) * (1.0 - uDropPulses);
   if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
@@ -342,7 +351,7 @@ in float vAlpha;
 in float vStrength;
 in float vDashed;
 in float vPulse;
-in float vReaction;
+in float vDirection;
 in float vSeed;
 in vec3 vColor;
 
@@ -361,8 +370,9 @@ void main() {
   if (alpha < 0.004) discard;
 
   float pulse = 0.0;
-  if (vPulse > 0.5) {
-    float along = vReaction > 0.5 ? 1.0 - vT : vT;
+  // Direction says which story acted on the other. UNCLEAR (2) never pulses.
+  if (vPulse > 0.5 && vDirection < 1.5) {
+    float along = vDirection > 0.5 ? 1.0 - vT : vT;
     float speed = 0.15 + 0.35 * vStrength;
     float count = vStrength >= DOR_PULSE_2 ? 2.0 : 1.0;
     for (int i = 0; i < 2; i++) {

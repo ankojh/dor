@@ -1249,6 +1249,7 @@ func (c *clusterer) coolStories(ctx context.Context) {
 		prevHeat, prevCooled := item.st.Story.Heat, item.st.CooledAt
 		item.st.Story.Heat = item.heat
 		item.st.CooledAt = item.at
+		c.applyEditorTitleMarker(outCtx, live, item.st)
 		if err := c.publishStoryUpdate(outCtx, item.st,
 			fmt.Sprintf("story:%s:cool:%d", item.st.Story.Id, item.at), nil); err != nil {
 			// Keep the old value so the next tick retries a visible step.
@@ -1371,6 +1372,27 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 			st.Story.TitleSource = "editor"
 		}
 	}
+}
+
+// applyEditorTitleMarker overlays only the editor-owned title fields from the
+// durable storytitle.<id> marker. Everything else stays cluster-owned.
+func (c *clusterer) applyEditorTitleMarker(ctx context.Context, kv jetstream.KeyValue, st *storyState) bool {
+	if st == nil || st.Story == nil {
+		return false
+	}
+	entry, err := kv.Get(ctx, "storytitle."+st.Story.Id)
+	if err != nil {
+		return false
+	}
+	var marker struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal(entry.Value(), &marker) != nil || strings.TrimSpace(marker.Title) == "" {
+		return false
+	}
+	st.Story.Title = marker.Title
+	st.Story.TitleSource = "editor"
+	return true
 }
 
 func sameStoryContentIgnoringHeat(a, b *dorv1.Story) bool {

@@ -151,10 +151,7 @@ func (n *normalizer) normalize(raw *dorv1.RawArticle) (*dorv1.Article, store.Art
 		published = now.Unix()
 	}
 	publishedAt := time.Unix(published, 0).UTC()
-	lang := strings.TrimSpace(raw.Lang)
-	if lang == "" {
-		lang = "en"
-	}
+	lang := resolveLanguage(raw.Lang, title, lede)
 	id := articleIDFor(canonical, raw.Hints)
 	clean := &dorv1.Article{
 		Id:          id,

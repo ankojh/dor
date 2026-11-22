@@ -430,14 +430,17 @@ func (SourceKind) EnumDescriptor() ([]byte, []int) {
 
 // Location is one place attached to an article or story.
 type Location struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PlaceId       string                 `protobuf:"bytes,1,opt,name=place_id,json=placeId,proto3" json:"place_id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Lat           float32                `protobuf:"fixed32,3,opt,name=lat,proto3" json:"lat,omitempty"`
-	Lon           float32                `protobuf:"fixed32,4,opt,name=lon,proto3" json:"lon,omitempty"`
-	Precision     Precision              `protobuf:"varint,5,opt,name=precision,proto3,enum=dor.v1.Precision" json:"precision,omitempty"`
-	Role          Role                   `protobuf:"varint,6,opt,name=role,proto3,enum=dor.v1.Role" json:"role,omitempty"`
-	Weight        float32                `protobuf:"fixed32,7,opt,name=weight,proto3" json:"weight,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PlaceId   string                 `protobuf:"bytes,1,opt,name=place_id,json=placeId,proto3" json:"place_id,omitempty"`
+	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Lat       float32                `protobuf:"fixed32,3,opt,name=lat,proto3" json:"lat,omitempty"`
+	Lon       float32                `protobuf:"fixed32,4,opt,name=lon,proto3" json:"lon,omitempty"`
+	Precision Precision              `protobuf:"varint,5,opt,name=precision,proto3,enum=dor.v1.Precision" json:"precision,omitempty"`
+	Role      Role                   `protobuf:"varint,6,opt,name=role,proto3,enum=dor.v1.Role" json:"role,omitempty"`
+	Weight    float32                `protobuf:"fixed32,7,opt,name=weight,proto3" json:"weight,omitempty"`
+	// ISO 3166-1 alpha-2 country code when the resolved place knows one. Empty
+	// means unknown; the publisher uses it as the canonical region-filter code.
+	Country       string `protobuf:"bytes,8,opt,name=country,proto3" json:"country,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -521,6 +524,13 @@ func (x *Location) GetWeight() float32 {
 	return 0
 }
 
+func (x *Location) GetCountry() string {
+	if x != nil {
+		return x.Country
+	}
+	return ""
+}
+
 // Article is the normalized ingest record. The full text is never stored.
 type Article struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
@@ -538,8 +548,20 @@ type Article struct {
 	Burst bool      `protobuf:"varint,10,opt,name=burst,proto3" json:"burst,omitempty"` // GDELT bulk item; the wire collapses bursts
 	// Set only on article.placed; clean articles leave these at their zero
 	// values. Append-only so the existing publisher can still decode Article.
-	StoryId       string   `protobuf:"bytes,11,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
-	Join          JoinKind `protobuf:"varint,12,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
+	StoryId string   `protobuf:"bytes,11,opt,name=story_id,json=storyId,proto3" json:"story_id,omitempty"`
+	Join    JoinKind `protobuf:"varint,12,opt,name=join,proto3,enum=dor.v1.JoinKind" json:"join,omitempty"`
+	// Provenance carried on article.placed so the wire can label guesses. Zero
+	// values mean unknown/not degraded.
+	Degraded           bool    `protobuf:"varint,13,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	Fallback           bool    `protobuf:"varint,14,opt,name=fallback,proto3" json:"fallback,omitempty"`
+	CategoryBackend    string  `protobuf:"bytes,15,opt,name=category_backend,json=categoryBackend,proto3" json:"category_backend,omitempty"`            // jev, claude, rule, or empty
+	CategoryConfidence float32 `protobuf:"fixed32,16,opt,name=category_confidence,json=categoryConfidence,proto3" json:"category_confidence,omitempty"` // 0..1; 0 is unknown
+	PlaceBackend       string  `protobuf:"bytes,17,opt,name=place_backend,json=placeBackend,proto3" json:"place_backend,omitempty"`                     // jev, claude, gazetteer, hints, none
+	PlaceDegraded      bool    `protobuf:"varint,18,opt,name=place_degraded,json=placeDegraded,proto3" json:"place_degraded,omitempty"`
+	PlaceFallback      bool    `protobuf:"varint,19,opt,name=place_fallback,json=placeFallback,proto3" json:"place_fallback,omitempty"`
+	// Canonical country of the resolved place (ISO 3166-1 alpha-2), not the
+	// raw feed hint.
+	Country       string `protobuf:"bytes,20,opt,name=country,proto3" json:"country,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -656,6 +678,62 @@ func (x *Article) GetJoin() JoinKind {
 		return x.Join
 	}
 	return JoinKind_JOIN_KIND_NEW
+}
+
+func (x *Article) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *Article) GetFallback() bool {
+	if x != nil {
+		return x.Fallback
+	}
+	return false
+}
+
+func (x *Article) GetCategoryBackend() string {
+	if x != nil {
+		return x.CategoryBackend
+	}
+	return ""
+}
+
+func (x *Article) GetCategoryConfidence() float32 {
+	if x != nil {
+		return x.CategoryConfidence
+	}
+	return 0
+}
+
+func (x *Article) GetPlaceBackend() string {
+	if x != nil {
+		return x.PlaceBackend
+	}
+	return ""
+}
+
+func (x *Article) GetPlaceDegraded() bool {
+	if x != nil {
+		return x.PlaceDegraded
+	}
+	return false
+}
+
+func (x *Article) GetPlaceFallback() bool {
+	if x != nil {
+		return x.PlaceFallback
+	}
+	return false
+}
+
+func (x *Article) GetCountry() string {
+	if x != nil {
+		return x.Country
+	}
+	return ""
 }
 
 // PlacedArticle is the plotter's output on article.place. It carries the
@@ -950,16 +1028,32 @@ func (x *EmbeddedArticle) GetJoin() JoinKind {
 // Story is a cluster of articles about one event.
 // The brief is fetched lazily, so it is not part of this message.
 type Story struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	Category      Category               `protobuf:"varint,3,opt,name=category,proto3,enum=dor.v1.Category" json:"category,omitempty"`
-	Locations     []*Location            `protobuf:"bytes,4,rep,name=locations,proto3" json:"locations,omitempty"`
-	Primary       uint32                 `protobuf:"varint,5,opt,name=primary,proto3" json:"primary,omitempty"` // index into locations
-	SourceCount   uint32                 `protobuf:"varint,6,opt,name=source_count,json=sourceCount,proto3" json:"source_count,omitempty"`
-	Heat          float32                `protobuf:"fixed32,7,opt,name=heat,proto3" json:"heat,omitempty"`
-	FirstSeen     int64                  `protobuf:"varint,8,opt,name=first_seen,json=firstSeen,proto3" json:"first_seen,omitempty"` // unix seconds
-	UpdatedAt     int64                  `protobuf:"varint,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title       string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Category    Category               `protobuf:"varint,3,opt,name=category,proto3,enum=dor.v1.Category" json:"category,omitempty"`
+	Locations   []*Location            `protobuf:"bytes,4,rep,name=locations,proto3" json:"locations,omitempty"`
+	Primary     uint32                 `protobuf:"varint,5,opt,name=primary,proto3" json:"primary,omitempty"` // index into locations
+	SourceCount uint32                 `protobuf:"varint,6,opt,name=source_count,json=sourceCount,proto3" json:"source_count,omitempty"`
+	Heat        float32                `protobuf:"fixed32,7,opt,name=heat,proto3" json:"heat,omitempty"`
+	FirstSeen   int64                  `protobuf:"varint,8,opt,name=first_seen,json=firstSeen,proto3" json:"first_seen,omitempty"` // unix seconds
+	UpdatedAt   int64                  `protobuf:"varint,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	// Append-only provenance for displayed values. Zero values mean unknown or
+	// not degraded. The UI marks degraded metadata "approx".
+	Degraded           bool    `protobuf:"varint,10,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	Fallback           bool    `protobuf:"varint,11,opt,name=fallback,proto3" json:"fallback,omitempty"`
+	CategoryBackend    string  `protobuf:"bytes,12,opt,name=category_backend,json=categoryBackend,proto3" json:"category_backend,omitempty"`            // jev, claude, rule, or empty
+	CategoryConfidence float32 `protobuf:"fixed32,13,opt,name=category_confidence,json=categoryConfidence,proto3" json:"category_confidence,omitempty"` // 0..1; 0 is unknown
+	PlaceBackend       string  `protobuf:"bytes,14,opt,name=place_backend,json=placeBackend,proto3" json:"place_backend,omitempty"`                     // jev, claude, gazetteer, hints, none
+	PlaceDegraded      bool    `protobuf:"varint,15,opt,name=place_degraded,json=placeDegraded,proto3" json:"place_degraded,omitempty"`
+	PlaceFallback      bool    `protobuf:"varint,16,opt,name=place_fallback,json=placeFallback,proto3" json:"place_fallback,omitempty"`
+	// Hazard metadata from the article hints. Used to demote micro-quakes in
+	// live-thread ranking; not part of story identity.
+	Hazard    string  `protobuf:"bytes,17,opt,name=hazard,proto3" json:"hazard,omitempty"`         // earthquake, flood, cyclone, ...
+	Magnitude float64 `protobuf:"fixed64,18,opt,name=magnitude,proto3" json:"magnitude,omitempty"` // upstream magnitude, 0 when unknown
+	// title_source is "editor" when the Editor's neutral title is applied, or
+	// "source" when the title is a source headline.
+	TitleSource   string `protobuf:"bytes,19,opt,name=title_source,json=titleSource,proto3" json:"title_source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1055,6 +1149,76 @@ func (x *Story) GetUpdatedAt() int64 {
 		return x.UpdatedAt
 	}
 	return 0
+}
+
+func (x *Story) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *Story) GetFallback() bool {
+	if x != nil {
+		return x.Fallback
+	}
+	return false
+}
+
+func (x *Story) GetCategoryBackend() string {
+	if x != nil {
+		return x.CategoryBackend
+	}
+	return ""
+}
+
+func (x *Story) GetCategoryConfidence() float32 {
+	if x != nil {
+		return x.CategoryConfidence
+	}
+	return 0
+}
+
+func (x *Story) GetPlaceBackend() string {
+	if x != nil {
+		return x.PlaceBackend
+	}
+	return ""
+}
+
+func (x *Story) GetPlaceDegraded() bool {
+	if x != nil {
+		return x.PlaceDegraded
+	}
+	return false
+}
+
+func (x *Story) GetPlaceFallback() bool {
+	if x != nil {
+		return x.PlaceFallback
+	}
+	return false
+}
+
+func (x *Story) GetHazard() string {
+	if x != nil {
+		return x.Hazard
+	}
+	return ""
+}
+
+func (x *Story) GetMagnitude() float64 {
+	if x != nil {
+		return x.Magnitude
+	}
+	return 0
+}
+
+func (x *Story) GetTitleSource() string {
+	if x != nil {
+		return x.TitleSource
+	}
+	return ""
 }
 
 // Link is a typed relationship between two stories, with a < b.
@@ -1342,8 +1506,17 @@ type WireRow struct {
 	Located bool    `protobuf:"varint,14,opt,name=located,proto3" json:"located,omitempty"`
 	// Prompts scored without a jev answer (embedding/lexical only).
 	ApproxPrompts []string `protobuf:"bytes,15,rep,name=approx_prompts,json=approxPrompts,proto3" json:"approx_prompts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Append-only metadata provenance, mirrored from the placed article and its
+	// story when the story arrives. Zero values mean unknown/not degraded.
+	Degraded           bool    `protobuf:"varint,16,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	Fallback           bool    `protobuf:"varint,17,opt,name=fallback,proto3" json:"fallback,omitempty"`
+	CategoryBackend    string  `protobuf:"bytes,18,opt,name=category_backend,json=categoryBackend,proto3" json:"category_backend,omitempty"`
+	CategoryConfidence float32 `protobuf:"fixed32,19,opt,name=category_confidence,json=categoryConfidence,proto3" json:"category_confidence,omitempty"`
+	PlaceBackend       string  `protobuf:"bytes,20,opt,name=place_backend,json=placeBackend,proto3" json:"place_backend,omitempty"`
+	PlaceDegraded      bool    `protobuf:"varint,21,opt,name=place_degraded,json=placeDegraded,proto3" json:"place_degraded,omitempty"`
+	PlaceFallback      bool    `protobuf:"varint,22,opt,name=place_fallback,json=placeFallback,proto3" json:"place_fallback,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WireRow) Reset() {
@@ -1479,6 +1652,55 @@ func (x *WireRow) GetApproxPrompts() []string {
 		return x.ApproxPrompts
 	}
 	return nil
+}
+
+func (x *WireRow) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *WireRow) GetFallback() bool {
+	if x != nil {
+		return x.Fallback
+	}
+	return false
+}
+
+func (x *WireRow) GetCategoryBackend() string {
+	if x != nil {
+		return x.CategoryBackend
+	}
+	return ""
+}
+
+func (x *WireRow) GetCategoryConfidence() float32 {
+	if x != nil {
+		return x.CategoryConfidence
+	}
+	return 0
+}
+
+func (x *WireRow) GetPlaceBackend() string {
+	if x != nil {
+		return x.PlaceBackend
+	}
+	return ""
+}
+
+func (x *WireRow) GetPlaceDegraded() bool {
+	if x != nil {
+		return x.PlaceDegraded
+	}
+	return false
+}
+
+func (x *WireRow) GetPlaceFallback() bool {
+	if x != nil {
+		return x.PlaceFallback
+	}
+	return false
 }
 
 // Delta is one numbered change pushed to browsers.
@@ -2818,7 +3040,7 @@ var File_dor_v1_dor_proto protoreflect.FileDescriptor
 
 const file_dor_v1_dor_proto_rawDesc = "" +
 	"\n" +
-	"\x10dor/v1/dor.proto\x12\x06dor.v1\"\xc8\x01\n" +
+	"\x10dor/v1/dor.proto\x12\x06dor.v1\"\xe2\x01\n" +
 	"\bLocation\x12\x19\n" +
 	"\bplace_id\x18\x01 \x01(\tR\aplaceId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x10\n" +
@@ -2826,7 +3048,8 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x03lon\x18\x04 \x01(\x02R\x03lon\x12/\n" +
 	"\tprecision\x18\x05 \x01(\x0e2\x11.dor.v1.PrecisionR\tprecision\x12 \n" +
 	"\x04role\x18\x06 \x01(\x0e2\f.dor.v1.RoleR\x04role\x12\x16\n" +
-	"\x06weight\x18\a \x01(\x02R\x06weight\"\xc4\x02\n" +
+	"\x06weight\x18\a \x01(\x02R\x06weight\x12\x18\n" +
+	"\acountry\x18\b \x01(\tR\acountry\"\xe5\x04\n" +
 	"\aArticle\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
@@ -2840,7 +3063,15 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x05burst\x18\n" +
 	" \x01(\bR\x05burst\x12\x19\n" +
 	"\bstory_id\x18\v \x01(\tR\astoryId\x12$\n" +
-	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\xf9\x01\n" +
+	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\x12\x1a\n" +
+	"\bdegraded\x18\r \x01(\bR\bdegraded\x12\x1a\n" +
+	"\bfallback\x18\x0e \x01(\bR\bfallback\x12)\n" +
+	"\x10category_backend\x18\x0f \x01(\tR\x0fcategoryBackend\x12/\n" +
+	"\x13category_confidence\x18\x10 \x01(\x02R\x12categoryConfidence\x12#\n" +
+	"\rplace_backend\x18\x11 \x01(\tR\fplaceBackend\x12%\n" +
+	"\x0eplace_degraded\x18\x12 \x01(\bR\rplaceDegraded\x12%\n" +
+	"\x0eplace_fallback\x18\x13 \x01(\bR\rplaceFallback\x12\x18\n" +
+	"\acountry\x18\x14 \x01(\tR\acountry\"\xf9\x01\n" +
 	"\rPlacedArticle\x12)\n" +
 	"\aarticle\x18\x01 \x01(\v2\x0f.dor.v1.ArticleR\aarticle\x12.\n" +
 	"\tlocations\x18\x02 \x03(\v2\x10.dor.v1.LocationR\tlocations\x12\x18\n" +
@@ -2867,7 +3098,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tR\x05model\x12\x1a\n" +
 	"\bdegraded\x18\x04 \x01(\bR\bdegraded\x12\x19\n" +
 	"\bstory_id\x18\v \x01(\tR\astoryId\x12$\n" +
-	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\x9a\x02\n" +
+	"\x04join\x18\f \x01(\x0e2\x10.dor.v1.JoinKindR\x04join\"\xfa\x04\n" +
 	"\x05Story\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12,\n" +
@@ -2879,7 +3110,18 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\n" +
 	"first_seen\x18\b \x01(\x03R\tfirstSeen\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\t \x01(\x03R\tupdatedAt\"\xe8\x01\n" +
+	"updated_at\x18\t \x01(\x03R\tupdatedAt\x12\x1a\n" +
+	"\bdegraded\x18\n" +
+	" \x01(\bR\bdegraded\x12\x1a\n" +
+	"\bfallback\x18\v \x01(\bR\bfallback\x12)\n" +
+	"\x10category_backend\x18\f \x01(\tR\x0fcategoryBackend\x12/\n" +
+	"\x13category_confidence\x18\r \x01(\x02R\x12categoryConfidence\x12#\n" +
+	"\rplace_backend\x18\x0e \x01(\tR\fplaceBackend\x12%\n" +
+	"\x0eplace_degraded\x18\x0f \x01(\bR\rplaceDegraded\x12%\n" +
+	"\x0eplace_fallback\x18\x10 \x01(\bR\rplaceFallback\x12\x16\n" +
+	"\x06hazard\x18\x11 \x01(\tR\x06hazard\x12\x1c\n" +
+	"\tmagnitude\x18\x12 \x01(\x01R\tmagnitude\x12!\n" +
+	"\ftitle_source\x18\x13 \x01(\tR\vtitleSource\"\xe8\x01\n" +
 	"\x04Link\x12\f\n" +
 	"\x01a\x18\x01 \x01(\tR\x01a\x12\f\n" +
 	"\x01b\x18\x02 \x01(\tR\x01b\x12$\n" +
@@ -2908,7 +3150,7 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"generation\x18\a \x01(\x04R\n" +
 	"generation\x12\x16\n" +
 	"\x06approx\x18\b \x01(\bR\x06approx\x12!\n" +
-	"\fsource_count\x18\t \x01(\rR\vsourceCount\"\x87\x04\n" +
+	"\fsource_count\x18\t \x01(\rR\vsourceCount\"\x8e\x06\n" +
 	"\aWireRow\x12\x1d\n" +
 	"\n" +
 	"article_id\x18\x01 \x01(\tR\tarticleId\x12\x19\n" +
@@ -2926,7 +3168,14 @@ const file_dor_v1_dor_proto_rawDesc = "" +
 	"\x03lat\x18\f \x01(\x01R\x03lat\x12\x10\n" +
 	"\x03lon\x18\r \x01(\x01R\x03lon\x12\x18\n" +
 	"\alocated\x18\x0e \x01(\bR\alocated\x12%\n" +
-	"\x0eapprox_prompts\x18\x0f \x03(\tR\rapproxPrompts\x1a?\n" +
+	"\x0eapprox_prompts\x18\x0f \x03(\tR\rapproxPrompts\x12\x1a\n" +
+	"\bdegraded\x18\x10 \x01(\bR\bdegraded\x12\x1a\n" +
+	"\bfallback\x18\x11 \x01(\bR\bfallback\x12)\n" +
+	"\x10category_backend\x18\x12 \x01(\tR\x0fcategoryBackend\x12/\n" +
+	"\x13category_confidence\x18\x13 \x01(\x02R\x12categoryConfidence\x12#\n" +
+	"\rplace_backend\x18\x14 \x01(\tR\fplaceBackend\x12%\n" +
+	"\x0eplace_degraded\x18\x15 \x01(\bR\rplaceDegraded\x12%\n" +
+	"\x0eplace_fallback\x18\x16 \x01(\bR\rplaceFallback\x1a?\n" +
 	"\x11PromptScoresEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x02R\x05value:\x028\x01\"\xb0\x02\n" +

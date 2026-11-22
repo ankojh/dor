@@ -51,10 +51,21 @@ type WriterStats struct {
 // auxMutation is a small durable side record (link/text) queued on the same
 // non-blocking writer as articles and stories.
 type auxMutation struct {
-	kind      uint8
-	link      LinkRecord
-	storyText StoryTextRecord
-	linkText  LinkTextRecord
+	kind       uint8
+	link       LinkRecord
+	storyText  StoryTextRecord
+	linkText   LinkTextRecord
+	enrichment ArticleEnrichmentRecord
+}
+
+// pendingEnrichment is an enrichment record whose article row has not reached
+// Postgres yet. The article insert and the enrichment use separate queues, so
+// a short bounded retry avoids losing the enrichment without blocking either
+// queue.
+type pendingEnrichment struct {
+	record   ArticleEnrichmentRecord
+	attempts int
+	next     time.Time
 }
 
 // pendingAssignment is a story assignment whose article row was not inserted
@@ -199,6 +210,13 @@ func (w *Writer) EnqueueLinkText(rec LinkTextRecord) bool {
 	return w.enqueueAux(auxMutation{kind: 3, linkText: rec})
 }
 
+// EnqueueArticleEnrichment offers the classification/location enrichment for
+// one joined article. It is applied as an explicit article update and never
+// touches the story assignment.
+func (w *Writer) EnqueueArticleEnrichment(rec ArticleEnrichmentRecord) bool {
+	return w.enqueueAux(auxMutation{kind: 4, enrichment: rec})
+}
+
 func (w *Writer) enqueueAux(m auxMutation) bool {
 	if w == nil {
 		return false
@@ -274,6 +292,8 @@ func (w *Writer) loop() {
 	var links []LinkRecord
 	var storyTexts []StoryTextRecord
 	var linkTexts []LinkTextRecord
+	var enrichments []ArticleEnrichmentRecord
+	var pending []pendingEnrichment
 	flush := func() {
 		if len(buffer) > 0 {
 			w.flush(buffer)
@@ -294,6 +314,10 @@ func (w *Writer) loop() {
 		if len(linkTexts) > 0 {
 			w.flushLinkTexts(linkTexts)
 			linkTexts = nil
+		}
+		if len(enrichments) > 0 {
+			pending = append(pending, w.flushEnrichments(enrichments)...)
+			enrichments = nil
 		}
 	}
 	articlesOpen, storiesOpen, auxOpen := true, true, true
@@ -337,13 +361,16 @@ func (w *Writer) loop() {
 				storyTexts = append(storyTexts, m.storyText)
 			case 3:
 				linkTexts = append(linkTexts, m.linkText)
+			case 4:
+				enrichments = append(enrichments, m.enrichment)
 			}
-			if len(links)+len(storyTexts)+len(linkTexts) >= w.opts.BatchSize {
+			if len(links)+len(storyTexts)+len(linkTexts)+len(enrichments) >= w.opts.BatchSize {
 				flush()
 			}
 		case <-ticker.C:
 			flush()
 			w.retryPending(false)
+			pending = w.retryEnrichments(pending)
 		}
 	}
 	flush()
@@ -399,6 +426,87 @@ func (w *Writer) flushLinkTexts(batch []LinkTextRecord) {
 		}
 	}
 	w.droppedBatch.Add(int64(len(batch)))
+}
+
+const maxEnrichmentAttempts = 20
+
+// flushEnrichments applies a batch and returns the records whose article row
+// is not durable yet. A real write error is retried inline like the other aux
+// batches; a missing article row is not an error and is handed back for a
+// later tick.
+func (w *Writer) flushEnrichments(batch []ArticleEnrichmentRecord) []pendingEnrichment {
+	var lastErr error
+	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
+		missing, err := w.store.UpsertArticleEnrichment(ctx, batch)
+		cancel()
+		if err == nil {
+			now := time.Now()
+			retry := make([]pendingEnrichment, 0, len(missing))
+			byID := make(map[string]ArticleEnrichmentRecord, len(batch))
+			for _, rec := range batch {
+				byID[rec.ID] = rec
+			}
+			for _, id := range missing {
+				if rec, ok := byID[id]; ok {
+					retry = append(retry, pendingEnrichment{record: rec, attempts: 1, next: now.Add(250 * time.Millisecond)})
+				}
+			}
+			return retry
+		}
+		lastErr = err
+		w.errors.Add(1)
+		if attempt < w.opts.MaxRetries {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+	}
+	w.log.Warn("store enrichment batch failed", "rows", len(batch), "err", lastErr)
+	w.droppedBatch.Add(int64(len(batch)))
+	return nil
+}
+
+// retryEnrichments re-applies records whose article insert landed after the
+// enrichment was queued. The bound keeps a permanently missing article from
+// leaking records forever.
+func (w *Writer) retryEnrichments(pending []pendingEnrichment) []pendingEnrichment {
+	if len(pending) == 0 {
+		return pending
+	}
+	now := time.Now()
+	due := make([]pendingEnrichment, 0, len(pending))
+	waiting := make([]pendingEnrichment, 0, len(pending))
+	for _, p := range pending {
+		if now.Before(p.next) {
+			waiting = append(waiting, p)
+			continue
+		}
+		if p.attempts >= maxEnrichmentAttempts {
+			w.droppedBatch.Add(1)
+			continue
+		}
+		due = append(due, p)
+	}
+	if len(due) == 0 {
+		return waiting
+	}
+	records := make([]ArticleEnrichmentRecord, 0, len(due))
+	for _, p := range due {
+		records = append(records, p.record)
+	}
+	retry := w.flushEnrichments(records)
+	byID := make(map[string]pendingEnrichment, len(due))
+	for _, p := range due {
+		p.attempts++
+		p.next = now.Add(250 * time.Millisecond)
+		byID[p.record.ID] = p
+	}
+	for _, r := range retry {
+		if p, ok := byID[r.record.ID]; ok {
+			p.attempts = r.attempts
+			waiting = append(waiting, p)
+		}
+	}
+	return waiting
 }
 
 func (w *Writer) flushStories(batch []StoryRecord) {

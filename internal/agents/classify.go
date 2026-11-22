@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-	"unicode"
 
 	"google.golang.org/protobuf/proto"
 
@@ -61,7 +60,7 @@ func (c *classifier) handle(ctx context.Context, msg *Message, out *Emitter) err
 }
 
 func (c *classifier) classify(ctx context.Context, article *dorv1.Article) *dorv1.ClassifiedArticle {
-	lang := detectLanguage(article)
+	lang := resolveLanguage(article.GetLang(), article.GetTitle(), article.GetLede())
 	if c.deps.Decider != nil {
 		callCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 		resp, err := c.deps.Decider.Decide(callCtx, decide.ClassifyRequest(decideArticle(article)))
@@ -179,6 +178,12 @@ func validCategory(key string) bool {
 }
 
 func ruleCategory(article *dorv1.Article) (string, float32) {
+	// Hazard feeds (USGS, GDACS, EONET) carry an explicit hazard hint. A quake
+	// title is often just "M 1.4 - 7 km ...", so the words would otherwise
+	// classify it Other.
+	if h := article.GetHints().GetHazard(); strings.TrimSpace(h) != "" {
+		return "disaster", 0.6
+	}
 	text := strings.ToLower(article.GetTitle() + " " + article.GetLede())
 	rules := []struct {
 		cat   string
@@ -203,39 +208,6 @@ func ruleCategory(article *dorv1.Article) (string, float32) {
 		}
 	}
 	return "other", 0.2
-}
-
-func detectLanguage(article *dorv1.Article) string {
-	if lang := strings.TrimSpace(article.GetLang()); lang != "" {
-		return lang
-	}
-	var latin, cyrillic, arabic, han, other int
-	for _, r := range article.GetTitle() + " " + article.GetLede() {
-		switch {
-		case r < unicode.MaxLatin1:
-			latin++
-		case unicode.In(r, unicode.Cyrillic):
-			cyrillic++
-		case unicode.In(r, unicode.Arabic):
-			arabic++
-		case unicode.In(r, unicode.Han):
-			han++
-		default:
-			other++
-		}
-	}
-	switch {
-	case han > latin && han > cyrillic && han > arabic:
-		return "zh"
-	case cyrillic > latin && cyrillic > arabic && cyrillic > han:
-		return "ru"
-	case arabic > latin && arabic > cyrillic && arabic > han:
-		return "ar"
-	case other > latin:
-		return "und"
-	default:
-		return "en"
-	}
 }
 
 func dedupeStrings(in []string) []string {

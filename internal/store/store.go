@@ -127,7 +127,7 @@ ON CONFLICT (id, created_at) DO UPDATE SET
     title = EXCLUDED.title,
     lede = EXCLUDED.lede,
     published_at = EXCLUDED.published_at,
-    lang = EXCLUDED.lang,
+    lang = CASE WHEN EXCLUDED.lang <> '' THEN EXCLUDED.lang ELSE articles.lang END,
     dateline = EXCLUDED.dateline,
     -- A later assignment-only upsert (or a re-delivered clean article) must
     -- not reset enrichment that another stage already wrote.
@@ -135,17 +135,18 @@ ON CONFLICT (id, created_at) DO UPDATE SET
     cat_conf = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.cat_conf ELSE articles.cat_conf END,
     story_id = COALESCE(EXCLUDED.story_id, articles.story_id)`
 	const locationSQL = `
-INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (article_id, place_id, role) DO UPDATE SET
     name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
-    precision = EXCLUDED.precision, conf = EXCLUDED.conf`
+    precision = EXCLUDED.precision, conf = EXCLUDED.conf,
+    country = EXCLUDED.country`
 	for _, r := range records {
 		batch.Queue(articleSQL, r.ID, r.SourceID, r.URL, r.Title, r.Lede, r.PublishedAt,
 			r.Lang, r.Dateline, r.Category, r.CategoryConfidence, r.StoryID, r.CreatedAt)
 		for _, loc := range r.Locations {
 			batch.Queue(locationSQL, r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon,
-				loc.Precision, loc.Role, loc.Confidence)
+				loc.Precision, loc.Role, loc.Confidence, loc.Country)
 		}
 	}
 	br := tx.SendBatch(ctx, batch)
@@ -217,16 +218,40 @@ func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) (map[s
 	defer tx.Rollback(ctx)
 	missing := make(map[string]string)
 	const storySQL = `
-INSERT INTO stories (id, title, brief, category, primary_loc, source_count, heat,
+INSERT INTO stories (id, title, title_source, brief, brief_source, category,
+                     category_backend, cat_conf, primary_loc, source_count, heat,
+                     degraded, fallback, place_backend, place_degraded, place_fallback,
                      centroid, entities, first_seen, updated_at, expires_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::vector,$9,$10,$11,$12)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+        NULLIF($17,'')::vector,$18,$19,$20,$21)
 ON CONFLICT (id) DO UPDATE SET
-    title = EXCLUDED.title,
-    brief = CASE WHEN stories.brief = '' THEN EXCLUDED.brief ELSE stories.brief END,
+    title = CASE
+        WHEN stories.title_source = 'editor' AND EXCLUDED.title_source <> 'editor'
+            THEN stories.title
+        ELSE EXCLUDED.title END,
+    title_source = CASE
+        WHEN stories.title_source = 'editor' AND EXCLUDED.title_source <> 'editor'
+            THEN stories.title_source
+        ELSE EXCLUDED.title_source END,
+    brief = CASE
+        WHEN stories.brief_source = 'generated' AND stories.brief <> ''
+            THEN stories.brief
+        ELSE EXCLUDED.brief END,
+    brief_source = CASE
+        WHEN stories.brief_source = 'generated' AND stories.brief <> ''
+            THEN stories.brief_source
+        ELSE EXCLUDED.brief_source END,
     category = EXCLUDED.category,
+    category_backend = EXCLUDED.category_backend,
+    cat_conf = EXCLUDED.cat_conf,
     primary_loc = EXCLUDED.primary_loc,
     source_count = EXCLUDED.source_count,
     heat = EXCLUDED.heat,
+    degraded = EXCLUDED.degraded,
+    fallback = EXCLUDED.fallback,
+    place_backend = EXCLUDED.place_backend,
+    place_degraded = EXCLUDED.place_degraded,
+    place_fallback = EXCLUDED.place_fallback,
     centroid = COALESCE(EXCLUDED.centroid, stories.centroid),
     entities = EXCLUDED.entities,
     first_seen = LEAST(stories.first_seen, EXCLUDED.first_seen),
@@ -235,6 +260,12 @@ ON CONFLICT (id) DO UPDATE SET
 	for _, r := range records {
 		if r.Title == "" {
 			r.Title = "Untitled"
+		}
+		if r.TitleSource == "" {
+			r.TitleSource = "source"
+		}
+		if r.BriefSource == "" {
+			r.BriefSource = "none"
 		}
 		if r.SourceCount <= 0 {
 			r.SourceCount = 1
@@ -259,7 +290,9 @@ ON CONFLICT (id) DO UPDATE SET
 			entities = []string{}
 		}
 		if _, err := tx.Exec(ctx, storySQL,
-			r.ID, r.Title, r.Brief, r.Category, r.PrimaryLoc, r.SourceCount, r.Heat,
+			r.ID, r.Title, r.TitleSource, r.Brief, r.BriefSource, r.Category,
+			r.CategoryBackend, r.CategoryConfidence, r.PrimaryLoc, r.SourceCount, r.Heat,
+			r.Degraded, r.Fallback, r.PlaceBackend, r.PlaceDegraded, r.PlaceFallback,
 			formatVector(r.Centroid), entities, r.FirstSeen, r.UpdatedAt, r.ExpiresAt,
 		); err != nil {
 			return nil, fmt.Errorf("store: upsert story %s: %w", r.ID, err)
@@ -269,9 +302,9 @@ ON CONFLICT (id) DO UPDATE SET
 		}
 		for _, loc := range r.Locations {
 			if _, err := tx.Exec(ctx, `
-INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role, weight)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight,
+INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role, weight, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight, loc.Country,
 			); err != nil {
 				return nil, fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
 			}
@@ -326,6 +359,59 @@ WHERE id = $1`, articleID, storyID, category)
 		return false, fmt.Errorf("store: assign article %s: %w", articleID, err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// UpsertArticleEnrichment applies the classification, confidence, detected
+// language and place votes a joined article contributed. It never changes
+// story_id and never inserts an article row: assignment belongs to the story
+// record. IDs whose article row has not been flushed yet are returned as
+// missing so the writer can retry without blocking other records.
+func (s *Store) UpsertArticleEnrichment(ctx context.Context, records []ArticleEnrichmentRecord) ([]string, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin enrichment batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	const articleSQL = `
+UPDATE articles
+SET category = CASE WHEN $2::smallint <> 0 OR $3::real > 0 THEN $2::smallint ELSE category END,
+    cat_conf = CASE WHEN $2::smallint <> 0 OR $3::real > 0 THEN $3::real ELSE cat_conf END,
+    lang = CASE WHEN $4 <> '' THEN $4 ELSE lang END
+WHERE id = $1`
+	const locationSQL = `
+INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT (article_id, place_id, role) DO UPDATE SET
+    name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+    precision = EXCLUDED.precision, conf = EXCLUDED.conf,
+    country = EXCLUDED.country`
+	var missing []string
+	for _, r := range records {
+		if r.ID == "" {
+			continue
+		}
+		tag, err := tx.Exec(ctx, articleSQL, r.ID, r.Category, r.CategoryConfidence, r.Lang)
+		if err != nil {
+			return nil, fmt.Errorf("store: enrich article %s: %w", r.ID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			missing = append(missing, r.ID)
+			continue
+		}
+		for _, loc := range r.Locations {
+			if _, err := tx.Exec(ctx, locationSQL, r.ID, loc.PlaceID, loc.Name, loc.Lat,
+				loc.Lon, loc.Precision, loc.Role, loc.Confidence, loc.Country); err != nil {
+				return nil, fmt.Errorf("store: enrich article location %s/%s: %w", r.ID, loc.PlaceID, err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit enrichment batch: %w", err)
+	}
+	return missing, nil
 }
 
 func formatVector(v []float32) string {

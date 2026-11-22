@@ -787,7 +787,10 @@ func (a *Base) worker(runCtx, handlerCtx context.Context, gate *concurrencyGate)
 	for j := range a.jobs {
 		if gate != nil && !gate.acquire() {
 			// Forced shutdown: leave the message unacknowledged so the durable
-			// consumer redelivers it.
+			// consumer redelivers it. The heartbeat was started before the
+			// worker received the job, so it must be stopped here; otherwise an
+			// abandoned message keeps calling InProgress forever.
+			closeHeartbeat(j.heartbeatDone)
 			a.jobsWG.Done()
 			continue
 		}

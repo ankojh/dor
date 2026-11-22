@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const (
+	// liveDatabase is the developer's real local Dor database. Test binaries
+	// must never connect to or migrate it by inheriting a default DSN.
+	liveDatabase = "dor"
+	// AllowTestLiveDBEnv is the explicit opt-in for a test that genuinely needs
+	// the live database. Normal tests must use a scratch database instead.
+	AllowTestLiveDBEnv = "DOR_ALLOW_TEST_LIVE_DB"
+)
+
+// isTestBinary reports whether this process was started by `go test`, including
+// the re-exec form where package main calls its own main() from a *.test binary.
+func isTestBinary() bool {
+	base := filepath.Base(os.Args[0])
+	return strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") ||
+		os.Getenv("DOR_TEST_AS_MAIN") == "1"
+}
 
 // Config is the Postgres connection and pool configuration.
 type Config struct {
@@ -42,6 +61,18 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	pc, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("store: parse database URL: %w", err)
+	}
+	// An omitted database path is resolved by Postgres to the user name. Treat
+	// that as the same live database instead of waiting for the server default.
+	dbName := pc.ConnConfig.Database
+	if dbName == "" {
+		dbName = pc.ConnConfig.User
+	}
+	if isTestBinary() && dbName == liveDatabase && os.Getenv(AllowTestLiveDBEnv) != "1" {
+		return nil, fmt.Errorf(
+			"store: refusing live database %q from a test binary; use a scratch database or set %s=1",
+			liveDatabase, AllowTestLiveDBEnv,
+		)
 	}
 	if cfg.MaxConns > 0 {
 		pc.MaxConns = cfg.MaxConns
@@ -127,23 +158,26 @@ ON CONFLICT (id, created_at) DO UPDATE SET
     title = EXCLUDED.title,
     lede = EXCLUDED.lede,
     published_at = EXCLUDED.published_at,
-    lang = EXCLUDED.lang,
+    lang = CASE WHEN EXCLUDED.lang <> '' THEN EXCLUDED.lang ELSE articles.lang END,
     dateline = EXCLUDED.dateline,
-    category = EXCLUDED.category,
-    cat_conf = EXCLUDED.cat_conf,
+    -- A later assignment-only upsert (or a re-delivered clean article) must
+    -- not reset enrichment that another stage already wrote.
+    category = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.category ELSE articles.category END,
+    cat_conf = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.cat_conf ELSE articles.cat_conf END,
     story_id = COALESCE(EXCLUDED.story_id, articles.story_id)`
 	const locationSQL = `
-INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (article_id, place_id, role) DO UPDATE SET
     name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
-    precision = EXCLUDED.precision, conf = EXCLUDED.conf`
+    precision = EXCLUDED.precision, conf = EXCLUDED.conf,
+    country = EXCLUDED.country`
 	for _, r := range records {
 		batch.Queue(articleSQL, r.ID, r.SourceID, r.URL, r.Title, r.Lede, r.PublishedAt,
 			r.Lang, r.Dateline, r.Category, r.CategoryConfidence, r.StoryID, r.CreatedAt)
 		for _, loc := range r.Locations {
 			batch.Queue(locationSQL, r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon,
-				loc.Precision, loc.Role, loc.Confidence)
+				loc.Precision, loc.Role, loc.Confidence, loc.Country)
 		}
 	}
 	br := tx.SendBatch(ctx, batch)
@@ -197,27 +231,58 @@ ON CONFLICT (id) DO UPDATE SET
 
 // UpsertStories writes story metadata and replaces its location votes in one
 // transaction. It also stamps story_id on every article in ArticleIDs.
-func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) error {
+//
+// The article rows and the story may be flushed in either order: a story that
+// arrives before its article rows returns article id → story id for those
+// missing rows, so the caller can retry the assignment after the article
+// insert. The story row and its locations are committed either way; a missing
+// assignment is not an error.
+func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) (map[string]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 	now := time.Now().UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: begin stories batch: %w", err)
+		return nil, fmt.Errorf("store: begin stories batch: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	missing := make(map[string]string)
 	const storySQL = `
-INSERT INTO stories (id, title, brief, category, primary_loc, source_count, heat,
+INSERT INTO stories (id, title, title_source, brief, brief_source, category,
+                     category_backend, cat_conf, primary_loc, source_count, heat,
+                     degraded, fallback, place_backend, place_degraded, place_fallback,
                      centroid, entities, first_seen, updated_at, expires_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::vector,$9,$10,$11,$12)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+        NULLIF($17,'')::vector,$18,$19,$20,$21)
 ON CONFLICT (id) DO UPDATE SET
-    title = EXCLUDED.title,
-    brief = CASE WHEN stories.brief = '' THEN EXCLUDED.brief ELSE stories.brief END,
+    title = CASE
+        WHEN stories.title_source = 'editor' AND EXCLUDED.title_source <> 'editor'
+            THEN stories.title
+        ELSE EXCLUDED.title END,
+    title_source = CASE
+        WHEN stories.title_source = 'editor' AND EXCLUDED.title_source <> 'editor'
+            THEN stories.title_source
+        ELSE EXCLUDED.title_source END,
+    brief = CASE
+        WHEN stories.brief_source = 'generated' AND stories.brief <> ''
+            THEN stories.brief
+        ELSE EXCLUDED.brief END,
+    brief_source = CASE
+        WHEN stories.brief_source = 'generated' AND stories.brief <> ''
+            THEN stories.brief_source
+        ELSE EXCLUDED.brief_source END,
     category = EXCLUDED.category,
+    category_backend = EXCLUDED.category_backend,
+    cat_conf = EXCLUDED.cat_conf,
     primary_loc = EXCLUDED.primary_loc,
     source_count = EXCLUDED.source_count,
     heat = EXCLUDED.heat,
+    degraded = EXCLUDED.degraded,
+    fallback = EXCLUDED.fallback,
+    place_backend = EXCLUDED.place_backend,
+    place_degraded = EXCLUDED.place_degraded,
+    place_fallback = EXCLUDED.place_fallback,
     centroid = COALESCE(EXCLUDED.centroid, stories.centroid),
     entities = EXCLUDED.entities,
     first_seen = LEAST(stories.first_seen, EXCLUDED.first_seen),
@@ -226,6 +291,12 @@ ON CONFLICT (id) DO UPDATE SET
 	for _, r := range records {
 		if r.Title == "" {
 			r.Title = "Untitled"
+		}
+		if r.TitleSource == "" {
+			r.TitleSource = "source"
+		}
+		if r.BriefSource == "" {
+			r.BriefSource = "none"
 		}
 		if r.SourceCount <= 0 {
 			r.SourceCount = 1
@@ -250,36 +321,128 @@ ON CONFLICT (id) DO UPDATE SET
 			entities = []string{}
 		}
 		if _, err := tx.Exec(ctx, storySQL,
-			r.ID, r.Title, r.Brief, r.Category, r.PrimaryLoc, r.SourceCount, r.Heat,
+			r.ID, r.Title, r.TitleSource, r.Brief, r.BriefSource, r.Category,
+			r.CategoryBackend, r.CategoryConfidence, r.PrimaryLoc, r.SourceCount, r.Heat,
+			r.Degraded, r.Fallback, r.PlaceBackend, r.PlaceDegraded, r.PlaceFallback,
 			formatVector(r.Centroid), entities, r.FirstSeen, r.UpdatedAt, r.ExpiresAt,
 		); err != nil {
-			return fmt.Errorf("store: upsert story %s: %w", r.ID, err)
+			return nil, fmt.Errorf("store: upsert story %s: %w", r.ID, err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM story_locations WHERE story_id = $1`, r.ID); err != nil {
-			return fmt.Errorf("store: clear story locations %s: %w", r.ID, err)
+			return nil, fmt.Errorf("store: clear story locations %s: %w", r.ID, err)
 		}
 		for _, loc := range r.Locations {
 			if _, err := tx.Exec(ctx, `
-INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role, weight)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight,
+INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role, weight, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight, loc.Country,
 			); err != nil {
-				return fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
+				return nil, fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
 			}
 		}
 		if len(r.ArticleIDs) > 0 {
-			if _, err := tx.Exec(ctx, `
+			assigned := make(map[string]bool, len(r.ArticleIDs))
+			rows, err := tx.Query(ctx, `
 UPDATE articles SET story_id = $2,
-    category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
-WHERE id = ANY($1)`, r.ArticleIDs, r.ID, r.Category); err != nil {
-				return fmt.Errorf("store: assign story %s: %w", r.ID, err)
+    category = CASE WHEN category = 0 AND $3::smallint <> 0 THEN $3::smallint ELSE category END
+WHERE id = ANY($1)
+RETURNING id`, r.ArticleIDs, r.ID, r.Category)
+			if err != nil {
+				return nil, fmt.Errorf("store: assign story %s: %w", r.ID, err)
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("store: assign story %s scan: %w", r.ID, err)
+				}
+				assigned[id] = true
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("store: assign story %s: %w", r.ID, err)
+			}
+			rows.Close()
+			for _, id := range r.ArticleIDs {
+				if !assigned[id] {
+					missing[id] = r.ID
+				}
 			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: commit stories batch: %w", err)
+		return nil, fmt.Errorf("store: commit stories batch: %w", err)
 	}
-	return nil
+	return missing, nil
+}
+
+// AssignStory retries a story assignment that raced ahead of the article row.
+// It is idempotent and returns whether an article row existed.
+func (s *Store) AssignStory(ctx context.Context, articleID, storyID string, category int16) (bool, error) {
+	if articleID == "" || storyID == "" {
+		return false, nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE articles SET story_id = $2,
+    category = CASE WHEN category = 0 AND $3::smallint <> 0 THEN $3::smallint ELSE category END
+WHERE id = $1`, articleID, storyID, category)
+	if err != nil {
+		return false, fmt.Errorf("store: assign article %s: %w", articleID, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// UpsertArticleEnrichment applies the classification, confidence, detected
+// language and place votes a joined article contributed. It never changes
+// story_id and never inserts an article row: assignment belongs to the story
+// record. IDs whose article row has not been flushed yet are returned as
+// missing so the writer can retry without blocking other records.
+func (s *Store) UpsertArticleEnrichment(ctx context.Context, records []ArticleEnrichmentRecord) ([]string, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin enrichment batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	const articleSQL = `
+UPDATE articles
+SET category = CASE WHEN $2::smallint <> 0 OR $3::real > 0 THEN $2::smallint ELSE category END,
+    cat_conf = CASE WHEN $2::smallint <> 0 OR $3::real > 0 THEN $3::real ELSE cat_conf END,
+    lang = CASE WHEN $4 <> '' THEN $4 ELSE lang END
+WHERE id = $1`
+	const locationSQL = `
+INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf, country)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT (article_id, place_id, role) DO UPDATE SET
+    name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+    precision = EXCLUDED.precision, conf = EXCLUDED.conf,
+    country = EXCLUDED.country`
+	var missing []string
+	for _, r := range records {
+		if r.ID == "" {
+			continue
+		}
+		tag, err := tx.Exec(ctx, articleSQL, r.ID, r.Category, r.CategoryConfidence, r.Lang)
+		if err != nil {
+			return nil, fmt.Errorf("store: enrich article %s: %w", r.ID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			missing = append(missing, r.ID)
+			continue
+		}
+		for _, loc := range r.Locations {
+			if _, err := tx.Exec(ctx, locationSQL, r.ID, loc.PlaceID, loc.Name, loc.Lat,
+				loc.Lon, loc.Precision, loc.Role, loc.Confidence, loc.Country); err != nil {
+				return nil, fmt.Errorf("store: enrich article location %s/%s: %w", r.ID, loc.PlaceID, err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit enrichment batch: %w", err)
+	}
+	return missing, nil
 }
 
 func formatVector(v []float32) string {
@@ -301,6 +464,10 @@ func formatVector(v []float32) string {
 // FindStoryCandidates is the pgvector ANN shortlist used by the clusterer.
 // It returns live story ids ordered by cosine distance; the caller still
 // applies time/place/entity guards. An empty vector returns no rows.
+//
+// The query is bounded even when the caller forgets a deadline: the clusterer
+// is the single story writer and must not stall behind Postgres. Callers that
+// need a tighter bound supply their own context deadline.
 func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit int) ([]string, error) {
 	if len(vector) == 0 {
 		return nil, nil
@@ -308,6 +475,8 @@ func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit
 	if limit <= 0 || limit > 64 {
 		limit = 32
 	}
+	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
 	rows, err := s.pool.Query(ctx, `
 SELECT id
 FROM stories

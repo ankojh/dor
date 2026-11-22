@@ -27,6 +27,8 @@ export const CATEGORY_CLIMATE = 5;
 export const CATEGORY_DISASTER = 6;
 export const CATEGORY_HEALTH = 7;
 export const CATEGORY_SCIENCE = 8;
+export const CATEGORY_SPORTS = 9;
+export const CATEGORY_CULTURE = 10;
 
 /** sRGB hex values from ui-designs/assets/dor.css, as 0..255 triples. */
 export const CATEGORY_COLORS: Readonly<Record<number, readonly [number, number, number]>> = {
@@ -39,6 +41,8 @@ export const CATEGORY_COLORS: Readonly<Record<number, readonly [number, number, 
   [CATEGORY_DISASTER]: [255, 122, 69], // #ff7a45
   [CATEGORY_HEALTH]: [255, 138, 208],
   [CATEGORY_SCIENCE]: [155, 184, 255],
+  [CATEGORY_SPORTS]: [159, 232, 112], // #9fe870
+  [CATEGORY_CULTURE]: [224, 163, 255], // #e0a3ff
 };
 
 export const LINK_COLORS: Readonly<Record<number, readonly [number, number, number]>> = {
@@ -57,6 +61,8 @@ export const CATEGORY_LABELS: Readonly<Record<number, string>> = {
   [CATEGORY_DISASTER]: "Disaster",
   [CATEGORY_HEALTH]: "Health",
   [CATEGORY_SCIENCE]: "Science",
+  [CATEGORY_SPORTS]: "Sports",
+  [CATEGORY_CULTURE]: "Culture",
 };
 
 export const LINK_LABELS: Readonly<Record<number, string>> = {

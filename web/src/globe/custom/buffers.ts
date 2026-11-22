@@ -1,3 +1,5 @@
+import { arcVisibility, ARC_ALPHA_CUTOFF, hitArcSegments, type ArcProjection } from "../arc-hit";
+import { ARC_WIDTH_MIN, ARC_WIDTH_MAX, ARC_SECOND_WIDTH_SCALE } from "../encoding";
 import { growArray } from "../arrays";
 import type { StoryPatch, LinkPatch, MatchBytes } from "../../worker/messages";
 import { dotSizeFactor } from "../encoding";
@@ -90,6 +92,7 @@ export class GlobeGpuData {
   readonly storyTex: WebGLTexture;
   readonly focusTex: WebGLTexture;
   readonly arcFocusTex: WebGLTexture;
+  readonly arcDirTex: WebGLTexture;
   storyCapacity: number;
   linkCapacity: number;
   readonly storyPool: CapacityPool;
@@ -109,12 +112,16 @@ export class GlobeGpuData {
   private storyData: Float32Array;
   private focusData: Float32Array;
   private arcData: Float32Array;
+  private arcDirData: Float32Array;
   private storyMercX: Float64Array;
   private storyMercY: Float64Array;
   private storyActive: Uint8Array;
   private linkActive: Uint8Array;
   private linkDimmed: Uint8Array;
   private readonly arcSegments: number;
+  // Retain the exact uploaded geometry, with sparse replacements for live slots.
+  private readonly initialArcs: FakeInit["arcs"];
+  private readonly arcOverrides = new Map<number, NonNullable<LinkPatch["arcs"]>>();
   private arcBuffers!: ArcBufferSet;
   private dotBuffers!: DotBufferSet;
   private readonly rippleBuffers: {
@@ -155,6 +162,7 @@ export class GlobeGpuData {
     this.storyCapacity = Math.max(2048, this.storyCount + 1024, init.storyCapacity ?? 0);
     this.linkCapacity = Math.max(1024, this.linkCount + 512, init.linkCapacity ?? 0);
     this.arcSegments = init.arcSegments;
+    this.initialArcs = init.arcs;
     this.storyPool = new CapacityPool(this.storyCapacity, this.storyCount);
     this.linkPool = new CapacityPool(this.linkCapacity, this.linkCount);
     const stories = init.stories;
@@ -175,6 +183,10 @@ export class GlobeGpuData {
     this.storyData = new Float32Array(this.storyCapacity * 4);
     this.focusData = new Float32Array(this.storyCapacity * 4);
     this.arcData = new Float32Array(this.linkCapacity * 4);
+    this.arcDirData = new Float32Array(this.linkCapacity * 4);
+    for (let i = 0; i < this.linkCount; i++) {
+      this.arcDirData[i * 4] = links.direction?.[i] ?? 0;
+    }
     for (let i = 0; i < this.storyCount; i++) {
       this.storyData[i * 4] = dotSizeFactor(stories.sources[i]!, stories.heat[i]!);
       this.storyData[i * 4 + 1] = stories.heat[i]!;
@@ -193,9 +205,11 @@ export class GlobeGpuData {
     const storyTexture = createTexture(gl, this.storyCapacity, this.storyData);
     const focusTexture = createTexture(gl, this.storyCapacity, this.focusData);
     const arcTexture = createTexture(gl, this.linkCapacity, this.arcData);
+    const arcDirTexture = createTexture(gl, this.linkCapacity, this.arcDirData);
     this.storyTex = storyTexture.texture;
     this.focusTex = focusTexture.texture;
     this.arcFocusTex = arcTexture.texture;
+    this.arcDirTex = arcDirTexture.texture;
     this.storyTexWidth = storyTexture.width;
     this.storyTexHeight = storyTexture.height;
     this.linkTexWidth = arcTexture.width;
@@ -280,6 +294,52 @@ export class GlobeGpuData {
     };
   }
 
+  /** No GL work: inspect only direct focused links and their uploaded segments. */
+  hitFocusedArc(
+    indices: readonly number[],
+    projection: ArcProjection,
+    x: number,
+    y: number,
+    options: {
+      zoom: number;
+      time: number;
+      focusAt: number;
+      hasFocus: boolean;
+      floor: number;
+      dropThematic: boolean;
+    },
+  ): number | null {
+    // Later instances win in the ID pass when two arcs overlap.
+    for (let n = indices.length - 1; n >= 0; n--) {
+      const index = indices[n]!;
+      if (!this.linkActive[index]) continue;
+      const override = this.arcOverrides.get(index);
+      const arcs = override ?? this.initialArcs;
+      const offset = override ? 0 : index * this.arcSegments;
+      const state = this.arcData[index * 4]!;
+      const strength = Math.abs(this.arcData[index * 4 + 3]!);
+      const alpha = arcVisibility({
+        ...options,
+        length: arcs.length[offset]!,
+        strength,
+        type: arcs.type[offset]!,
+        state,
+        prev: this.arcData[index * 4 + 1]!,
+        at: this.arcData[index * 4 + 2]!,
+        dimmed: this.arcData[index * 4 + 3]! < 0,
+      });
+      if (alpha < ARC_ALPHA_CUTOFF) continue;
+      const width =
+        (ARC_WIDTH_MIN + (ARC_WIDTH_MAX - ARC_WIDTH_MIN) * strength) *
+        (state > 2.5 ? ARC_SECOND_WIDTH_SCALE : 1);
+      if (
+        hitArcSegments(arcs, offset, this.arcSegments, projection, x, y, Math.max(5, width + 6) / 2)
+      )
+        return index;
+    }
+    return null;
+  }
+
   /** Grow storage while preserving buffers, focus transitions and ripple slots. */
   ensureCapacity(stories: number, links: number): void {
     const gl = this.gl;
@@ -330,6 +390,7 @@ export class GlobeGpuData {
     }
     if (links > this.linkCapacity) {
       this.arcData = growArray(this.arcData, links * 4);
+      this.arcDirData = growArray(this.arcDirData, links * 4);
       this.linkActive = growArray(this.linkActive, links);
       this.linkDimmed = growArray(this.linkDimmed, links);
       this.linkPool.grow(links);
@@ -342,6 +403,7 @@ export class GlobeGpuData {
             (["startHi", "startLo", "endHi", "endLo"].includes(key) ? 2 : 1),
         );
       this.linkTexWidth = texture(this.arcFocusTex, links, this.arcData);
+      texture(this.arcDirTex, links, this.arcDirData);
       this.linkCapacity = links;
       this.arcMesh.instanceCount = links * this.arcSegments;
     }
@@ -351,6 +413,7 @@ export class GlobeGpuData {
 
   private uploadArcRange(index: number, arcs: NonNullable<LinkPatch["arcs"]>): void {
     const gl = this.gl;
+    this.arcOverrides.set(index, arcs);
     for (const [key, source] of Object.entries(arcs)) {
       const buffer = this.arcBuffers[key as keyof ArcBufferSet];
       const data = source instanceof Float32Array ? source : Float32Array.from(source);
@@ -404,6 +467,7 @@ export class GlobeGpuData {
     gl.deleteTexture(this.storyTex);
     gl.deleteTexture(this.focusTex);
     gl.deleteTexture(this.arcFocusTex);
+    gl.deleteTexture(this.arcDirTex);
     this.tetherMesh = null;
     this.ringMesh = null;
   }
@@ -542,8 +606,10 @@ export class GlobeGpuData {
         this.arcData[index * 4 + 2]!,
         strength,
       );
+      if (op.direction !== undefined) this.uploadArcDirection(index, op.direction);
     } else {
       this.linkActive[index] = 0;
+      this.arcOverrides.delete(index);
       this.linkPool.free(index);
       this.arcData[index * 4] = 0;
       this.arcData[index * 4 + 1] = 0;
@@ -620,6 +686,28 @@ export class GlobeGpuData {
     );
   }
 
+  private uploadArcDirection(index: number, direction: number): void {
+    this.arcDirData[index * 4] = direction;
+    const texel = texelOf(index, this.linkTexWidth);
+    const pixel = this.arcPixel;
+    pixel[0] = direction;
+    pixel[1] = 0;
+    pixel[2] = 0;
+    pixel[3] = 0;
+    this.gl.bindTexture(this.gl.TEXTURE_2D, this.arcDirTex);
+    this.gl.texSubImage2D(
+      this.gl.TEXTURE_2D,
+      0,
+      texel.x,
+      texel.y,
+      1,
+      1,
+      this.gl.RGBA,
+      this.gl.FLOAT,
+      pixel,
+    );
+  }
+
   /** Build and upload the 20 segments for one runtime link. */
   private writeArcLink(index: number, aIndex: number, bIndex: number, type: number): void {
     const segments = this.arcSegments;
@@ -673,6 +761,19 @@ export class GlobeGpuData {
       point = next;
     }
     void point;
+    this.arcOverrides.set(index, {
+      startHi,
+      startLo,
+      endHi,
+      endLo,
+      startElev,
+      endElev,
+      t0,
+      t1,
+      link: Uint16Array.from(link),
+      type: Uint8Array.from(types),
+      length: lengths,
+    });
     const gl = this.gl;
     const byteOffset = index * segments * 4;
     const upload = (buffer: WebGLBuffer, data: Float32Array, offset: number): void => {

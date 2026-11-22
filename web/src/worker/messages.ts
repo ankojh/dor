@@ -67,6 +67,7 @@ export type WorkerInit = {
   init: FakeInit;
   summaries: LiveStory[];
   recentWire: WireRow[];
+  match: MatchSummary;
 };
 export type StoryPatch = StoryOp & {
   reset?: boolean;
@@ -83,6 +84,8 @@ export type LinkPatch = LinkOp & {
   unverified?: boolean;
 };
 export type MatchBytes = { indices: Uint16Array; dimmed: Uint8Array };
+/** Whether a filter/prompt is active and how many live stories match it. */
+export type MatchSummary = { active: boolean; matched: number; total: number };
 export type WorkerPatch = {
   type: "patch";
   seq: number;
@@ -96,6 +99,7 @@ export type WorkerPatch = {
   stream: StreamPatch;
   storyStates: MatchBytes;
   linkStates: MatchBytes;
+  match: MatchSummary;
   adjacency?: AdjacencyArrays;
   topStories: Uint16Array;
   wire: WireRow[];
@@ -131,8 +135,9 @@ export type WireFilters = {
 
 /** Main -> worker controls. */
 export type WorkerCommand =
-  | { type: "start"; mode: "live" | "mock" | "perf" }
+  | { type: "start"; mode: "live" | "mock" | "perf" | "wirefixture" }
   | { type: "frame" }
+  | { type: "refresh" }
   | { type: "focus"; storyId: string }
   | { type: "filters"; filters: WireFilters }
   | { type: "prompts"; prompts: string[] };

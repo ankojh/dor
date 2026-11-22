@@ -5,6 +5,11 @@ cluster and link news stories; a SolidJS + MapLibre web app shows them on a 3D g
 
 ## Quickstart
 
+Before upgrading or rolling back a gateway or a browser-facing web build, follow
+the mandatory [gateway and web worker release gate](docs/operations.md#mandatory-gateway-and-web-worker-release-gate).
+The gate applies to all-in-one and split deployments as well as externally
+hosted web assets.
+
 ```bash
 make dev                 # Postgres/pgvector :5433 + TEI :8090, waits for healthy
 make run                 # build and run every agent; loads .env when present
@@ -12,6 +17,11 @@ curl -i localhost:8091/healthz
 curl -s localhost:8091/metrics | grep dor_agent
 open http://127.0.0.1:8080/ops   # Supervisor, agents, budgets, sources and actions
 ```
+
+`/healthz` returns 200 only when the NATS client is connected and every agent
+selected in this process reports running; otherwise it returns 503 and the body
+names each agent's state. The embedded-NATS all-in-one above should reach 200
+on a healthy machine.
 
 `make run AGENTS=classify,plot` runs a subset of the agents.
 
@@ -46,7 +56,7 @@ For an external NATS server, make exactly one process the provisioning owner
 with `--provision` / `DOR_PROVISION=true`; ordinary clients only bind and
 validate the streams and KV.
 
-Web shell (shows the data worker's `ready` line):
+Web shell (the data worker owns the gateway socket and resume loop):
 
 ```bash
 make web-dev             # http://127.0.0.1:5173

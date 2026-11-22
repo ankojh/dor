@@ -56,17 +56,35 @@ ON CONFLICT (a, b) DO UPDATE SET
 }
 
 // UpsertStoryTexts mirrors the story brief cache. Empty text leaves an
-// existing editor brief untouched.
+// existing editor brief untouched. A non-empty editor title is applied with
+// title_source='editor' so a later cluster upsert cannot revert it.
 func (s *Store) UpsertStoryTexts(ctx context.Context, records []StoryTextRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
-	const sql = `UPDATE stories SET brief = CASE WHEN $2 <> '' THEN $2 ELSE brief END WHERE id = $1`
+	const sql = `
+UPDATE stories
+SET brief = CASE
+        WHEN $2 <> '' THEN $2
+        ELSE brief END,
+    brief_source = CASE
+        WHEN $2 <> '' THEN CASE WHEN $3 <> '' THEN $3 ELSE 'generated' END
+        ELSE brief_source END,
+    brief_model = CASE
+        WHEN $2 <> '' AND $6 <> '' THEN $6
+        ELSE brief_model END,
+    title = CASE
+        WHEN $4 <> '' AND $5 = 'editor' THEN $4
+        ELSE title END,
+    title_source = CASE
+        WHEN $4 <> '' AND $5 = 'editor' THEN 'editor'
+        ELSE title_source END
+WHERE id = $1`
 	for _, r := range records {
 		if r.ID == "" {
 			continue
 		}
-		if _, err := s.pool.Exec(ctx, sql, r.ID, r.Brief); err != nil {
+		if _, err := s.pool.Exec(ctx, sql, r.ID, r.Brief, r.BriefSource, r.Title, r.TitleSource, r.Model); err != nil {
 			return fmt.Errorf("store: story text %s: %w", r.ID, err)
 		}
 	}

@@ -6,23 +6,23 @@ the Postgres `sources` table (plan §6). There is one registry, not two.
 
 ## The list
 
-Reviewed 2026-11-20; terms review 2026-11-21. **305 entries: 216 enabled,
-89 disabled.** Of the enabled entries, 212 are RSS/Atom feeds and four are
-hazard/GDELT upstreams. The RSS part is 300 entries (212 enabled, 37 disabled
-by the terms review, 51 access-blocked) spread across regions:
+Reviewed 2026-11-20; terms review 2026-11-21. **284 entries: 158 enabled,
+126 disabled.** Of the enabled entries, 154 are RSS/Atom feeds and four are
+hazard/GDELT upstreams (GDELT, USGS, GDACS, NASA EONET). The disabled set is
+125 RSS feeds plus ReliefWeb. Enabled RSS feeds are spread across regions:
 
 | Region | Enabled RSS |
 | --- | ---: |
-| Global (international broadcasters, wires, science, climate) | 52 |
-| Europe | 30 |
-| East and South-East Asia | 23 |
-| Africa | 23 |
-| North America | 22 |
-| Latin America and the Caribbean | 18 |
+| Global (international broadcasters, wires, science, climate) | 22 |
+| Europe | 17 |
+| East and South-East Asia | 19 |
+| Africa | 31 |
+| North America | 4 |
+| Latin America and the Caribbean | 24 |
 | South Asia | 17 |
-| Middle East | 10 |
-| Pacific | 10 |
-| Central Asia and the Caucasus | 7 |
+| Middle East | 9 |
+| Pacific | 2 |
+| Central Asia and the Caucasus | 9 |
 
 Each source has the plan's fields plus two review fields:
 
@@ -56,11 +56,11 @@ go run ./tools/feedcheck -sources deploy/sources/sources.yaml \
 ```
 
 The committed [report](../deploy/sources/feedcheck-2026-11-20.json) is the
-evidence. On 2026-11-20 the first pass found 343 RSS candidates, 54 of which
-were dead (404/DNS/timeout/HTML instead of a feed) and were dropped; 56 were
-access-blocked (robots disallow, 401/403/410/429/5xx) and stay in the file as
-`enabled: false` with the reason in `notes`. Disabled entries are deliberately
-kept: they document the review and give the next person a starting point.
+evidence. Dead candidates (404/DNS/timeout/HTML instead of a feed) were
+dropped. Feeds that were access-blocked (robots disallow, 401/403/410/429/5xx)
+or restricted by the terms review stay in the file as `enabled: false` with the
+reason in `notes` or `terms_note`. Disabled entries are deliberately kept: they
+document the review and give the next person a starting point.
 
 ### Terms decision
 
@@ -74,7 +74,7 @@ Wired. They stay in the file as `enabled: false`, `terms_ok: false` with the
 reason and terms URL in `terms_note`, so the decision is visible and reversible.
 
 **Every enabled entry carries a per-publisher `terms_note`.** Where the
-publisher publishes terms, the note cites the verified URL (135 publisher hosts,
+publisher publishes terms, the note cites the verified URL (136 publisher hosts,
 each fetched live by the review tool); otherwise it says "no published RSS terms
 found; robots.txt allows the feed path; headline, snippet and link only,
 attributed". The note is the same for every feed from one publisher. The terms
@@ -186,8 +186,13 @@ flip `reliefweb-reports` to `enabled: true` after a terms review.
 Every attempt writes one JSON record per source to the `source_health` KV
 bucket (7-day TTL, key = source id): state, last success, last error, item and
 error counts for the current hour, error rate, ETag/Last-Modified, next attempt,
-quarantine end and the current interval. M1·2 copies this into
-`sources.health_json`.
+quarantine end and the current interval. This KV bucket is the live health
+source for `/api/health` and `/ops`.
+
+Postgres `sources.health_json` is **not** a live mirror in this build: source
+seeding writes `{}`, and no process updates the column afterwards. The durable
+`GetSources` fallback therefore reports only `enabled`/`disabled`/`unknown`, not
+the current fetch state. Read live health from the KV-backed endpoints.
 
 Prometheus series (per source, ~300 sources):
 

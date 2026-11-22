@@ -49,6 +49,55 @@ button {
 p {
   margin: 0;
 }
+/* Keyboard focus is always visible; pointer focus stays quiet. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.wr-body:focus-visible,
+.wburst:focus-visible,
+.thread:focus-visible,
+.search-result:focus-visible,
+.lk:focus-visible,
+.mobile-link:focus-visible,
+.source-article:focus-visible,
+.backtest-row:focus-visible,
+.alert-hits button:focus-visible {
+  outline-offset: -2px;
+}
+.search:focus-within,
+.prompt:focus-within,
+.filter-field input:focus-visible {
+  border-color: rgba(94, 242, 255, 0.6);
+  box-shadow: 0 0 0 2px rgba(94, 242, 255, 0.18);
+}
+.prompt input:focus-visible,
+.search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .mono {
   font-family: var(--mono);
 }
@@ -755,8 +804,18 @@ p {
   background: rgba(94, 242, 255, 0.12);
   box-shadow: inset 0 0 0 1px rgba(94, 242, 255, 0.5);
 }
-.wr.dim {
-  opacity: 0.45;
+.wr.dim .wr-body {
+  color: var(--text-2);
+}
+.wr.dim .wr-body .title {
+  color: var(--text-2);
+}
+.wr.dim .wr-body .join {
+  color: #7fc7d4;
+}
+.wr.dim .wr-body .dot {
+  opacity: 0.55;
+  box-shadow: 0 0 4px var(--c);
 }
 .wburst {
   padding: 6px 14px 6px 81px;
@@ -1143,16 +1202,7 @@ p {
   background: linear-gradient(180deg, rgba(94, 242, 255, 0.75), rgba(94, 242, 255, 0.15));
   border-radius: 2px 2px 0 0;
 }
-.bars .win {
-  position: absolute;
-  top: -4px;
-  bottom: -4px;
-  right: 0;
-  width: 26%;
-  border: 1px solid rgba(94, 242, 255, 0.55);
-  border-radius: 4px;
-  background: rgba(94, 242, 255, 0.06);
-}
+
 .bars .now {
   position: absolute;
   right: -1px;
@@ -1387,7 +1437,7 @@ body {
   min-height: 54px;
   max-height: 54px;
   display: grid;
-  grid-template-columns: 58px 8px minmax(0, 1fr) auto;
+  grid-template-columns: 58px 8px minmax(0, 1fr) fit-content(34%);
   gap: 9px;
   align-items: center;
   padding: 7px 14px;
@@ -1410,11 +1460,37 @@ body {
 }
 .wr-body .h {
   min-width: 0;
-  display: block;
-  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  line-height: 1.22;
+}
+.wr-body .hl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  min-width: 0;
+}
+.wr-body .ws-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+.wr-body .ws {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wr-body .title {
   display: block;
+  width: 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1424,14 +1500,41 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 2px;
+  margin-top: 0;
   color: #9ff6ff;
   font-family: var(--mono);
   font-size: 9.5px;
+  line-height: 1.2;
 }
 .wr-body .pl {
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
   text-transform: uppercase;
+}
+.wr-body .pl-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wr-body .pl.global {
+  flex: none;
+  border: 1px solid rgba(125, 146, 178, 0.4);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.wr-body .approx {
+  flex: none;
+  color: #ffc25c;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.2;
+  border: 1px solid rgba(255, 194, 92, 0.4);
+  border-radius: 3px;
+  padding: 0 3px;
 }
 .wr-body .dot {
   margin-top: 0;
@@ -1613,6 +1716,10 @@ body {
   .app3 > .topbar .search {
     flex-basis: 220px;
   }
+  /* Keep the topbar state readable before the health text crowds it. */
+  .app3 > .topbar .right .health {
+    display: none;
+  }
 }
 @media (max-width: 780px) {
   .app3 {
@@ -1711,7 +1818,8 @@ body {
   }
   .stage .br {
     right: 12px;
-    bottom: 12px;
+    /* Keep zoom/reset clear of a tall story sheet at the bottom. */
+    bottom: 56px;
   }
   .stage-empty {
     padding: 18px;
@@ -1730,23 +1838,67 @@ body {
   .mobile-story {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     position: fixed;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 30;
-    padding: 14px 16px;
-    max-height: 42vh;
-    overflow-y: auto;
+    padding: 0 0 env(safe-area-inset-bottom, 0);
+    max-height: min(52vh, 460px);
+    border-radius: 18px 18px 0 0;
+    border-bottom: 0;
+    overflow: hidden;
+    box-shadow: 0 -14px 44px rgba(0, 0, 0, 0.55);
+  }
+  /* The handle owns the story swipe; the body below scrolls normally. */
+  .mobile-story-grab {
+    flex: none;
+    width: 100%;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    background: none;
+    touch-action: none;
+    cursor: grab;
+  }
+  .mobile-story-grab::before {
+    content: "";
+    width: 38px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(160, 200, 255, 0.4);
+  }
+  .mobile-story-grab:active {
+    cursor: grabbing;
   }
   .mobile-story-head {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+    padding: 0 16px 6px;
   }
   .mobile-story-head .text-btn {
+    font-size: 12px;
+  }
+  .mobile-story-close {
     font-size: 18px;
+    line-height: 1;
+  }
+  .mobile-story-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 2px 16px 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
   }
   .mobile-story h2 {
     margin: 0;
@@ -1771,6 +1923,26 @@ body {
     color: var(--text-2);
     font-size: 12.5px;
     line-height: 1.5;
+  }
+  .mobile-story .mobile-links {
+    border-top: 1px solid var(--line);
+    padding-top: 6px;
+  }
+  .mobile-story .mobile-link {
+    min-height: 34px;
+    align-items: center;
+    border-top: 1px solid rgba(120, 200, 255, 0.07);
+    padding: 4px 0;
+  }
+  .mobile-story-swipe {
+    flex: none;
+    padding: 7px 16px 10px;
+    border-top: 1px solid var(--line);
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
   }
 }
 
@@ -1801,8 +1973,12 @@ body {
   text-align: left;
   color: var(--text);
 }
-.search-result:hover {
-  background: rgba(94, 242, 255, 0.07);
+.search-result:hover,
+.search-result[aria-selected="true"] {
+  background: rgba(94, 242, 255, 0.09);
+}
+.search-result[aria-selected="true"] {
+  box-shadow: inset 0 0 0 1px rgba(94, 242, 255, 0.3);
 }
 .search-result .dot {
   width: 8px;
@@ -1873,7 +2049,7 @@ body {
   pointer-events: none;
   font-size: 8.5px;
   letter-spacing: 0.04em;
-  color: rgba(125, 146, 178, 0.72);
+  color: var(--text-3);
 }
 .layers .sw2 {
   padding: 0;
@@ -2090,6 +2266,28 @@ body {
   font-size: 10.5px;
   color: var(--accent);
   font-weight: 500;
+}
+.mobile-link-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+.mobile-link-k {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  text-transform: uppercase;
+}
+.mobile-link-t {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .source-article {
   display: grid;
@@ -2400,7 +2598,8 @@ body {
   position: fixed;
   right: 12px;
   bottom: 12px;
-  z-index: 80;
+  /* Below the alerts dialog (z 70): a modal must not have live toasts over it. */
+  z-index: 65;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2548,4 +2747,299 @@ body {
   color: #ffc25c;
   font-size: 8.5px;
   letter-spacing: 0.06em;
+}
+
+/* F5·2 globe and panel clarity */
+.scalebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+.scalebar i {
+  display: block;
+  height: 7px;
+  border: 1px solid rgba(159, 179, 207, 0.7);
+  border-top: 0;
+  border-radius: 0 0 2px 2px;
+}
+.no-matches {
+  position: absolute;
+  top: 112px;
+  left: 20px;
+  z-index: 3;
+  padding: 6px 10px;
+  border-color: rgba(255, 194, 92, 0.4);
+  color: #ffc25c;
+  font-size: 10.5px;
+}
+.part-story {
+  position: absolute;
+  top: 128px;
+  left: 20px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: min(360px, 48%);
+  padding: 8px 11px;
+  border-color: rgba(94, 242, 255, 0.3);
+}
+.part-story b {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.part-story .mono {
+  color: var(--text-3);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+}
+.ev.dotonly {
+  min-width: 8px;
+}
+.ev.dotonly::after {
+  margin-bottom: 0;
+}
+
+/* Keep the stage breadcrumb above the story title, never on top of it. */
+@media (min-width: 781px) {
+  .stage .tl {
+    top: 34px;
+  }
+}
+@media (max-width: 780px) {
+  .stage .tl {
+    top: 28px;
+  }
+  .stage-crumbs {
+    top: 8px;
+  }
+}
+
+/* Edge markers are stacked by their container, not absolutely positioned. */
+.edge-markers .rim {
+  position: static;
+  max-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.approx {
+  color: #ffc25c;
+  letter-spacing: 0.08em;
+}
+
+/* ===== F5·3 responsive panel, touch hints and dialog polish ===== */
+.live.offline,
+.live.connecting,
+.live.reconnecting {
+  color: var(--text-3);
+}
+.panel-toggle,
+.side-panel-bar {
+  display: none;
+}
+.side-panel-bar {
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(5, 9, 19, 0.98);
+}
+
+/* Mid widths get the story panel as a collapsible grid column instead of
+   overlaying the stage, so no control or timeline dot sits under it. */
+@media (min-width: 781px) and (max-width: 1180px) {
+  .panel-toggle {
+    display: grid;
+  }
+  .app3.drawer-open {
+    grid-template-columns: clamp(300px, 36vw, 380px) minmax(0, 1fr) clamp(280px, 34vw, 380px);
+  }
+  .app3 > .side {
+    display: none;
+    position: static;
+    grid-column: 3;
+    grid-row: 2 / 4;
+    width: auto;
+    min-height: 0;
+    padding: 0 0 10px;
+    border: 0;
+    border-left: 1px solid var(--line);
+    border-radius: 0;
+    background: rgba(5, 9, 19, 0.94);
+    box-shadow: none;
+    backdrop-filter: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    visibility: visible;
+    transform: none;
+  }
+  .app3.drawer-open > .side {
+    display: flex;
+  }
+  .app3 > .side .side-panel-bar {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .app3 > .side .side-threads,
+  .app3 > .side .side-links {
+    flex: none;
+    overflow: visible;
+  }
+  .app3 > .side .side-stats {
+    margin-top: 8px;
+  }
+  .app3 .arc-popover {
+    z-index: 60;
+  }
+  /* Edge pills shrink with the narrower stage instead of taking it over. */
+  .app3 > .stage .edge-markers {
+    right: 12px;
+    max-width: 46%;
+  }
+  .app3 > .stage .edge-markers .rim {
+    max-width: 100%;
+  }
+}
+
+/* Touch devices should not advertise hover and keyboard shortcuts. */
+@media (hover: none), (pointer: coarse) {
+  .desktop-only,
+  .wfoot .desktop-only,
+  .kbd {
+    display: none;
+  }
+}
+
+/* Selected rows sit on the brightest wire background; lift their meta text. */
+.wr.sel .wr-body time,
+.wr.sel .wr-body .ws,
+.wr.sel .wr-body .pl,
+.wr.sel .wr-body .join {
+  color: #b9cbe4;
+}
+
+/* Alerts drawer: dialog chrome, ntfy subscription details. */
+.alerts-desc {
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.alerts-drawer:focus-visible {
+  outline-offset: -4px;
+}
+.ntfy-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--line);
+}
+.ntfy-block p {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.ntfy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(94, 242, 255, 0.03);
+}
+.ntfy-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+.ntfy-row .chip {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.ntfy-row small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-3);
+}
+.alert-channel {
+  text-transform: none;
+}
+
+/* Keep the zoom rail clear of story labels at the globe centre. */
+@media (min-width: 781px) {
+  .zoom-rail {
+    top: auto;
+    bottom: 150px;
+    transform: none;
+  }
+}
+
+/* City/street focus: distances stay readable when arcs leave the viewport. */
+.distance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.distance-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.distance-row b {
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.distance-row .mono {
+  flex: none;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+/* Notices flow under the focused-thread header, never over it. */
+.no-matches {
+  position: static;
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 194, 92, 0.4);
+  border-radius: 7px;
+  color: #ffc25c;
+  font-size: 10.5px;
+}
+.part-story {
+  position: static;
+  margin-top: 4px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(94, 242, 255, 0.3);
+  border-radius: 7px;
 }

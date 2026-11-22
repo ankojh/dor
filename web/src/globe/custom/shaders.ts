@@ -1,3 +1,4 @@
+import { ARC_VISIBILITY_GLSL } from "../arc-hit";
 /**
  * GLSL for the custom WebGL layer.
  *
@@ -83,6 +84,7 @@ uniform vec2 uAnchorHi;
 uniform vec2 uAnchorLo;
 uniform vec2 uViewport;
 uniform float uTime;
+uniform float uFocusAt;
 uniform float uStoryTexWidth;
 uniform float uLinkTexWidth;
 uniform float uHasFocus;
@@ -121,8 +123,16 @@ float dorFocusOpacity(float state) {
   if (state > 1.5 && state < 2.5) return DOR_FOCUSED_ALPHA;
   if (state > 0.5 && state < 1.5) return DOR_LINKED_ALPHA;
   if (state > 2.5) return DOR_SECOND_ALPHA;
-  return mix(1.0, DOR_AMBIENT_ALPHA, uHasFocus);
+  // Ambient stories do not get a per-instance focus texel, so the global
+  // off-thread dim must fade too (200 ms, plan §4). A focus toggle is the only
+  // transition; switching story while focused leaves the level at its target.
+  float target = uHasFocus;
+  float start = 1.0 - target;
+  float level = mix(start, target, clamp((uTime - uFocusAt) / DOR_FOCUS_FADE, 0.0, 1.0));
+  return mix(1.0, DOR_AMBIENT_ALPHA, level);
 }
+
+${ARC_VISIBILITY_GLSL}
 `;
 
 export const DOT_VERT = /* glsl */ `${COMMON_HEADER}
@@ -255,6 +265,7 @@ layout(location = 10) in vec2 aCorner;
 layout(location = 11) in float aArcLength;
 
 uniform sampler2D uArcFocusTex;
+uniform sampler2D uArcDirTex;
 uniform vec3 uLinkColors[3];
 
 out float vSidePx;
@@ -264,29 +275,19 @@ out float vAlpha;
 out float vStrength;
 out float vDashed;
 out float vPulse;
-out float vReaction;
+out float vDirection;
 out float vSeed;
 out vec3 vColor;
 
 void main() {
   vec4 focus = texelFetch(uArcFocusTex, dorTexel(aLink, uLinkTexWidth), 0);
+  float direction = texelFetch(uArcDirTex, dorTexel(aLink, uLinkTexWidth), 0).x;
   float state = focus.x;
-  float prev = focus.y;
-  float at = focus.z;
   float strength = abs(focus.w);
-  float fade = clamp((uTime - at) / DOR_FOCUS_FADE, 0.0, 1.0);
-  float alpha = mix(dorFocusOpacity(prev), dorFocusOpacity(state), fade) * (focus.w < 0.0 ? 0.12 : 1.0);
-
+  float alpha = dorArcVisibility(aArcLength, aType, focus);
   float second = step(2.5, state);
-  float ambient = 1.0 - step(0.5, state);
   float width = (DOR_ARC_WIDTH_MIN + DOR_ARC_WIDTH_SPAN * strength) *
     mix(1.0, DOR_ARC_SECOND_WIDTH, second);
-  alpha *= (DOR_ARC_OPACITY_MIN + DOR_ARC_OPACITY_SPAN * strength) *
-    mix(1.0, DOR_ARC_SECOND_ALPHA, second);
-  // Board A2: off-thread arcs stay as a very faint context web.
-  if (strength < DOR_MIN_STRENGTH) alpha = 0.0;
-  if (uHasFocus < 0.5 && strength < uFloor) alpha = 0.0;
-  if (ambient > 0.5 && uHasFocus > 0.5) alpha *= DOR_OFF_THREAD_ALPHA;
 
   vec4 c0 = dorProject(aStartHi, aStartLo, aStartElev);
   vec4 c1 = dorProject(aEndHi, aEndLo, aEndElev);
@@ -300,9 +301,7 @@ void main() {
   vec2 dir = scr1 - scr0;
   float len = length(dir);
   // At street zoom a link between cities would be a screen-long line; keep
-  // only local links (the thread's own local context) visible.
-  if (uZoom > 11.5) alpha *= 1.0 - smoothstep(15000.0, 40000.0, aArcLength);
-  if (uZoom > 13.0) alpha *= smoothstep(0.52, 0.68, strength);
+  // only links that are local to the viewport, tapering with zoom.
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;
@@ -320,10 +319,9 @@ void main() {
   vAlpha = alpha;
   vStrength = strength;
   vDashed = step(1.5, aType);
-  vReaction = step(0.5, aType) * step(aType, 1.5);
+  vDirection = direction;
   vPulse = (1.0 - vDashed) * (1.0 - second) * step(DOR_PULSE_1, strength) *
     (1.0 - (1.0 - step(0.5, state)) * uHasFocus) * (1.0 - uDropPulses);
-  if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
   vSeed = fract(sin(aLink * 3.71) * 43758.5453);
   vColor = uLinkColors[int(aType)];
 }
@@ -342,7 +340,7 @@ in float vAlpha;
 in float vStrength;
 in float vDashed;
 in float vPulse;
-in float vReaction;
+in float vDirection;
 in float vSeed;
 in vec3 vColor;
 
@@ -361,8 +359,9 @@ void main() {
   if (alpha < 0.004) discard;
 
   float pulse = 0.0;
-  if (vPulse > 0.5) {
-    float along = vReaction > 0.5 ? 1.0 - vT : vT;
+  // Direction says which story acted on the other. UNCLEAR (2) never pulses.
+  if (vPulse > 0.5 && vDirection < 1.5) {
+    float along = vDirection > 0.5 ? 1.0 - vT : vT;
     float speed = 0.15 + 0.35 * vStrength;
     float count = vStrength >= DOR_PULSE_2 ? 2.0 : 1.0;
     for (int i = 0; i < 2; i++) {
@@ -565,7 +564,7 @@ out float vId;
 
 void main() {
   vec4 story = texelFetch(uStoryTex, dorTexel(aIndex, uStoryTexWidth), 0);
-  float radius = max(3.0, 2.0 + 3.4 * story.x);
+  float radius = max(4.0, (DOR_DOT_BASE + DOR_DOT_SCALE * story.x) * 1.28);
   if (story.x <= 0.001) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;
@@ -595,6 +594,84 @@ out vec4 outColor;
 
 void main() {
   if (length(vLocal) > vRadius) discard;
+  float id = vId;
+  float r = mod(id, 256.0);
+  float g = mod(floor(id / 256.0), 256.0);
+  float b = floor(id / 65536.0);
+  outColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+}
+`;
+
+/**
+ * Arc id pass. It mirrors the visible arc pass (same projection, width, focus
+ * and floor rules) so focused links below the ambient floor stay clickable and
+ * links hidden by the floor, quality level or street-zoom attenuation are not.
+ */
+export const PICK_ARC_VERT = /* glsl */ `${COMMON_HEADER}
+layout(location = 0) in vec2 aStartHi;
+layout(location = 1) in vec2 aStartLo;
+layout(location = 2) in vec2 aEndHi;
+layout(location = 3) in vec2 aEndLo;
+layout(location = 4) in float aStartElev;
+layout(location = 5) in float aEndElev;
+layout(location = 6) in float aT0;
+layout(location = 7) in float aT1;
+layout(location = 8) in float aLink;
+layout(location = 9) in float aType;
+layout(location = 10) in vec2 aCorner;
+layout(location = 11) in float aArcLength;
+
+uniform sampler2D uArcFocusTex;
+
+out float vSidePx;
+out float vId;
+
+void main() {
+  vec4 focus = texelFetch(uArcFocusTex, dorTexel(aLink, uLinkTexWidth), 0);
+  float state = focus.x;
+  float strength = abs(focus.w);
+  float second = step(2.5, state);
+  float alpha = dorArcVisibility(aArcLength, aType, focus);
+  if (alpha < 0.004) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
+    return;
+  }
+
+  vec4 c0 = dorProject(aStartHi, aStartLo, aStartElev);
+  vec4 c1 = dorProject(aEndHi, aEndLo, aEndElev);
+  if (dorClipped(c0) || dorClipped(c1)) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
+    return;
+  }
+
+  vec2 scr0 = (c0.xy / c0.w) * 0.5 * uViewport;
+  vec2 scr1 = (c1.xy / c1.w) * 0.5 * uViewport;
+  vec2 dir = scr1 - scr0;
+  float len = length(dir);
+  vec2 normal = len > 0.001 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
+  float width = (DOR_ARC_WIDTH_MIN + DOR_ARC_WIDTH_SPAN * strength) *
+    mix(1.0, DOR_ARC_SECOND_WIDTH, second);
+  // A click should not need pixel-perfect aim: widen the hit corridor by 3 px
+  // on each side, like a touch target.
+  float pickWidth = max(5.0, width + 6.0);
+  vec2 base = mix(scr0, scr1, aCorner.x);
+  vec2 pos = base + normal * aCorner.y * pickWidth * 0.5;
+  vec4 clip = mix(c0, c1, aCorner.x);
+  gl_Position = vec4(pos / (0.5 * uViewport) * clip.w, clip.z, clip.w);
+  vSidePx = aCorner.y * pickWidth * 0.5;
+  vId = aLink + 1.0;
+}
+`;
+
+export const PICK_ARC_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+
+in float vSidePx;
+in float vId;
+
+out vec4 outColor;
+
+void main() {
   float id = vId;
   float r = mod(id, 256.0);
   float g = mod(floor(id / 256.0), 256.0);

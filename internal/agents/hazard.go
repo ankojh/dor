@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -213,6 +214,10 @@ func (r *fetcherRuntime) fetchHazardOnce(ctx context.Context, out *Emitter, src 
 			Summary:     h.Summary,
 			PublishedAt: unixOrZero(h.Published),
 			FetchedAt:   now.Unix(),
+			// Hazard feeds are English-language catalogues. Declaring it here
+			// keeps "M 1.4 - 7 km SSW of Pahala" from being detected as
+			// Indonesian/Nynorsk by the statistical detector.
+			Lang: hazardLanguage(src),
 			Hints: &dorv1.RawHints{
 				Located:       h.Located,
 				Lat:           h.Lat,
@@ -240,6 +245,16 @@ func (r *fetcherRuntime) fetchHazardOnce(ctx context.Context, out *Emitter, src 
 		}
 	}
 	return items, false, resp.ETag, resp.LastModified, nil
+}
+
+// hazardLanguage returns the declared source language for a hazard feed, or
+// English when the source configuration does not say. Hazard catalogues are
+// English even when the place name is not.
+func hazardLanguage(src sources.Source) string {
+	if lang := strings.TrimSpace(src.Lang); lang != "" {
+		return lang
+	}
+	return "en"
 }
 
 func hazardTitle(src sources.Source, h fetch.HazardItem) string {

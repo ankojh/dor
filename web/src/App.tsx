@@ -3,10 +3,38 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
 import { afterShellPaint } from "./globe/load";
 import { createFocusHandler } from "./globe/focus-events";
+import { shouldIgnoreGlobeKeys, isTypingTarget } from "./keyboard";
+import {
+  nextDistinctStoryIndex,
+  nextSelectionIndex,
+  selectionKeyForStory,
+  keepSelectionForStory,
+} from "./globe/selection";
+import { TtlLruCache, LatestRequest } from "./text-cache";
+import { BriefLoader, type BriefProvenance, type StoryText } from "./brief";
 import { LruCache } from "./worker/lru";
-import type { StorySummary } from "./globe/live-data";
+import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
+import { connectionLabel, connectionStatusCopy } from "./live/connection";
 import { mergeWireRow } from "./live/wire";
+import { matchesSourceFilter, sourceFilterIds } from "./live/source-names";
+import { nextTabStop } from "./ui/focus";
+import { channelLabel } from "./ui/labels";
+import { groupLinksByStrength } from "./ui/links";
+import { nextSearchIndex } from "./ui/search";
+import { sheetSwipeDirection } from "./ui/sheet-gesture";
+import {
+  rollingMinuteBars,
+  rollingMinuteRate,
+  sortWireItems,
+  wireJoin,
+  wireMetadataProvenance,
+  wirePlace,
+  wirePublishMs,
+  wireSourceName,
+  wireTime,
+  type WireStoryContext,
+} from "./live/wire-display";
 import {
   AlertInbox,
   approximateLabel,
@@ -45,12 +73,18 @@ const EMPTY_GLOBE: GlobeState = {
   secondDegree: false,
   quality: 0,
   tileFailed: false,
+  scale: null,
+  match: { active: false, matched: 0, total: 0 },
 };
+
+/** Briefs/details appear after the Editor writes them; retry soon, not never. */
+const BRIEF_RETRY_MS = 5_000;
 
 type WireItem = {
   row: WireRow;
   key: string;
   receivedAt: number;
+  hydrated: boolean;
 };
 
 type DisplayRow =
@@ -61,11 +95,6 @@ function clockText(ms: number): string {
   return new Date(ms).toISOString().slice(11, 19);
 }
 
-function wireTime(row: WireRow, receivedAt: number): string {
-  const seconds = Number(row.at) || Math.floor(receivedAt / 1000);
-  return new Date(seconds * 1000).toISOString().slice(11, 19);
-}
-
 function hexColor(category: number): string {
   const rgb = categoryColor(category);
   return `#${rgb.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
@@ -73,18 +102,6 @@ function hexColor(category: number): string {
 
 function articleKey(row: WireRow): string {
   return row.articleId || `${row.source}:${row.at}:${row.title}`;
-}
-
-function sourceName(source: string): string {
-  return source || "WIRE";
-}
-
-function joinText(row: WireRow): string {
-  if (row.join === 1) {
-    return row.storyId ? `↳ joined story ${row.storyId.slice(0, 10)}` : "↳ joined a story";
-  }
-  if (row.storyId) return "↳ new story";
-  return "";
 }
 
 function healthLabel(health: SourceHealth): string {
@@ -147,16 +164,103 @@ function directionLabel(link: LinkInfo): string {
   return `${link.aPlace} · ${link.bPlace}`;
 }
 
+type PlaceRow = {
+  key: string;
+  name: string;
+  fullName: string;
+  role: Role;
+  precision: Precision;
+  count: number;
+};
+
+const ROLE_PRIORITY: Record<number, number> = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4 };
+
+function shortPlaceName(name: string): string {
+  const parts = name
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return "Unknown place";
+  const filtered: string[] = [parts[0]!];
+  for (const part of parts.slice(1)) {
+    if (part.toLowerCase() === filtered[0]!.toLowerCase()) continue;
+    filtered.push(part);
+  }
+  if (filtered.length <= 2) return filtered.join(", ");
+  return `${filtered[0]}, ${filtered[filtered.length - 1]}`;
+}
+
+/** Compact map/timeline label: the city, not its admin chain. */
+function compactPlaceName(name: string): string {
+  return name.split(",")[0]?.trim() || name;
+}
+
+/** Collapse the same place repeated by different source articles. */
+function displayPlaces(locations: StorySummary["locations"]): PlaceRow[] {
+  const rows = new Map<string, PlaceRow>();
+  for (const location of locations) {
+    const key =
+      location.placeId ||
+      `${shortPlaceName(location.name).toLowerCase()}|${location.lat.toFixed(2)},${location.lon.toFixed(2)}`;
+    const existing = rows.get(key);
+    if (existing) {
+      if ((ROLE_PRIORITY[location.role] ?? 4) < (ROLE_PRIORITY[existing.role] ?? 4)) {
+        existing.role = location.role;
+      }
+      if (location.precision > existing.precision) existing.precision = location.precision;
+      existing.count++;
+      continue;
+    }
+    rows.set(key, {
+      key,
+      name: shortPlaceName(location.name),
+      fullName: location.name,
+      role: location.role,
+      precision: location.precision,
+      count: 1,
+    });
+  }
+  return [...rows.values()];
+}
+
+function linkOrder(link: LinkInfo): {
+  first: { title: string; place: string };
+  second: { title: string; place: string };
+  arrow: string;
+} {
+  const a = { title: link.aTitle, place: link.aPlace };
+  const b = { title: link.bTitle, place: link.bPlace };
+  if (link.direction === 1) return { first: b, second: a, arrow: "→" };
+  if (link.direction === 2) return { first: a, second: b, arrow: "·" };
+  return { first: a, second: b, arrow: "→" };
+}
+
+function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function bearingLabel(lat1: number, lon1: number, lat2: number, lon2: number): string {
+  const toRad = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * toRad) * Math.cos(lat2 * toRad);
+  const x =
+    Math.cos(lat1 * toRad) * Math.sin(lat2 * toRad) -
+    Math.sin(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.cos((lon2 - lon1) * toRad);
+  const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  if (bearing >= 45 && bearing < 135) return "east";
+  if (bearing >= 135 && bearing < 225) return "south";
+  if (bearing >= 225 && bearing < 315) return "west";
+  return "north";
+}
+
 function typeName(type: number): string {
   return type === 0 ? "Causal" : type === 1 ? "Reaction" : "Thematic";
 }
-
-type StoryText = {
-  loading: boolean;
-  available: boolean;
-  brief?: string;
-  error?: string;
-};
 
 type LinkWhy = {
   loading: boolean;
@@ -190,7 +294,16 @@ type StoryDetails = {
     title: string;
     brief?: string;
     brief_available?: boolean;
+    brief_source?: BriefProvenance;
+    title_source?: string;
     category: string;
+    category_backend?: string;
+    category_confidence?: number;
+    degraded?: boolean;
+    fallback?: boolean;
+    place_backend?: string;
+    place_degraded?: boolean;
+    place_fallback?: boolean;
     source_count: number;
     first_seen: number;
     updated_at: number;
@@ -219,6 +332,16 @@ type BacktestResult = {
   approx?: boolean;
   took_ms?: number;
   available?: boolean;
+  error?: string;
+};
+
+type HistogramPayload = {
+  start: number;
+  end: number;
+  hours: number;
+  bins: number[];
+  count: number;
+  available: boolean;
   error?: string;
 };
 
@@ -257,6 +380,28 @@ function ensureSession(): Promise<void> {
   return sessionBootstrap;
 }
 
+/** Fetch one lazy brief; the caller owns caching and focus checks. */
+async function fetchStoryBrief(storyId: string): Promise<StoryText> {
+  const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
+    credentials: "include",
+  });
+  const payload = (await response.json()) as {
+    available?: boolean;
+    title?: string;
+    brief?: string;
+    provenance?: BriefProvenance;
+    error?: string;
+  };
+  return {
+    loading: false,
+    available: Boolean(payload.available) && Boolean(payload.brief),
+    ...(payload.title ? { title: payload.title } : {}),
+    ...(payload.brief ? { brief: payload.brief } : {}),
+    provenance: payload.provenance ?? "none",
+    ...(payload.error ? { error: payload.error } : {}),
+  };
+}
+
 export function App() {
   let mapContainer!: HTMLDivElement;
   let scrollElement!: HTMLDivElement;
@@ -271,6 +416,7 @@ export function App() {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let freshTimer: ReturnType<typeof setTimeout> | null = null;
   let clockTimer: ReturnType<typeof setInterval> | null = null;
+  let histogramTimer: ReturnType<typeof setInterval> | null = null;
 
   const [now, setNow] = createSignal(Date.now());
   const [connection, setConnection] = createSignal<ConnectionState>("connecting");
@@ -287,6 +433,43 @@ export function App() {
   const [focus, setFocus] = createSignal<FocusDetails | null>(null);
   const [wireRows, setWireRows] = createSignal<WireItem[]>([]);
   const [pendingNew, setPendingNew] = createSignal(0);
+  // Live story titles and source counts for wire join lines. A version signal
+  // makes the map reactive without copying thousands of entries per patch.
+  const storyContexts = new Map<string, WireStoryContext>();
+  const [storyContextVersion, setStoryContextVersion] = createSignal(0);
+  const setStoryContexts = (summaries: LiveStory[]): void => {
+    storyContexts.clear();
+    rememberStoryContexts(summaries);
+  };
+  const rememberStoryContexts = (summaries: LiveStory[]): void => {
+    let changed = false;
+    for (const entry of summaries) {
+      const id = entry?.story?.id;
+      if (!id) continue;
+      const title = entry.story.title ?? "";
+      const sourceCount = Number(entry.story.sourceCount) || 0;
+      const place = entry.place || entry.story.locations?.[entry.story.primary]?.name || "";
+      const previous = storyContexts.get(id);
+      if (
+        previous?.title === title &&
+        previous.sourceCount === sourceCount &&
+        previous.place === place
+      ) {
+        continue;
+      }
+      storyContexts.set(id, { title, sourceCount, place });
+      changed = true;
+      if (storyContexts.size > 6000) {
+        const oldest = storyContexts.keys().next().value;
+        if (oldest !== undefined) storyContexts.delete(oldest);
+      }
+    }
+    if (changed) setStoryContextVersion((version) => version + 1);
+  };
+  const storyContext = (storyId: string): WireStoryContext | undefined => {
+    storyContextVersion();
+    return storyId ? storyContexts.get(storyId) : undefined;
+  };
   const [freshKeys, setFreshKeys] = createSignal<Set<string>>(new Set<string>());
   const [pausedByHover, setPausedByHover] = createSignal(false);
   const [scrollTop, setScrollTop] = createSignal(0);
@@ -298,10 +481,12 @@ export function App() {
   const [storiesOnly, setStoriesOnly] = createSignal(false);
   const [selectedLink, setSelectedLink] = createSignal<LinkInfo | null>(null);
   const [linkWhy, setLinkWhy] = createSignal<LinkWhy | null>(null);
+  const [linkWhyCached, setLinkWhyCached] = createSignal(false);
   const [storyText, setStoryText] = createSignal<StoryText | null>(null);
   const [storyDetails, setStoryDetails] = createSignal<StoryDetails | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchOpen, setSearchOpen] = createSignal(false);
+  const [searchActive, setSearchActive] = createSignal(-1);
   const [layerLines, setLayerLines] = createSignal(true);
   const [layerTethers, setLayerTethers] = createSignal(true);
   const [layerLabels, setLayerLabels] = createSignal(true);
@@ -324,6 +509,8 @@ export function App() {
   >([]);
   const [alertList, setAlertList] = createSignal<AlertRecord[]>([]);
   const [alertsOpen, setAlertsOpen] = createSignal(false);
+  const [sidePanelOpen, setSidePanelOpen] = createSignal(false);
+  const [ntfyCopied, setNtfyCopied] = createSignal<string | null>(null);
   const [alertDraftPrompt, setAlertDraftPrompt] = createSignal("");
   const [alertDraftMinSources, setAlertDraftMinSources] = createSignal(0);
   const [alertDraftRegion, setAlertDraftRegion] = createSignal("");
@@ -339,6 +526,8 @@ export function App() {
     reason?: string;
   }>({ loading: false, available: null });
   const [mobileTab, setMobileTab] = createSignal<"wire" | "threads" | "near" | "alerts">("wire");
+  const [histogram, setHistogram] = createSignal<HistogramPayload | null>(null);
+  const [layerCoastline, setLayerCoastline] = createSignal(true);
   const [view, setView] = createSignal<{ center: [number, number]; zoom: number }>({
     center: [6, 22],
     zoom: 1.55,
@@ -355,15 +544,29 @@ export function App() {
   const pendingWire: WireItem[] = [];
   const alertInbox = new AlertInbox();
   const seen = new Set<string>();
-  const briefCache = new LruCache<string, StoryText>();
-  const detailsCache = new LruCache<string, StoryDetails>();
-  const whyCache = new LruCache<string, LinkWhy>();
+  const briefs = new BriefLoader(
+    fetchStoryBrief,
+    () => focus()?.storyId ?? null,
+    (_storyId, text) => setStoryText(text),
+    BRIEF_RETRY_MS,
+  );
+  const detailsCache = new TtlLruCache<string, StoryDetails>();
+  const whyCache = new TtlLruCache<string, LinkWhy>();
   const prefetched = new LruCache<string, true>();
+  const whyRequests = new LatestRequest();
   const initialHash = new URLSearchParams(location.hash.slice(1));
   const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-  let touchStartY = 0;
+  let lastHashHref = "";
+  let requestedSelection: string | null = null;
+  let sheetTouchStartY = 0;
+  let suppressPanelAutoOpen = false;
+  let suppressSearchOpen = false;
+  let alertsDialog!: HTMLDivElement;
+  let alertsReturnFocus: HTMLElement | null = null;
+  let inertObserver: MutationObserver | null = null;
+  let ntfyCopyTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
   const paused = createMemo(() => pausedByHover() || scrollTop() > 6);
@@ -377,6 +580,9 @@ export function App() {
   const linkCount = createMemo(() => globe().linkCount);
   const topStories = createMemo(() => globe().topStories.slice(0, 6));
   const threadIds = createMemo(() => new Set(focus()?.threadStoryIds ?? []));
+  createEffect(() => {
+    liveGlobe?.setLabelsDimmed(globe().match.active && globe().match.matched === 0);
+  });
   const activeScore = (row: WireRow): number => {
     let score = 0;
     for (const prompt of prompts()) score = Math.max(score, row.promptScores[prompt] ?? 0);
@@ -394,8 +600,7 @@ export function App() {
       rows = rows.filter((item) => wanted.has(item.row.category));
     }
     if (active.sources.length > 0) {
-      const wanted = new Set(active.sources.map((source) => source.toLowerCase()));
-      rows = rows.filter((item) => wanted.has(item.row.source.toLowerCase()));
+      rows = rows.filter((item) => matchesSourceFilter(item.row.source, active.sources));
     }
     if (active.lang.length > 0) {
       const wanted = new Set(active.lang.map((lang) => lang.toLowerCase()));
@@ -447,6 +652,68 @@ export function App() {
     return liveGlobe?.searchStories(query) ?? [];
   });
 
+  /** Stories then places, in the order the listbox shows them. */
+  const searchOptions = createMemo(() => [
+    ...searchResults().map((result, index) => ({
+      kind: "story" as const,
+      id: `search-story-${index}`,
+      result,
+    })),
+    ...cmdPlaces().map((place, index) => ({
+      kind: "place" as const,
+      id: `search-place-${index}`,
+      place,
+    })),
+  ]);
+
+  createEffect(() => {
+    const count = searchOptions().length;
+    setSearchActive((index) => (index >= count ? (count === 0 ? -1 : count - 1) : index));
+  });
+
+  const moveSearchActive = (delta: number, focusOption = false): void => {
+    const options = searchOptions();
+    const next = nextSearchIndex(options.length, searchActive(), delta);
+    if (next === null) return;
+    setSearchActive(next);
+    const option = options[next];
+    if (focusOption && option) {
+      queueMicrotask(() => document.getElementById(option.id)?.focus());
+    }
+  };
+
+  const closeSearch = (): void => {
+    setSearchOpen(false);
+    setSearchActive(-1);
+  };
+
+  const onSearchListKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSearchActive(event.key === "ArrowDown" ? 1 : -1, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressSearchOpen = true;
+      closeSearch();
+      searchInput?.focus();
+    }
+  };
+
+  const activateSearchOption = (index: number): void => {
+    const option = searchOptions()[index];
+    if (!option) return;
+    if (option.kind === "story") {
+      liveGlobe?.focusStoryId(option.result.story.id);
+    } else {
+      liveGlobe?.flyTo([option.place.lon, option.place.lat], 10);
+    }
+    setSearchQuery("");
+    setCmdPlaces([]);
+    closeSearch();
+    searchInput?.blur();
+  };
+
   const displayRows = createMemo<DisplayRow[]>(() => {
     const rows = visibleWireRows();
     const expanded = expandedBatches();
@@ -495,55 +762,125 @@ export function App() {
     overscan: 10,
   });
 
-  const rate = createMemo(() => {
-    const cutoff = now() - 60_000;
-    return wireRows().filter((item) => item.receivedAt >= cutoff).length;
-  });
+  const rate = createMemo(() => rollingMinuteRate(wireRows(), now()));
 
-  const rateBars = createMemo(() => {
-    const buckets = [0, 0, 0, 0, 0];
-    const cutoff = now() - 60_000;
-    for (const item of wireRows()) {
-      if (item.receivedAt < cutoff) continue;
-      const bucket = Math.min(4, Math.floor((item.receivedAt - cutoff) / 12_000));
-      buckets[bucket] = (buckets[bucket] ?? 0) + 1;
+  const rateBars = createMemo(() => rollingMinuteBars(wireRows(), now()));
+
+  const timeline = createMemo(() => {
+    const payload = histogram();
+    if (payload?.available && payload.bins.length > 0) {
+      const max = Math.max(1, ...payload.bins);
+      return {
+        real: true,
+        total: payload.count,
+        error: null as string | null,
+        bars: payload.bins.map((value) =>
+          Math.max(value > 0 ? 5 : 2, Math.round((value / max) * 100)),
+        ),
+      };
     }
-    const max = Math.max(1, ...buckets);
-    return buckets.map((value) => Math.max(12, Math.round((value / max) * 100)));
-  });
-
-  const timelineBars = createMemo(() => {
+    // Readable fallback while the history read is unavailable: last hour of
+    // wire rows, never presented as the durable 24 h count.
     const rows = wireRows();
-    if (rows.length === 0) return new Array(36).fill(0);
+    const bins = new Array(36).fill(0);
     const end = now();
     const binMs = (24 * 60 * 60 * 1000) / 36;
-    const bins = new Array(36).fill(0);
     for (const item of rows) {
       const at = Number(item.row.at) * 1000 || item.receivedAt;
       const bin = Math.floor((at - (end - 24 * 60 * 60 * 1000)) / binMs);
       if (bin >= 0 && bin < 36) bins[bin] = (bins[bin] ?? 0) + 1;
     }
+    const total = bins.reduce((sum, value) => sum + value, 0);
     const max = Math.max(1, ...bins);
-    return bins.map((value) => Math.max(2, Math.round((value / max) * 100)));
+    return {
+      real: false,
+      total,
+      error: payload?.error ?? "Loading history…",
+      bars: bins.map((value) => Math.max(value > 0 ? 5 : 2, Math.round((value / max) * 100))),
+    };
   });
 
   const focusTimeline = createMemo(() => {
     const details = focus();
     if (!details) return [];
-    const links = details.hud.links.slice(0, 5);
-    const events = [
-      { left: 4, label: "first seen", color: "#ffc25c" },
-      ...links.map((link, index) => ({
-        left: 38 + (index * 46) / Math.max(1, links.length - 1),
-        label: `→ ${link.place}`,
-        color: link.type === 0 ? "#ffc25c" : link.type === 1 ? "#ff6fd8" : "#5ef2ff",
-      })),
-      { left: 96, label: "now", color: "#ff4f6e" },
-    ];
+    const nowSeconds = Math.floor(now() / 1000);
+    const stories = details.thread.length
+      ? details.thread
+      : [
+          {
+            storyId: details.storyId,
+            title: details.story.title,
+            place: details.live.place,
+            category: details.live.category,
+            firstSeen: Number(details.story.firstSeen),
+            updatedAt: Number(details.story.updatedAt),
+          },
+        ];
+    const firstSeen = stories.map((story) => story.firstSeen).filter((at) => at > 0);
+    const start = Math.min(
+      nowSeconds,
+      firstSeen.length ? Math.min(...firstSeen) : nowSeconds - 3600,
+    );
+    const end = nowSeconds;
+    const span = Math.max(60, end - start);
+    const events = stories
+      .map((story, index) => {
+        const stamp =
+          story.storyId === details.storyId ? story.firstSeen : story.updatedAt || story.firstSeen;
+        const at = Math.min(end, Math.max(start, stamp || start));
+        return {
+          at,
+          storyId: story.storyId,
+          left: 4 + ((at - start) / span) * 92,
+          label:
+            story.storyId === details.storyId ? "first seen" : `→ ${compactPlaceName(story.place)}`,
+          title: `${story.title} · ${clockText(at * 1000)} UTC`,
+          color: hexColor(story.category),
+          showLabel: index === 0,
+        };
+      })
+      .sort((left, right) => left.at - right.at);
+    // Keep only labels that fit; every event still has a dot and a title.
+    let lastLabelAt = -100;
+    for (const event of events) {
+      event.showLabel = event.left - lastLabelAt >= 20;
+      if (event.showLabel) lastLabelAt = event.left;
+    }
     return events;
   });
 
-  const enqueueWire = (rows: WireRow[]): void => {
+  const places = createMemo(() => displayPlaces(focus()?.story.locations ?? []));
+  const threadStartLabel = createMemo(() => {
+    const details = focus();
+    if (!details) return "first seen";
+    const firstSeen = details.thread.map((story) => story.firstSeen).filter((at) => at > 0);
+    if (!firstSeen.length) return "first seen";
+    return `${clockText(Math.min(...firstSeen) * 1000).slice(0, 5)} first seen`;
+  });
+  const distanceRows = createMemo(() => {
+    const seen = new Set<string>();
+    return (focus()?.hud.links ?? []).filter((link) => {
+      const key = compactPlaceName(link.place).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
+  const primaryPlaceKey = createMemo(() => {
+    const details = focus();
+    if (!details) return null;
+    const primary = details.story.locations[details.story.primary] ?? details.story.locations[0];
+    if (!primary) return null;
+    return (
+      primary.placeId ||
+      `${shortPlaceName(primary.name).toLowerCase()}|${primary.lat.toFixed(2)},${primary.lon.toFixed(2)}`
+    );
+  });
+  const partyCount = createMemo(
+    () => (focus()?.story.locations ?? []).filter((place) => place.role === 2).length,
+  );
+
+  const enqueueWire = (rows: WireRow[], hydrated = false): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
     for (const row of rows) {
@@ -555,6 +892,9 @@ export function App() {
           row: mergeWireRow(previous.row, row),
           key,
           receivedAt: Date.now(),
+          // A live update to a row first seen in the snapshot does not turn
+          // history into an arrival; keep it out of the rolling rate.
+          hydrated: previous.hydrated,
         };
         continue;
       }
@@ -563,7 +903,7 @@ export function App() {
         continue;
       }
       seen.add(key);
-      pendingWire.push({ row, key, receivedAt: Date.now() });
+      pendingWire.push({ row, key, receivedAt: Date.now(), hydrated });
       if (pendingWire.length > 1000) {
         const removed = pendingWire.shift();
         if (removed) seen.delete(removed.key);
@@ -573,11 +913,14 @@ export function App() {
     if (updates.length > 0) {
       // The wire row was already visible; update metadata in place. This is
       // the article.clean -> article.placed transition and must not duplicate.
+      // Publish times can change with the update, so re-sort after merging.
       setWireRows((previous) =>
-        previous.map((item) => {
-          const update = updates.find((candidate) => candidate.key === item.key);
-          return update ? { ...item, row: mergeWireRow(item.row, update.row) } : item;
-        }),
+        sortWireItems(
+          previous.map((item) => {
+            const update = updates.find((candidate) => candidate.key === item.key);
+            return update ? { ...item, row: mergeWireRow(item.row, update.row) } : item;
+          }),
+        ),
       );
     }
     if (added === 0) return;
@@ -592,7 +935,10 @@ export function App() {
     if (paused() || pendingWire.length === 0) return;
     const batch = pendingWire.splice(0);
     setWireRows((previous) => {
-      const all = [...batch.reverse(), ...previous];
+      // Strict newest-first by effective publish time. Arrival order is not
+      // publish order: a poll can deliver a batch oldest-last, and a source
+      // dateline can carry a wrong timezone.
+      const all = sortWireItems([...batch, ...previous]);
       const kept = all.slice(0, 1000);
       for (const item of all.slice(1000)) seen.delete(item.key);
       return kept;
@@ -634,10 +980,17 @@ export function App() {
     }
   });
 
+  const workerFilters = (values: WireFilters): WireFilters => ({
+    ...values,
+    // The gateway filters on source ids. A reader may have typed the
+    // publication name shown on the wire, so resolve names to every id.
+    sources: [...new Set(values.sources.flatMap(sourceFilterIds))],
+  });
+
   const updateFilters = (patch: Partial<WireFilters>): void => {
     const next = { ...filters(), ...patch };
     setFilters(next);
-    worker?.postMessage({ type: "filters", filters: next });
+    worker?.postMessage({ type: "filters", filters: workerFilters(next) });
   };
 
   const updatePrompts = (next: string[]): void => {
@@ -730,11 +1083,12 @@ export function App() {
     if (threadOnly()) params.set("f", "thread");
     else if (globe().secondDegree) params.set("f", "second");
     const next = params.toString();
-    history.replaceState(
-      null,
-      "",
-      `${location.pathname}${location.search}${next ? `#${next}` : ""}`,
-    );
+    const href = `${location.pathname}${location.search}${next ? `#${next}` : ""}`;
+    // moveend fires for real gestures and flights; only rewrite the URL when
+    // the shareable state actually changed.
+    if (href === lastHashHref) return;
+    lastHashHref = href;
+    history.replaceState(null, "", href);
   };
 
   const scheduleHash = (): void => {
@@ -745,60 +1099,37 @@ export function App() {
     }, 180);
   };
 
-  const loadStoryText = async (storyId: string): Promise<void> => {
-    const cached = briefCache.get(storyId);
-    if (cached) {
-      setStoryText(cached);
-      return;
-    }
-    setStoryText({ loading: true, available: false });
-    try {
-      const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
-        credentials: "include",
-      });
-      const payload = (await response.json()) as {
-        available?: boolean;
-        brief?: string;
-        error?: string;
-      };
-      const next: StoryText = {
-        loading: false,
-        available: Boolean(payload.available) && Boolean(payload.brief),
-        ...(payload.brief ? { brief: payload.brief } : {}),
-        ...(payload.error ? { error: payload.error } : {}),
-      };
-      briefCache.set(storyId, next);
-      if (focus()?.storyId === storyId) setStoryText(next);
-    } catch (error) {
-      const next: StoryText = {
-        loading: false,
-        available: false,
-        error: String(error),
-      };
-      briefCache.set(storyId, next);
-      if (focus()?.storyId === storyId) setStoryText(next);
-    }
-  };
+  const detailsMiss = new TtlLruCache<string, true>();
+  const detailsInflight = new Set<string>();
 
   const loadStoryDetails = async (storyId: string): Promise<void> => {
     const cached = detailsCache.get(storyId);
     if (cached) {
-      setStoryDetails(cached);
+      if (focus()?.storyId === storyId) setStoryDetails(cached);
       return;
     }
+    if (detailsMiss.get(storyId) || detailsInflight.has(storyId)) {
+      if (focus()?.storyId === storyId) setStoryDetails(null);
+      return;
+    }
+    detailsInflight.add(storyId);
     try {
       const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}`, {
         credentials: "include",
       });
       if (!response.ok) {
-        setStoryDetails(null);
+        detailsMiss.set(storyId, true, BRIEF_RETRY_MS);
+        if (focus()?.storyId === storyId) setStoryDetails(null);
         return;
       }
       const payload = (await response.json()) as StoryDetails;
       detailsCache.set(storyId, payload);
       if (focus()?.storyId === storyId) setStoryDetails(payload);
     } catch {
-      setStoryDetails(null);
+      detailsMiss.set(storyId, true, BRIEF_RETRY_MS);
+      if (focus()?.storyId === storyId) setStoryDetails(null);
+    } finally {
+      detailsInflight.delete(storyId);
     }
   };
 
@@ -821,6 +1152,23 @@ export function App() {
       setAlertList(payload.alerts ?? []);
     } catch {
       setAlertList([]);
+    }
+  };
+
+  const loadHistogram = async (): Promise<void> => {
+    try {
+      const payload = await apiJson<HistogramPayload>("/api/histogram?hours=24&bins=36");
+      setHistogram(payload);
+    } catch (error) {
+      setHistogram({
+        start: Math.floor(Date.now() / 1000) - 86_400,
+        end: Math.floor(Date.now() / 1000),
+        hours: 24,
+        bins: [],
+        count: 0,
+        available: false,
+        error: String(error),
+      });
     }
   };
 
@@ -1004,12 +1352,24 @@ export function App() {
 
   const loadLinkWhy = async (link: LinkInfo): Promise<void> => {
     const key = `${link.aId}\u0000${link.bId}`;
+    const isSelected = (): boolean => {
+      const current = selectedLink();
+      return current !== null && current.aId === link.aId && current.bId === link.bId;
+    };
     const cached = whyCache.get(key);
     if (cached) {
-      setLinkWhy(cached);
+      if (isSelected()) {
+        setLinkWhyCached(true);
+        setLinkWhy(cached);
+      }
       return;
     }
-    setLinkWhy({ loading: true, available: false });
+    const token = whyRequests.next();
+    if (isSelected()) {
+      setLinkWhyCached(false);
+      setLinkWhy({ loading: true, available: false });
+    }
+    let next: LinkWhy;
     try {
       const response = await fetch(
         `${API_BASE}/api/text?link_a=${encodeURIComponent(link.aId)}&link_b=${encodeURIComponent(link.bId)}`,
@@ -1020,17 +1380,21 @@ export function App() {
         why?: string;
         error?: string;
       };
-      const next: LinkWhy = {
+      next = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.why),
         ...(payload.why ? { why: payload.why } : {}),
         ...(payload.error ? { error: payload.error } : {}),
       };
-      whyCache.set(key, next);
-      setLinkWhy(next);
     } catch (error) {
-      const next: LinkWhy = { loading: false, available: false, error: String(error) };
-      whyCache.set(key, next);
+      next = { loading: false, available: false, error: String(error) };
+    }
+    if (next.available) whyCache.set(key, next);
+    else whyCache.set(key, next, BRIEF_RETRY_MS);
+    // A late answer for a closed or replaced popover must not overwrite the
+    // current one (the review's "why" race).
+    if (whyRequests.isCurrent(token) && isSelected()) {
+      setLinkWhyCached(false);
       setLinkWhy(next);
     }
   };
@@ -1038,6 +1402,7 @@ export function App() {
   const openLink = (link: LinkInfo): void => {
     setSelectedLink(link);
     setLinkReported(false);
+    setLinkWhyCached(false);
     void loadLinkWhy(link);
   };
 
@@ -1079,14 +1444,17 @@ export function App() {
         pendingWire.length = 0;
         setWireRows([]);
         setPendingNew(0);
-        setSelectedArticle(null);
+        // Keep the selected row: a reconnect snapshot preserves the focused
+        // story, so the user's row must not jump back to the newest one.
         setLastSeq(message.seq);
+        setStoryContexts(message.summaries);
         liveGlobe?.setInit(message);
-        if (message.recentWire.length) enqueueWire(message.recentWire);
+        if (message.recentWire.length) enqueueWire(message.recentWire, true);
         break;
       case "patch":
         workerBounds = message.bounds;
         setLastSeq(message.seq);
+        rememberStoryContexts(message.summaries);
         liveGlobe?.queuePatch(message);
         for (const hit of message.alerts) handleAlertHit(hit);
         enqueueWire(message.wire);
@@ -1100,6 +1468,7 @@ export function App() {
         setWireRows([]);
         setPendingNew(0);
         setLastSeq(0);
+        setStoryContexts([]);
         break;
     }
   };
@@ -1112,12 +1481,30 @@ export function App() {
             seen: seen.size,
             visible: wireRows().length,
             pending: pendingWire.length,
-            brief: briefCache.size,
+            brief: briefs.size,
             details: detailsCache.size,
             why: whyCache.size,
             prefetched: prefetched.size,
             worker: workerBounds,
           };
+        },
+        get selection() {
+          const key = selectedArticle();
+          const item = key ? wireRows().find((row) => row.key === key) : undefined;
+          return {
+            key,
+            storyId: item?.row.storyId ?? null,
+            title: item?.row.title ?? null,
+            focusedStoryId: focus()?.storyId ?? null,
+            focusedTitle: focus()?.story.title ?? null,
+            connection: connection(),
+            lastSeq: lastSeq(),
+          };
+        },
+        get rows() {
+          return articleRows()
+            .slice(0, 200)
+            .map((row) => ({ key: row.key, storyId: row.storyId, displayIndex: row.displayIndex }));
         },
       };
     }
@@ -1129,6 +1516,8 @@ export function App() {
       await ensureSession();
       if (disposed) return;
       void loadAlerts();
+      void loadHistogram();
+      histogramTimer = setInterval(() => void loadHistogram(), 60_000);
       const { LiveGlobe } = await import("./globe/runtime");
       if (disposed) return;
       liveGlobe = new LiveGlobe(mapContainer, {
@@ -1136,15 +1525,28 @@ export function App() {
         onFocus: createFocusHandler<FocusDetails>(setFocus, (details) => {
           if (details) {
             pendingInitialStory = null;
-            const matching = wireRows().find((item) => item.row.storyId === details.storyId);
-            setSelectedArticle(matching?.key ?? null);
-            setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
+            const rows = wireRows().map((item) => ({
+              key: item.key,
+              storyId: item.row.storyId,
+            }));
+            // Only a story change may move the selected row; a metadata
+            // refresh of the same story keeps the user's row.
+            const nextSelection =
+              keepSelectionForStory(selectedArticle(), rows, details.storyId) ??
+              selectionKeyForStory(rows, details.storyId, requestedSelection);
+            requestedSelection = null;
+            setSelectedArticle(nextSelection);
+            briefs.showCached(details.storyId);
             setStoryDetails(detailsCache.get(details.storyId) ?? null);
-            void loadStoryText(details.storyId);
+            void briefs.load(details.storyId);
             void loadStoryDetails(details.storyId);
             worker?.postMessage({ type: "focus", storyId: details.storyId });
             syncHash(details.storyId);
+            // Explicit focus actions open the mid-width drawer; ↑/↓ walks
+            // (moveSelection) suppress this so a closed drawer stays closed.
+            if (!suppressPanelAutoOpen) setSidePanelOpen(true);
           } else {
+            requestedSelection = null;
             setSelectedArticle(null);
             setThreadOnly(false);
             setSelectedLink(null);
@@ -1157,6 +1559,11 @@ export function App() {
         onView: (nextView) => {
           setView(nextView);
           scheduleHash();
+        },
+        onContextRestored: () => {
+          // Custom GPU state cannot survive a context loss; ask the worker for
+          // one authoritative snapshot (no camera move, focus is preserved).
+          worker?.postMessage({ type: "refresh" });
         },
       });
       liveGlobe.setStrengthFloor(layerFloor());
@@ -1185,16 +1592,18 @@ export function App() {
       // Seed filters/prompts before start so the first socket greeting
       // carries them ahead of Hello and the resume snapshot is projected
       // with the app's real prompt set.
-      worker.postMessage({ type: "filters", filters: filters() });
+      worker.postMessage({ type: "filters", filters: workerFilters(filters()) });
       worker.postMessage({ type: "prompts", prompts: prompts() });
       worker.postMessage({
         type: "start",
         mode:
           initialQuery.get("perf") === "1"
             ? "perf"
-            : initialQuery.get("mock") === "1"
-              ? "mock"
-              : "live",
+            : initialQuery.get("wirefixture") === "1"
+              ? "wirefixture"
+              : initialQuery.get("mock") === "1"
+                ? "mock"
+                : "live",
       });
       const frame = (): void => {
         if (disposed) return;
@@ -1215,21 +1624,50 @@ export function App() {
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
 
     const onKey = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null;
-      const typing =
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable === true;
+      // ⌘K works everywhere, including from an input.
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         searchInput?.focus();
         return;
       }
       if (event.key === "Escape") {
+        // Never consume Esc while the user is typing.
+        if (isTypingTarget(event.target)) return;
+        // Esc closes the topmost open panel. Consuming the event also keeps
+        // the runtime Esc handler from clearing globe focus behind it.
+        if (alertsOpen()) {
+          event.preventDefault();
+          setAlertsOpen(false);
+          return;
+        }
+        if (selectedLink()) {
+          event.preventDefault();
+          setSelectedLink(null);
+          return;
+        }
+        if (filterPanelOpen()) {
+          event.preventDefault();
+          setFilterPanelOpen(false);
+          return;
+        }
+        if (layersOpen()) {
+          event.preventDefault();
+          setLayersOpen(false);
+          return;
+        }
+        if (searchOpen()) {
+          event.preventDefault();
+          setSearchOpen(false);
+          return;
+        }
+      }
+      // Typing, dialogs and open panels own the keyboard: q/Esc/arrows must
+      // not change globe focus or walk the wire behind them.
+      if (shouldIgnoreGlobeKeys(event, document)) return;
+      if (event.key === "Escape") {
         setSearchOpen(false);
         setSelectedLink(null);
       }
-      if (typing) return;
       if (event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
         setPerfOverlay((value) => !value);
@@ -1251,36 +1689,115 @@ export function App() {
       liveGlobe?.destroy();
       liveGlobe = null;
       if (clockTimer !== null) clearInterval(clockTimer);
+      if (histogramTimer !== null) clearInterval(histogramTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
+      briefs.dispose();
+      if (hashTimer !== null) clearTimeout(hashTimer);
+      if (ntfyCopyTimer !== null) clearTimeout(ntfyCopyTimer);
     });
   });
 
+  const articleRows = (): Array<{ key: string; storyId: string; displayIndex: number }> =>
+    displayRows().flatMap((row, displayIndex) =>
+      row.kind === "article" ? [{ key: row.key, storyId: row.item.row.storyId, displayIndex }] : [],
+    );
+
+  const focusStory = (storyId: string): void => {
+    // Adjacent rows of the same story only move the selection; they must not
+    // refocus the globe, refly the camera, or reload the panel.
+    if (!storyId || focus()?.storyId === storyId) return;
+    liveGlobe?.focusStoryId(storyId);
+  };
+
+  // Fill a missing selection for the focused story once rows exist (deep link
+  // or a reconnect that no longer contains the old row). A valid selected row
+  // is never replaced here.
+  createEffect(() => {
+    const details = focus();
+    if (!details) return;
+    const rows = wireRows().map((item) => ({ key: item.key, storyId: item.row.storyId }));
+    const current = selectedArticle();
+    if (current && rows.some((row) => row.key === current)) return;
+    const key = selectionKeyForStory(rows, details.storyId);
+    if (key) setSelectedArticle(key);
+  });
+
   const moveSelection = (delta: number): void => {
-    const rows = displayRows()
-      .filter(
-        (row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article",
-      )
-      .map((row) => row.item);
-    if (rows.length === 0) return;
-    const current = rows.findIndex((item) => item.key === selectedArticle());
-    const next = Math.max(0, Math.min(rows.length - 1, current < 0 ? 0 : current + delta));
-    const item = rows[next];
-    if (!item) return;
+    const rows = articleRows();
+    const next = nextSelectionIndex(rows, selectedArticle(), delta);
+    if (next === null) return;
+    const item = rows[next]!;
+    requestedSelection = item.key;
     setSelectedArticle(item.key);
-    if (item.row.storyId) liveGlobe?.focusStoryId(item.row.storyId);
+    // Keyboard walk keeps the selected row centred: estimated row heights are
+    // unreliable for wrapped headlines, and centring is always fully visible.
+    virtualizer.scrollToIndex(item.displayIndex, { align: "center" });
+    suppressPanelAutoOpen = true;
+    try {
+      focusStory(item.storyId);
+    } finally {
+      suppressPanelAutoOpen = false;
+    }
+  };
+
+  const moveStorySelection = (delta: number): void => {
+    const rows = articleRows();
+    const next = nextDistinctStoryIndex(rows, focus()?.storyId ?? null, selectedArticle(), delta);
+    if (next === null) return;
+    const item = rows[next]!;
+    requestedSelection = item.key;
+    setSelectedArticle(item.key);
+    virtualizer.scrollToIndex(item.displayIndex, { align: "center" });
+    suppressPanelAutoOpen = true;
+    try {
+      focusStory(item.storyId);
+    } finally {
+      suppressPanelAutoOpen = false;
+    }
   };
 
   const selectArticle = (item: WireItem): void => {
+    requestedSelection = item.key;
     setSelectedArticle(item.key);
-    if (item.row.storyId) liveGlobe?.focusStoryId(item.row.storyId);
+    focusStory(item.row.storyId);
   };
 
   const clearFocus = (): void => {
     liveGlobe?.clearFocus();
     setFocus(null);
     setSelectedArticle(null);
+    setSelectedLink(null);
+    setSidePanelOpen(false);
   };
+
+  const goLive = (): void => {
+    setNow(Date.now());
+    void loadHistogram();
+    resumeAndFlush();
+  };
+
+  const partOfStory = createMemo(() => {
+    const details = focus();
+    if (!details || view().zoom < 13.5) return null;
+    const primary = details.story.locations[details.story.primary] ?? details.story.locations[0];
+    if (!primary) return null;
+    const km = distanceKm(view().center[1], view().center[0], primary.lat, primary.lon);
+    const direction =
+      km < 0.05
+        ? "here"
+        : `${km.toFixed(km >= 10 ? 0 : 1)} km ${bearingLabel(
+            view().center[1],
+            view().center[0],
+            primary.lat,
+            primary.lon,
+          )} ←`;
+    return {
+      title: details.story.title,
+      precision: precisionLabel(primary.precision).toLowerCase(),
+      direction,
+    };
+  });
 
   const focusTopStory = (story: StorySummary): void => {
     liveGlobe?.focusStoryId(story.id);
@@ -1294,50 +1811,176 @@ export function App() {
     });
   };
 
+  const liveLabel = createMemo(() => connectionLabel(connection()));
+  const connectionStatus = createMemo(() => connectionStatusCopy(connection()));
+
+  /** Links grouped by strength, matching board M2's tiers. */
+  const linkTiers = createMemo(() => groupLinksByStrength(focus()?.hud.links ?? []));
+
+  const ntfyAlerts = createMemo(() =>
+    alertList().filter((alert) => Boolean(alert.ntfy_topic) && alert.channels.includes("ntfy")),
+  );
+
+  const copyNtfyTopic = async (topic: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(topic);
+    } catch {
+      return;
+    }
+    setNtfyCopied(topic);
+    if (ntfyCopyTimer !== null) clearTimeout(ntfyCopyTimer);
+    ntfyCopyTimer = setTimeout(() => setNtfyCopied(null), 1600);
+  };
+
+  // A modal dialog owns the page: background controls are inert, not just
+  // visually behind the drawer. Re-apply as children mount (toasts, mobile
+  // sheet) so nothing outside the dialog stays interactive. Runs before the
+  // focus-restore effect below.
+  const applyInert = (): void => {
+    for (const child of document.querySelectorAll<HTMLElement>(".app3 > *")) {
+      if (child.classList.contains("alerts-drawer")) continue;
+      child.setAttribute("inert", "");
+    }
+  };
+  const clearInert = (): void => {
+    for (const child of document.querySelectorAll<HTMLElement>(".app3 > *")) {
+      child.removeAttribute("inert");
+    }
+  };
+  createEffect(() => {
+    if (alertsOpen()) {
+      applyInert();
+      const root = document.querySelector(".app3");
+      if (!inertObserver && root && typeof MutationObserver !== "undefined") {
+        inertObserver = new MutationObserver(() => {
+          if (alertsOpen()) applyInert();
+        });
+        inertObserver.observe(root, { childList: true });
+      }
+    } else {
+      inertObserver?.disconnect();
+      inertObserver = null;
+      clearInert();
+    }
+  });
+  onCleanup(() => {
+    inertObserver?.disconnect();
+    inertObserver = null;
+    clearInert();
+  });
+
+  // Modal focus: remember the opener, move focus in, restore it on close.
+  createEffect(() => {
+    if (alertsOpen()) {
+      const active = document.activeElement;
+      alertsReturnFocus = active instanceof HTMLElement ? active : null;
+      queueMicrotask(() => alertsDialog?.focus());
+    } else if (alertsReturnFocus) {
+      const target = alertsReturnFocus;
+      alertsReturnFocus = null;
+      if (target.isConnected) target.focus();
+    }
+  });
+
+  const dialogFocusables = (): HTMLElement[] => {
+    if (!alertsDialog) return [];
+    const selector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    return [...alertsDialog.querySelectorAll<HTMLElement>(selector)].filter(
+      (element) => element.getAttribute("aria-hidden") !== "true",
+    );
+  };
+
+  const onAlertsKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setAlertsOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const nodes = dialogFocusables();
+    if (nodes.length === 0) {
+      event.preventDefault();
+      alertsDialog?.focus();
+      return;
+    }
+    const active = document.activeElement as HTMLElement | null;
+    const current = active === null ? -1 : nodes.indexOf(active);
+    const next = nextTabStop(nodes.length, current, event.shiftKey);
+    if (next === null) return;
+    event.preventDefault();
+    nodes[next]!.focus();
+  };
+
   return (
-    <div class="app3">
+    <div class={`app3 ${sidePanelOpen() ? "drawer-open" : ""}`}>
       <header class="topbar">
         <div class="brand">
           <span class="mark" />
           <span class="word">DOR</span>
         </div>
-        <span class={`live ${connection() === "online" ? "" : "muted-live"}`}>
-          {connection() === "online" ? "LIVE" : "LIVE"}
+        <span
+          class={`live ${connection() === "online" ? "" : "muted-live"} ${connection()}`}
+          title={`Gateway ${connection()}`}
+        >
+          {liveLabel()}
         </span>
         <label class={`search ${searchFocused() ? "focused" : ""}`}>
           <span aria-hidden="true">⌕</span>
           <input
             ref={searchInput}
             type="text"
+            role="combobox"
             value={searchQuery()}
             placeholder="Search stories, places, people"
+            aria-autocomplete="list"
+            aria-expanded={searchOpen()}
+            aria-controls="search-listbox"
+            aria-activedescendant={
+              searchActive() >= 0 ? searchOptions()[searchActive()]?.id : undefined
+            }
             onFocus={() => {
               setSearchFocused(true);
+              if (suppressSearchOpen) {
+                suppressSearchOpen = false;
+                return;
+              }
               setSearchOpen(true);
+              setSearchActive(-1);
             }}
             onBlur={() => {
               setSearchFocused(false);
-              setTimeout(() => setSearchOpen(false), 150);
+              setTimeout(() => {
+                const active = document.activeElement;
+                if (active instanceof HTMLElement && active.closest(".search-results")) return;
+                closeSearch();
+              }, 150);
             }}
             onInput={(event) => {
               const query = event.currentTarget.value;
               setSearchQuery(query);
               setSearchOpen(true);
+              setSearchActive(-1);
               void searchPlaces(query);
             }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.stopPropagation();
-                setSearchOpen(false);
+                closeSearch();
                 searchInput.blur();
+              } else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSearchOpen(true);
+                moveSearchActive(1);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSearchOpen(true);
+                moveSearchActive(-1);
               } else if (event.key === "Enter") {
-                const first = searchResults()[0];
-                if (first) {
-                  liveGlobe?.focusStoryId(first.story.id);
-                  setSearchQuery("");
-                  setSearchOpen(false);
-                  searchInput.blur();
-                }
+                event.preventDefault();
+                if (searchActive() >= 0) activateSearchOption(searchActive());
+                else if (searchOptions().length > 0) activateSearchOption(0);
               }
             }}
             aria-label="Search stories, places and people"
@@ -1345,25 +1988,39 @@ export function App() {
           <span class="kbd">⌘K</span>
         </label>
         <Show when={searchOpen()}>
-          <div class="search-results glass" onMouseDown={(event) => event.preventDefault()}>
-            <span class="cap">
-              {searchQuery().trim() ? `${searchResults().length} stories` : "Top stories"}
+          <div
+            id="search-listbox"
+            class="search-results glass"
+            role="listbox"
+            aria-label="Search results"
+            onKeyDown={onSearchListKeyDown}
+            onFocusOut={(event) => {
+              const next = event.relatedTarget;
+              if (next instanceof Node && event.currentTarget.contains(next)) return;
+              closeSearch();
+            }}
+          >
+            <span class="cap" aria-hidden="true">
+              {searchQuery().trim() ? `${searchOptions().length} results` : "Top stories"}
             </span>
             <Show
               when={searchResults().length > 0}
-              fallback={<div class="search-none">No story matches “{searchQuery()}”.</div>}
+              fallback={
+                <div class="search-none" role="option" aria-disabled="true" aria-selected="false">
+                  No story matches “{searchQuery()}”.
+                </div>
+              }
             >
               <For each={searchResults()}>
-                {(result) => (
+                {(result, index) => (
                   <button
                     class="search-result"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      liveGlobe?.focusStoryId(result.story.id);
-                      setSearchQuery("");
-                      setSearchOpen(false);
-                      searchInput.blur();
-                    }}
+                    id={`search-story-${index()}`}
+                    role="option"
+                    aria-selected={searchActive() === index()}
+                    onFocus={() => setSearchActive(index())}
+                    onMouseEnter={() => setSearchActive(index())}
+                    onClick={() => activateSearchOption(index())}
                   >
                     <span class="dot" style={`--c:${hexColor(result.category)}`} />
                     <span class="h">
@@ -1378,27 +2035,30 @@ export function App() {
               </For>
             </Show>
             <Show when={cmdPlaces().length > 0}>
-              <span class="cap search-section">Places</span>
+              <span class="cap search-section" aria-hidden="true">
+                Places
+              </span>
               <For each={cmdPlaces()}>
-                {(place) => (
-                  <button
-                    class="search-result"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      liveGlobe?.flyTo([place.lon, place.lat], 10);
-                      setSearchQuery("");
-                      setCmdPlaces([]);
-                      setSearchOpen(false);
-                      searchInput.blur();
-                    }}
-                  >
-                    <span class="dot" style="--c:#5ef2ff" />
-                    <span class="h">
-                      <b>{place.name}</b>
-                      <small>{place.country || "Place"}</small>
-                    </span>
-                  </button>
-                )}
+                {(place, index) => {
+                  const optionIndex = (): number => searchResults().length + index();
+                  return (
+                    <button
+                      class="search-result"
+                      id={`search-place-${index()}`}
+                      role="option"
+                      aria-selected={searchActive() === optionIndex()}
+                      onFocus={() => setSearchActive(optionIndex())}
+                      onMouseEnter={() => setSearchActive(optionIndex())}
+                      onClick={() => activateSearchOption(optionIndex())}
+                    >
+                      <span class="dot" style="--c:#5ef2ff" />
+                      <span class="h">
+                        <b>{place.name}</b>
+                        <small>{place.country || "Place"}</small>
+                      </span>
+                    </button>
+                  );
+                }}
               </For>
             </Show>
           </div>
@@ -1433,14 +2093,9 @@ export function App() {
           </For>
         </div>
         <div class="right">
-          <Show when={connection() !== "online"}>
+          <Show when={connection() !== "online" && reconnectIn() !== null}>
             <span class="reconnect" title={health().detail}>
-              {connection() === "connecting"
-                ? "CONNECTING"
-                : connection() === "reconnecting"
-                  ? "RECONNECTING"
-                  : "OFFLINE"}
-              {reconnectIn() !== null ? ` · ${Math.ceil(reconnectIn()! / 1000)}s` : ""}
+              retry {Math.ceil(reconnectIn()! / 1000)}s
             </span>
           </Show>
           <span class={`health ${healthClass(health())}`} title={health().detail}>
@@ -1470,7 +2125,7 @@ export function App() {
         </div>
       </header>
 
-      <aside class={`wire mobile-tab-${mobileTab()}`}>
+      <aside class={`wire mobile-tab-${mobileTab()}`} aria-label="Live wire">
         <div class="mobile-tabs" role="tablist" aria-label="Mobile sections">
           <For each={["wire", "threads", "near", "alerts"] as const}>
             {(tab) => (
@@ -1496,7 +2151,7 @@ export function App() {
         <div class="wire-head">
           <div class="r1">
             <h2>Live wire</h2>
-            <span class="rate" title="Articles received in the last minute">
+            <span class="rate" title="Articles in the last minute">
               <i>
                 <For each={rateBars()}>{(height) => <b style={`height:${height}%`} />}</For>
               </i>
@@ -1518,6 +2173,7 @@ export function App() {
             <button
               class="ibtn filter-btn"
               aria-pressed={filterPanelOpen()}
+              aria-label="Filters"
               title="Filters"
               onClick={() => setFilterPanelOpen((open) => !open)}
             >
@@ -1538,7 +2194,7 @@ export function App() {
                 <span>Sources</span>
                 <input
                   value={filters().sources.join(", ")}
-                  placeholder="bbc-world, reuters"
+                  placeholder="Economic Times, BBC News"
                   onInput={(event) =>
                     updateFilters({
                       sources: event.currentTarget.value
@@ -1668,7 +2324,7 @@ export function App() {
                 {focus()!.story.title.length > 34
                   ? `${focus()!.story.title.slice(0, 34)}…`
                   : focus()!.story.title}
-                <button class="x" title="Clear focus" onClick={clearFocus}>
+                <button class="x" title="Clear focus" aria-label="Clear focus" onClick={clearFocus}>
                   ×
                 </button>
               </span>
@@ -1725,6 +2381,7 @@ export function App() {
                     <button
                       class="x"
                       title="Remove prompt"
+                      aria-label={`Remove prompt ${prompt}`}
                       onClick={() => updatePrompts(prompts().filter((item) => item !== prompt))}
                     >
                       ×
@@ -1749,6 +2406,7 @@ export function App() {
           onMouseMove={() => setPausedByHover(true)}
           onMouseLeave={() => setPausedByHover(false)}
           onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+          role="region"
           aria-label="Live article wire"
           data-paused={paused()}
           data-hover={pausedByHover()}
@@ -1761,14 +2419,8 @@ export function App() {
             when={displayRows().length > 0}
             fallback={
               <div class="wire-empty">
-                <span class="cap">
-                  {connection() === "online" ? "Listening" : "Gateway unavailable"}
-                </span>
-                <p>
-                  {connection() === "online"
-                    ? "Waiting for the first article. The wire fills as sources publish."
-                    : "The data worker is reconnecting. Existing rows stay in place."}
-                </p>
+                <span class="cap">{connectionStatus().title}</span>
+                <p>{connectionStatus().body}</p>
                 <span class="wire-empty-meta mono">
                   seq {lastSeq()} · {connection()}
                 </span>
@@ -1781,6 +2433,11 @@ export function App() {
                   const display = () => displayRows()[virtualRow.index];
                   return (
                     <div
+                      data-index={virtualRow.index}
+                      ref={(element) => {
+                        element.setAttribute("data-index", String(virtualRow.index));
+                        virtualizer.measureElement(element);
+                      }}
                       class={`wr ${
                         display()?.kind === "article" &&
                         selectedArticle() ===
@@ -1845,6 +2502,17 @@ export function App() {
                           if (item?.kind !== "article") return null;
                           const row = item.item.row;
                           const color = hexColor(row.category);
+                          const story = storyContext(row.storyId);
+                          const place = wirePlace(row, story?.place);
+                          const provenance = wireMetadataProvenance(row);
+                          const join = wireJoin(row, story);
+                          const tooltip = [
+                            row.title,
+                            place.title,
+                            provenance.approx ? provenance.title : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ");
                           return (
                             <button
                               class="wr-body"
@@ -1852,19 +2520,33 @@ export function App() {
                               onClick={() => selectArticle(item.item)}
                               onMouseEnter={() => rowEnter(row.storyId)}
                               onMouseLeave={rowLeave}
-                              title={row.title}
+                              title={tooltip}
+                              data-wire-at={wirePublishMs(row, item.item.receivedAt)}
+                              data-wire-key={item.item.key}
                             >
                               <time>{wireTime(row, item.item.receivedAt)}</time>
                               <span class="dot" />
                               <span class="h">
-                                <span class="ws">{sourceName(row.source)}</span>
-                                <span class="title">{row.title || "Untitled article"}</span>
-                                <Show when={joinText(row)}>
-                                  <span class="join">{joinText(row)}</span>
+                                <span class="hl">
+                                  <span class="ws-line">
+                                    <span class="ws">{wireSourceName(row)}</span>
+                                    <Show when={provenance.approx}>
+                                      <span class="approx" aria-hidden="true">
+                                        ≈ approx
+                                      </span>
+                                    </Show>
+                                  </span>
+                                  <span class="title">{row.title || "Untitled article"}</span>
+                                </span>
+                                <Show when={join}>
+                                  <span class="join">{join}</span>
                                 </Show>
                               </span>
-                              <span class="pl">
-                                {row.place || "—"}
+                              <span
+                                class={`pl ${place.global ? "global" : ""}`}
+                                data-place={place.global ? "global" : place.text}
+                              >
+                                <span class="pl-name">{place.text}</span>
                                 <Show when={prompts().length > 0 && activeScore(row) > 0}>
                                   <span
                                     class="match-score"
@@ -1894,7 +2576,7 @@ export function App() {
           </Show>
         </div>
         <div class="wfoot">
-          <span class="cap">Hover pauses · ↑ ↓ to select</span>
+          <span class="cap desktop-only">Hover pauses · ↑ ↓ to select</span>
           <span class="cap">{lastSeq() > 0 ? `seq ${lastSeq()}` : "newest first"}</span>
         </div>
         <Show when={mobileTab() !== "wire"}>
@@ -1909,7 +2591,10 @@ export function App() {
                     <p class="ttl">{story.story.title}</p>
                     <div class="foot">
                       <span>{story.place}</span>
-                      <span>strongest {story.strongestLink.toFixed(2)}</span>
+                      <span title="Strongest verified link">
+                        strongest{" "}
+                        {story.strongestVerified > 0 ? story.strongestVerified.toFixed(2) : "—"}
+                      </span>
                     </div>
                   </button>
                 )}
@@ -1954,7 +2639,12 @@ export function App() {
       </aside>
 
       <main class="stage">
-        <div ref={mapContainer} class="map-host" aria-label="Live globe" />
+        <div
+          ref={mapContainer}
+          class="map-host"
+          role="region"
+          aria-label="Live globe of located stories"
+        />
         <div class="hud-corners" />
         <div class="zoom-rail glass">
           <For
@@ -1970,7 +2660,7 @@ export function App() {
             {([label, zoom]) => (
               <button
                 aria-current={zoomBand().label === label}
-                onClick={() => liveGlobe?.flyTo(view().center, zoom)}
+                onClick={() => liveGlobe?.flyToBand(label, zoom)}
               >
                 {label}
               </button>
@@ -1978,18 +2668,18 @@ export function App() {
           </For>
           <span class="cap">{view().zoom.toFixed(1)}</span>
         </div>
-        <div class="stage-crumbs cap">
-          {zoomBand().label} · {focus()?.hud.story.place ?? "Global"}
-        </div>
-        <div class="tl">
-          <span class="cap">
+        <Show when={zoomBand().label !== "GLOBE"}>
+          <div class="stage-crumbs cap">
             {focus()
-              ? `Focused · ${focus()!.hud.story.place.toUpperCase()}`
-              : "Ambient · no selection"}
-          </span>
+              ? `${zoomBand().label} · ${compactPlaceName(focus()!.hud.story.place)}`
+              : zoomBand().label}
+          </div>
+        </Show>
+        <div class="tl">
+          <span class="cap">{focus() ? "FOCUSED THREAD" : "AMBIENT · NO SELECTION"}</span>
           <Show when={focus()}>
             <button class="back" onClick={clearFocus}>
-              ← GLOBAL VIEW (Esc)
+              ← GLOBAL VIEW <span class="desktop-only">(Esc)</span>
             </button>
           </Show>
           <span class="big">{focus() ? focus()!.story.title : "Global · live"}</span>
@@ -1998,11 +2688,26 @@ export function App() {
               {focus()!.hud.story.sources} sources · {focus()!.hud.links.length} direct links
             </span>
           </Show>
+          <Show when={globe().match.active && globe().match.matched === 0}>
+            <div class="no-matches glass mono">No stories match this filter · globe dimmed</div>
+          </Show>
+          <Show when={partOfStory()}>
+            {(part) => (
+              <div class="part-story glass">
+                <span class="cap">● Part of story</span>
+                <b>{part().title}</b>
+                <span class="mono">
+                  {part().precision} · centre {part().direction}
+                </span>
+              </div>
+            )}
+          </Show>
         </div>
         <div class="tr">
           <button
             class="ibtn"
             aria-pressed={globe().secondDegree}
+            aria-label="Second-degree links"
             title="Second-degree links"
             onClick={() => {
               liveGlobe?.setSecondDegree(!globe().secondDegree);
@@ -2012,8 +2717,19 @@ export function App() {
             ⋯
           </button>
           <button
+            class="ibtn panel-toggle"
+            aria-label="Story panel"
+            aria-expanded={sidePanelOpen()}
+            aria-controls="story-panel"
+            title="Story panel"
+            onClick={() => setSidePanelOpen((open) => !open)}
+          >
+            ▤
+          </button>
+          <button
             class="ibtn"
             aria-pressed={layersOpen()}
+            aria-label="Layers"
             title="Layers"
             onClick={() => setLayersOpen((open) => !open)}
           >
@@ -2107,7 +2823,17 @@ export function App() {
               />
             </div>
             <div class="ln2">
-              Coastline when zoomed in <span class="kbd">M5</span>
+              Coastline when zoomed in
+              <button
+                class={`sw2 ${layerCoastline() ? "" : "off"}`}
+                aria-pressed={layerCoastline()}
+                aria-label="Toggle coastline"
+                onClick={() => {
+                  const next = !layerCoastline();
+                  setLayerCoastline(next);
+                  liveGlobe?.setCoastlineVisible(next);
+                }}
+              />
             </div>
             <div class="ln2">
               Perf overlay
@@ -2125,12 +2851,13 @@ export function App() {
         <Show when={globe().storyCount === 0}>
           <div class="stage-empty glass">
             <span class="cap">
-              {connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}
+              {connection() === "online" ? "Waiting for live data" : connectionStatus().title}
             </span>
             <h3>Articles first. Stories next.</h3>
             <p>
-              The wire is live now. The globe fills when the classifier publishes its first located
-              stories.
+              {connection() === "online"
+                ? "The wire is live now. The globe fills when the classifier publishes its first located stories."
+                : "The globe fills when the gateway connects and the classifier publishes its first located stories."}
             </p>
             <span class="mono">
               {wireRows().length} wire rows · {storyCount()} stories
@@ -2166,15 +2893,38 @@ export function App() {
               strong
             </span>
           </div>
+          <Show when={globe().scale}>
+            {(scale) => (
+              <div class="scalebar mono" title="Map scale">
+                <i style={`width:${Math.round(scale().px)}px`} />
+                <span>{scale().km >= 1 ? `${scale().km} km` : `${scale().km * 1000} m`}</span>
+              </div>
+            )}
+          </Show>
         </div>
         <div class="br">
-          <button class="ibtn" title="Zoom in" onClick={() => liveGlobe?.zoomIn()}>
+          <button
+            class="ibtn"
+            title="Zoom in"
+            aria-label="Zoom in"
+            onClick={() => liveGlobe?.zoomIn()}
+          >
             +
           </button>
-          <button class="ibtn" title="Zoom out" onClick={() => liveGlobe?.zoomOut()}>
+          <button
+            class="ibtn"
+            title="Zoom out"
+            aria-label="Zoom out"
+            onClick={() => liveGlobe?.zoomOut()}
+          >
             −
           </button>
-          <button class="ibtn" title="Reset view" onClick={() => liveGlobe?.resetView()}>
+          <button
+            class="ibtn"
+            title="Reset view"
+            aria-label="Reset view"
+            onClick={() => liveGlobe?.resetView()}
+          >
             ◎
           </button>
         </div>
@@ -2184,6 +2934,7 @@ export function App() {
               <button
                 class="rim"
                 title={`Rotate to ${marker.label}`}
+                aria-label={`Rotate to ${marker.label}`}
                 onClick={() => liveGlobe?.flyTo(marker.center, marker.zoom)}
               >
                 {marker.count > 1 ? `+${marker.count} ` : "◂ "}
@@ -2202,12 +2953,18 @@ export function App() {
                 >
                   {typeName(link().type)} · {directionLabel(link())}
                 </span>
-                <button class="text-btn" onClick={() => setSelectedLink(null)}>
+                <button
+                  class="text-btn"
+                  aria-label="Close link details"
+                  onClick={() => setSelectedLink(null)}
+                >
                   ×
                 </button>
               </div>
-              <h3>{link().aTitle}</h3>
-              <h4>→ {link().bTitle}</h4>
+              <h3>{linkOrder(link()).first.title}</h3>
+              <h4>
+                {linkOrder(link()).arrow} {linkOrder(link()).second.title}
+              </h4>
               <div class="facts">
                 <span>
                   <b>{link().strength.toFixed(2)}</b> strength
@@ -2230,7 +2987,7 @@ export function App() {
                     : "Why unavailable for this link yet."}
               </p>
               <div class="arc-popover-foot">
-                <span class="agentk">WHY · agent · cached</span>
+                <span class="agentk">WHY · agent{linkWhyCached() ? " · cached" : ""}</span>
                 <button class="text-btn" onClick={() => void reportWrongLink(link())}>
                   {linkReported() ? "reported" : "report wrong link"}
                 </button>
@@ -2260,7 +3017,21 @@ export function App() {
         </span>
       </main>
 
-      <aside class="side">
+      <aside
+        id="story-panel"
+        class={`side ${sidePanelOpen() ? "side-open" : ""}`}
+        aria-label="Story panel"
+      >
+        <div class="side-panel-bar">
+          <span class="cap">Story panel</span>
+          <button
+            class="text-btn"
+            aria-label="Hide story panel"
+            onClick={() => setSidePanelOpen(false)}
+          >
+            ×
+          </button>
+        </div>
         <Show
           when={focus()}
           fallback={
@@ -2291,7 +3062,7 @@ export function App() {
                           <span>{story.place}</span>
                           <span>
                             strongest{" "}
-                            {story.strongestLink > 0 ? story.strongestLink.toFixed(2) : "—"}
+                            {story.strongestVerified > 0 ? story.strongestVerified.toFixed(2) : "—"}
                           </span>
                         </div>
                       </button>
@@ -2307,13 +3078,20 @@ export function App() {
               <div class="sec side-head">
                 <span class="cap" style={`color:${hexColor(details().story.category)}`}>
                   {categoryLabel(details().story.category)} · Story
+                  <Show when={storyDetails()?.story.category_backend === "rule"}>
+                    <span class="approx"> · approx</span>
+                  </Show>
                 </span>
-                <button class="text-btn" onClick={clearFocus}>
+                <button
+                  class="text-btn"
+                  aria-label="Clear focus and show global view"
+                  onClick={clearFocus}
+                >
                   Global view ×
                 </button>
               </div>
               <div class="sec">
-                <h1>{details().story.title}</h1>
+                <h1>{storyText()?.title || details().story.title}</h1>
                 <div class="facts">
                   <span>
                     first seen <b>{relativeTime(Number(details().story.firstSeen), now())}</b>
@@ -2326,15 +3104,44 @@ export function App() {
                   </span>
                 </div>
               </div>
+              <Show when={view().zoom >= 8 && distanceRows().length > 0}>
+                <div class="sec distance-list">
+                  <span class="cap">
+                    Distances from{" "}
+                    {focus() ? compactPlaceName(focus()!.live.place) : "the focused story"}
+                  </span>
+                  <For each={distanceRows().slice(0, 4)}>
+                    {(link) => (
+                      <span class="distance-row">
+                        <b>{compactPlaceName(link.place)}</b>
+                        <span class="mono">
+                          {(link.distanceKm ?? 0) >= 1000
+                            ? `${Math.round(link.distanceKm ?? 0).toLocaleString("en-US")} km`
+                            : `${(link.distanceKm ?? 0).toFixed((link.distanceKm ?? 0) >= 10 ? 0 : 1)} km`}
+                        </span>
+                      </span>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <div class="sec">
-                <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
+                <Show when={storyText()?.available && storyText()?.provenance === "generated"}>
+                  <span class="agentk">
+                    AGENT BRIEF · from {details().hud.story.sources} sources
+                  </span>
+                </Show>
+                <Show when={storyText()?.available && storyText()?.provenance === "source_snippet"}>
+                  <span class="agentk">
+                    SOURCE EXCERPT · from {details().hud.story.sources} sources
+                  </span>
+                </Show>
                 <Show
                   when={storyText()?.available}
                   fallback={
                     <p class="brief muted">
                       {storyText()?.loading
                         ? "Generating brief…"
-                        : "Brief not available yet. The story remains readable from its sources and places."}
+                        : "No agent brief for this story. The headline and sources stand on their own."}
                     </p>
                   }
                 >
@@ -2342,25 +3149,35 @@ export function App() {
                 </Show>
               </div>
               <div class="sec">
-                <span class="cap">Places</span>
-                <For each={details().story.locations.slice(0, 6)}>
-                  {(place, index) => (
+                <span class="cap">
+                  Places
+                  <Show when={storyDetails()?.story.place_degraded}>
+                    <span class="approx"> · approx</span>
+                  </Show>
+                </span>
+                <For each={places().slice(0, 8)}>
+                  {(place) => (
                     <div class="place">
                       <span
-                        class={index() === details().story.primary ? "fill" : "ring"}
+                        class={place.key === primaryPlaceKey() ? "fill" : "ring"}
                         style={`--c:${hexColor(details().story.category)}`}
                       />
                       <span class="role">{roleLabel(place.role)}</span>
-                      <span class="place-name">{place.name || "Unknown place"}</span>
-                      <span class="prec">{precisionLabel(place.precision)}</span>
+                      <span class="place-name" title={place.fullName}>
+                        {place.name}
+                      </span>
+                      <span class="prec">
+                        {precisionLabel(place.precision)}
+                        {place.count > 1 ? ` ×${place.count}` : ""}
+                      </span>
                     </div>
                   )}
                 </For>
-                <Show when={details().story.locations.length > 6}>
-                  <span class="cap">+{details().story.locations.length - 6} more places</span>
+                <Show when={places().length > 8}>
+                  <span class="cap">+{places().length - 8} more places</span>
                 </Show>
-                <Show when={details().hud.parties.length > 3}>
-                  <span class="cap">Multi-region · {details().hud.parties.length} parties</span>
+                <Show when={partyCount() > 6}>
+                  <span class="cap">Multi-region · {partyCount()} parties</span>
                 </Show>
               </div>
               <Show when={storyDetails()}>
@@ -2403,24 +3220,7 @@ export function App() {
               </Show>
               <Show when={details().hud.links.length > 0}>
                 <div class="sec side-links">
-                  <For
-                    each={[
-                      {
-                        label: "Strongly linked",
-                        links: details().hud.links.filter((link) => link.strength >= 0.75),
-                      },
-                      {
-                        label: "Related",
-                        links: details().hud.links.filter(
-                          (link) => link.strength >= 0.5 && link.strength < 0.75,
-                        ),
-                      },
-                      {
-                        label: "Loosely linked",
-                        links: details().hud.links.filter((link) => link.strength < 0.5),
-                      },
-                    ].filter((tier) => tier.links.length > 0)}
-                  >
+                  <For each={linkTiers()}>
                     {(tier) => (
                       <>
                         <div class="tierh">
@@ -2439,7 +3239,7 @@ export function App() {
                             >
                               <span class="k">
                                 {typeName(link.type)}{" "}
-                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "·"}{" "}
                                 {link.unverified ? "unverified · " : ""}
                                 {link.place.toUpperCase()}
                               </span>
@@ -2478,70 +3278,112 @@ export function App() {
       </aside>
 
       <Show when={focus()}>
-        <div
-          class="mobile-story glass"
-          onTouchStart={(event) => {
-            touchStartY = event.touches[0]?.clientY ?? 0;
-          }}
-          onTouchEnd={(event) => {
-            const endY = event.changedTouches[0]?.clientY ?? touchStartY;
-            if (Math.abs(endY - touchStartY) < 48) return;
-            moveSelection(endY < touchStartY ? 1 : -1);
-          }}
-        >
+        <div class="mobile-story glass" role="region" aria-label="Focused story">
+          {/* Only the handle switches stories; the body below scrolls. */}
+          <div
+            class="mobile-story-grab"
+            aria-hidden="true"
+            onTouchStart={(event) => {
+              sheetTouchStartY = event.touches[0]?.clientY ?? 0;
+            }}
+            onTouchEnd={(event) => {
+              const endY = event.changedTouches[0]?.clientY ?? sheetTouchStartY;
+              const direction = sheetSwipeDirection(sheetTouchStartY, endY);
+              if (direction !== 0) moveStorySelection(direction);
+            }}
+          />
           <div class="mobile-story-head">
+            <button class="text-btn" aria-label="Back to the wire" onClick={clearFocus}>
+              ← Wire
+            </button>
             <span class="cap">Focused story</span>
-            <button class="text-btn" onClick={clearFocus}>
+            <button
+              class="text-btn mobile-story-close"
+              aria-label="Close story"
+              onClick={clearFocus}
+            >
               ×
             </button>
           </div>
-          <h2>{focus()!.story.title}</h2>
-          <div class="facts">
-            <span>
-              <b>{focus()!.hud.story.sources}</b> sources
-            </span>
-            <span>
-              <b>{focus()!.hud.links.length}</b> links
-            </span>
-            <span>{focus()!.hud.story.place}</span>
-          </div>
-          <Show
-            when={storyText()?.available}
-            fallback={<p class="brief muted">Brief not available yet.</p>}
-          >
-            <p class="brief">{storyText()!.brief}</p>
-          </Show>
-          <Show when={focus()!.hud.links.length > 0}>
-            <div class="mobile-links">
-              <For each={focus()!.hud.links.slice(0, 3)}>
-                {(link) => (
-                  <button
-                    class="mobile-link"
-                    onClick={() => {
-                      const info = liveGlobe?.linkInfo(link.index);
-                      if (info) openLink(info);
-                    }}
-                  >
-                    <span>
-                      {typeName(link.type)} · {link.place}
-                    </span>
-                    <b>{link.strength.toFixed(2)}</b>
-                  </button>
-                )}
-              </For>
+          <div class="mobile-story-scroll">
+            <h2>{storyText()?.title || focus()!.story.title}</h2>
+            <div class="facts">
+              <span>
+                <b>{focus()!.hud.story.sources}</b> sources
+              </span>
+              <span>
+                <b>{focus()!.hud.links.length}</b> links
+              </span>
+              <span>{focus()!.hud.story.place}</span>
             </div>
-          </Show>
+            <Show
+              when={storyText()?.available}
+              fallback={<p class="brief muted">Brief not available yet.</p>}
+            >
+              <p class="brief">{storyText()!.brief}</p>
+            </Show>
+            <Show when={focus()!.hud.links.length > 0}>
+              <div class="mobile-links">
+                <For each={linkTiers()}>
+                  {(tier) => (
+                    <>
+                      <div class="tierh">
+                        <span class="cap">{tier.label}</span>
+                        <span class="cap">{tier.links.length}</span>
+                      </div>
+                      <For each={tier.links}>
+                        {(link) => (
+                          <button
+                            class="mobile-link"
+                            onClick={() => {
+                              const info = liveGlobe?.linkInfo(link.index);
+                              if (info) openLink(info);
+                            }}
+                          >
+                            <span class="mobile-link-main">
+                              <span class="mobile-link-k">
+                                {typeName(link.type)}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "·"}{" "}
+                                {link.place}
+                              </span>
+                              <span class="mobile-link-t">{link.title}</span>
+                            </span>
+                            <b>{link.strength.toFixed(2)}</b>
+                          </button>
+                        )}
+                      </For>
+                    </>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+          <span class="mobile-story-swipe">DRAG HANDLE ↕ · NEXT / PREVIOUS</span>
         </div>
       </Show>
 
       <Show when={alertsOpen()}>
-        <div class="alerts-drawer glass" role="dialog" aria-label="Alerts">
+        <div
+          ref={alertsDialog}
+          class="alerts-drawer glass"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="alerts-title"
+          aria-describedby="alerts-desc"
+          tabindex="-1"
+          onKeyDown={onAlertsKeyDown}
+        >
           <div class="alerts-head">
-            <span class="cap">Alerts</span>
-            <button class="text-btn" onClick={() => setAlertsOpen(false)}>
+            <span class="cap" id="alerts-title">
+              Alerts
+            </span>
+            <button class="text-btn" aria-label="Close alerts" onClick={() => setAlertsOpen(false)}>
               ×
             </button>
           </div>
+          <p class="alerts-desc" id="alerts-desc">
+            Prompt alerts fire when a matching story appears. Create, mute or backtest one here.
+          </p>
           <div class="alert-form">
             <label class="filter-field">
               <span>Prompt</span>
@@ -2600,7 +3442,7 @@ export function App() {
                         setAlertDraftChannels([...new Set(channels)]);
                       }}
                     />
-                    {channel}
+                    {channelLabel(channel)}
                   </label>
                 )}
               </For>
@@ -2645,12 +3487,14 @@ export function App() {
                     <div class="alert-title">
                       <b>{alert.prompt}</b>
                       <span class="cap">
-                        {alert.channels.join(" · ")} · strict {alert.strictness.toFixed(2)}
+                        {alert.channels.map(channelLabel).join(" · ")} · strict{" "}
+                        {alert.strictness.toFixed(2)}
                       </span>
                     </div>
                     <div class="alert-item-actions">
                       <button
                         class={`sw2 ${alert.enabled ? "" : "off"}`}
+                        aria-pressed={alert.enabled}
                         aria-label={`${alert.enabled ? "Disable" : "Enable"} alert`}
                         onClick={() => void toggleAlert(alert)}
                       />
@@ -2679,6 +3523,34 @@ export function App() {
               </For>
             </Show>
           </div>
+          <Show when={ntfyAlerts().length > 0}>
+            <div class="ntfy-block">
+              <span class="cap">Phone alerts · ntfy</span>
+              <p>
+                Install the ntfy app on your phone and subscribe to each topic below (use the same
+                ntfy server Dor is configured with). Enable “phone (ntfy)” on an alert to send it
+                there.
+              </p>
+              <For each={ntfyAlerts()}>
+                {(alert) => (
+                  <div class="ntfy-row">
+                    <code>{alert.ntfy_topic}</code>
+                    <button
+                      class="chip"
+                      aria-label={`Copy ntfy topic ${alert.ntfy_topic}`}
+                      onClick={() => void copyNtfyTopic(alert.ntfy_topic!)}
+                    >
+                      {ntfyCopied() === alert.ntfy_topic ? "Copied" : "Copy"}
+                    </button>
+                    <small>{alert.prompt}</small>
+                    <span class="sr-only" role="status" aria-live="polite">
+                      {ntfyCopied() === alert.ntfy_topic ? "Topic copied" : ""}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
           <div class="push-row">
             <div>
               <span class="cap">Browser push</span>
@@ -2739,15 +3611,22 @@ export function App() {
           fallback={
             <>
               <div class="tlrow">
-                <span class="cap" style="width:78px">
+                <span
+                  class="cap"
+                  style="width:78px"
+                  title={
+                    timeline().real
+                      ? `${timeline().total.toLocaleString()} articles in the last 24 h (database)`
+                      : (timeline().error ?? "History unavailable")
+                  }
+                >
                   Last 24h
                 </span>
                 <div class="bars">
-                  <For each={timelineBars()}>{(height) => <i style={`height:${height}%`} />}</For>
-                  <span class="win" />
+                  <For each={timeline().bars}>{(height) => <i style={`height:${height}%`} />}</For>
                   <span class="now" />
                 </div>
-                <button class="chip" aria-pressed="true">
+                <button class="chip" title="Jump to the newest articles" onClick={goLive}>
                   ● Live
                 </button>
               </div>
@@ -2769,19 +3648,21 @@ export function App() {
               <For each={focusTimeline()}>
                 {(event) => (
                   <button
-                    class="ev"
+                    class={`ev ${event.showLabel ? "" : "dotonly"}`}
                     style={`left:${event.left}%;--c:${event.color}`}
-                    title={event.label}
+                    title={event.title}
+                    aria-label={event.title}
+                    onClick={() => liveGlobe?.focusStoryId(event.storyId)}
                   >
-                    {event.label}
+                    {event.showLabel ? event.label : ""}
                   </button>
                 )}
               </For>
             </div>
           </div>
           <div class="ticks">
-            <span>first seen</span>
-            <span>linked stories</span>
+            <span>{threadStartLabel()}</span>
+            <span>linked stories at their last update</span>
             <span>now</span>
           </div>
         </Show>

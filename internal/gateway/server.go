@@ -188,6 +188,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /api/stories", s.handleStories)
 	mux.HandleFunc("GET /api/stories/{id}", s.handleStoryDetail)
+	mux.HandleFunc("GET /api/histogram", s.handleHistogram)
 	mux.HandleFunc("GET /api/places", s.handlePlaces)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/alerts", s.handleAlertsList)

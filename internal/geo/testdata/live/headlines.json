@@ -1,0 +1,151 @@
+[
+  {
+    "title": "Philly Marathon attracts 40,000 runners",
+    "allowed": []
+  },
+  {
+    "title": "Woman ran and completed all 7 world marathon majors this year while pregnant",
+    "allowed": []
+  },
+  {
+    "title": "Bolehkah makan es krim saat sakit tenggorokan? Ini faktanya",
+    "allowed": []
+  },
+  {
+    "title": "Dopamine detox bisa atur ulang otak? Ini penjelasan faktanya",
+    "allowed": []
+  },
+  {
+    "title": "From House to court",
+    "allowed": []
+  },
+  {
+    "title": "Conselho Europeu propõe imposto de 3% sobre receita de big techs",
+    "allowed": []
+  },
+  {
+    "title": "From screens in class to smart glasses, Norway rethinks new technologies",
+    "allowed": [
+      "country:NO"
+    ]
+  },
+  {
+    "title": "Revealed: Big salaries of two Bafana Bafana players",
+    "allowed": []
+  },
+  {
+    "title": "Big U-turn for South Africa’s petrol and diesel prices",
+    "allowed": [
+      "country:ZA"
+    ]
+  },
+  {
+    "title": "Trump Wants Jensen Huang Back After a “Big Apology”",
+    "allowed": []
+  },
+  {
+    "title": "Mpraeso MP challenges Big Push figures in 2027 Budget",
+    "allowed": []
+  },
+  {
+    "title": "From Nestor's Chronicle to Wartime Slang: Lecture Traces the Long Life of the Ukrainian Language",
+    "allowed": []
+  },
+  {
+    "title": "From drones to paragliders: Azerbaijan’s border service reports drug smuggling by air from Iran",
+    "allowed": [
+      "country:AZ",
+      "country:IR"
+    ]
+  },
+  {
+    "title": "From AI Pilots to Islamic Finance: Banking’s Digital Shift in Uzbekistan",
+    "allowed": [
+      "country:UZ"
+    ]
+  },
+  {
+    "title": "BTS raih lima penghargaan termasuk dua trofi utama di MAMA Awards 2026",
+    "allowed": []
+  },
+  {
+    "title": "Imole Marathon: NANS Southwest applauds Gov Adeleke, Joseph for rewarding talent",
+    "allowed": []
+  },
+  {
+    "title": "Anthropic’s journey from start-up to stock market giant | Infographics",
+    "allowed": []
+  },
+  {
+    "title": "2027 Politics Watch: From two ADC court rulings to Obi’s 10,000MW pledge",
+    "allowed": []
+  },
+  {
+    "title": "From ASEAN to APEC: Highlights From a Busy Week of Asian Summitry",
+    "allowed": []
+  },
+  {
+    "title": "Big change to TIPPING in restaurants in South Africa",
+    "allowed": [
+      "country:ZA"
+    ]
+  },
+  {
+    "title": "EU mulls tax on Big Tech to boost budget",
+    "allowed": []
+  },
+  {
+    "title": "Five dreamy Kiwi baches you can buy for under $500k (except one – sorry!)",
+    "allowed": []
+  },
+  {
+    "title": "A View From the Easel: Rei Xiao",
+    "allowed": []
+  },
+  {
+    "title": "Layar laptop hitam total tapi masih menyala? Ini 4 cara mengatasinya",
+    "allowed": []
+  },
+  {
+    "title": "Illinois couple loses appeal over fence installed after trespassing and car theft",
+    "allowed": [
+      "admin:US.IL",
+      "country:US"
+    ]
+  },
+  {
+    "title": "Gubernur Lampung: Target pada 2027 jalan di 600 desa diperbaiki",
+    "allowed": [
+      "admin:ID.15",
+      "country:ID"
+    ]
+  },
+  {
+    "title": "WEATHER: Thunderstorms to hit Gauteng over the weekend",
+    "allowed": [
+      "admin:ZA.06",
+      "country:ZA"
+    ]
+  },
+  {
+    "title": "State lawmakers file bills to repeal Texas’ bans on DEI in public schools, higher education",
+    "allowed": [
+      "admin:US.TX",
+      "country:US"
+    ]
+  },
+  {
+    "title": "California professor outearns college chancellor by making $800,000 a year teaching 30 online courses",
+    "allowed": [
+      "admin:US.CA",
+      "country:US"
+    ]
+  },
+  {
+    "title": "BFMTV: France’s right-wing National Rally party headquarters raided in Paris",
+    "allowed": [
+      "2988507",
+      "country:FR"
+    ]
+  }
+]

@@ -15,6 +15,7 @@ import {
   SetPromptsSchema,
   ServerMessageSchema,
   type ClientMessage,
+  type Delta,
 } from "../gen/dor/v1/dor_pb";
 import type {
   SourceHealth,
@@ -25,6 +26,8 @@ import type {
 } from "./messages";
 import { LiveState } from "./state";
 import { transferablesOf, type FeedMessage } from "./messages";
+import { DeltaSequence } from "./sequence";
+import { resolveSocketUrl } from "./url";
 
 const statusScope = globalThis as unknown as {
   postMessage(message: WorkerMessage, transfer?: ArrayBuffer[]): void;
@@ -35,6 +38,9 @@ const debug: Record<string, unknown> = {
   snapshots: 0,
   batches: 0,
   deltas: 0,
+  duplicates: 0,
+  gaps: 0,
+  resyncRequests: 0,
   wires: 0,
   lastType: null,
   lastError: null,
@@ -43,13 +49,7 @@ const debug: Record<string, unknown> = {
 statusScope.__dorWorker = debug;
 
 const env = import.meta.env as Record<string, string | undefined>;
-const configuredUrl = env.VITE_WS_URL;
-const socketUrl =
-  configuredUrl && configuredUrl.length > 0
-    ? configuredUrl
-    : import.meta.env.DEV
-      ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`
-      : "ws://127.0.0.1:8080/ws";
+const socketUrl = resolveSocketUrl(env.VITE_WS_URL, location);
 const apiBase = (env.VITE_API_URL || "").replace(/\/$/, "");
 const healthUrl = env.VITE_HEALTH_URL || `${apiBase}/api/health`;
 
@@ -57,6 +57,7 @@ const healthUrl = env.VITE_HEALTH_URL || `${apiBase}/api/health`;
 export const SNAPSHOT_RECOVERY_TIMEOUT_MS = 30_000;
 
 const state = new LiveState();
+const sequencing = new DeltaSequence();
 let lastSeq = 0;
 let activeFilters: WireFilters | null = null;
 let activePrompts: string[] = [];
@@ -156,6 +157,60 @@ function awaitSnapshot(connection: WebSocket): void {
   }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
 }
 
+/**
+ * Apply one delta batch in order, dropping duplicates and out-of-order frames.
+ * The gateway keeps the global sequence contiguous by replacing per-client
+ * filtered deltas with seq-only no-ops, so a gap always means frames were lost:
+ * reconnect from the last contiguous seq so the gateway can replay them or
+ * answer with Resync + snapshot.
+ */
+function handleDeltaBatch(connection: WebSocket, batch: Delta[]): void {
+  let applied = 0;
+  let gapAt: number | null = null;
+  for (const delta of batch) {
+    const seq = Number(delta.seq);
+    const disposition = sequencing.classify(seq);
+    if (disposition === "duplicate") {
+      debug.duplicates = Number(debug.duplicates) + 1;
+      continue;
+    }
+    if (disposition === "gap") {
+      gapAt = seq;
+      break;
+    }
+    state.apply(delta);
+    sequencing.commit(seq);
+    applied++;
+  }
+  lastSeq = sequencing.lastSeq;
+  debug.deltas = Number(debug.deltas) + applied;
+  debug.wires = state.wire.size;
+  if (applied > 0) sendAck();
+  if (gapAt !== null) {
+    debug.gaps = Number(debug.gaps) + 1;
+    requestResync(connection, `delta gap at ${gapAt}`);
+    return;
+  }
+  postStatus("online");
+}
+
+/**
+ * Ask the gateway for a resync by resuming from the last contiguous sequence.
+ * Hello(last_seq) makes the hub replay the missing tail, or answer with
+ * Resync + snapshot when the ring no longer covers it. The old socket is
+ * retired first so its close callback cannot disturb the replacement.
+ */
+function requestResync(connection: WebSocket, reason: string): void {
+  if (socket !== connection) return;
+  debug.recovery = reason;
+  debug.resyncRequests = Number(debug.resyncRequests) + 1;
+  socket = null;
+  clearSnapshotTimer();
+  awaitingSnapshot = false;
+  connection.close(4002, reason);
+  scheduleReconnect(true);
+}
+
 async function handleBinary(data: Blob | ArrayBuffer, connection: WebSocket): Promise<void> {
   if (socket !== connection) return;
   debug.raw = Number(debug.raw) + 1;
@@ -177,6 +232,7 @@ async function handleBinary(data: Blob | ArrayBuffer, connection: WebSocket): Pr
       const seq = Number(snapshot.seq);
       const init = state.snapshot(snapshot.stories, snapshot.links, snapshot.recentWire, seq);
       lastSeq = seq;
+      sequencing.reset(seq);
       awaitingSnapshot = false;
       clearSnapshotTimer();
       debug.recovery = "ready";
@@ -192,17 +248,13 @@ async function handleBinary(data: Blob | ArrayBuffer, connection: WebSocket): Pr
       if (awaitingSnapshot) return;
       const batch = message.body.value.deltas;
       debug.batches = Number(debug.batches) + 1;
-      debug.deltas = Number(debug.deltas) + batch.length;
-      debug.wires = state.wire.size;
-      for (const delta of batch) state.apply(delta);
-      lastSeq = state.seq;
-      sendAck();
-      postStatus("online");
+      handleDeltaBatch(connection, batch);
       break;
     }
     case "resync": {
       lastSeq = 0;
       state.seq = 0;
+      sequencing.reset(0);
       awaitSnapshot(connection);
       statusScope.postMessage({
         type: "resync",
@@ -226,6 +278,26 @@ function scheduleReconnect(immediate = false): void {
     reconnectTimer = null;
     connect();
   }, delay);
+}
+
+/**
+ * Drop the current socket and request a fresh authoritative snapshot, keeping
+ * the app's focus. Used after a GPU context restore: the renderer rebuilt its
+ * buffers and needs the worker's current state rather than the next delta.
+ */
+function refreshFromGateway(): void {
+  if (stopped || !liveMode) return;
+  const previous = socket;
+  socket = null;
+  clearSnapshotTimer();
+  awaitingSnapshot = false;
+  if (previous) previous.close(4001, "client refresh");
+  sequencing.reset(0);
+  lastSeq = 0;
+  state.seq = 0;
+  reconnectAttempt = 0;
+  reconnectAt = 0;
+  connect();
 }
 
 function connect(): void {
@@ -333,6 +405,7 @@ statusScope.postMessage({
   health,
 });
 let started = false;
+let liveMode = false;
 let stopFeed: (() => void) | null = null;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 function mockMessage(message: FeedMessage): void {
@@ -347,12 +420,16 @@ function mockMessage(message: FeedMessage): void {
   } else if (message.type === "deltas") message.deltas.forEach((delta) => state.apply(delta));
   else statusScope.postMessage(message);
 }
-async function start(mode: "live" | "mock" | "perf"): Promise<void> {
+async function start(mode: "live" | "mock" | "perf" | "wirefixture"): Promise<void> {
   if (started) return;
   started = true;
+  liveMode = mode === "live";
   if (mode === "mock") {
     const { startMock } = await import("../live/mock");
     stopFeed = startMock(mockMessage).stop;
+  } else if (mode === "wirefixture") {
+    const { startWireFixture } = await import("../live/wire-fixture");
+    stopFeed = startWireFixture(mockMessage).stop;
   } else if (mode === "perf") {
     const { startPerfFeed } = await import("./perf-feed");
     stopFeed = startPerfFeed(mockMessage);
@@ -370,6 +447,8 @@ commandScope.onmessage = (event) => {
   const command = event.data;
   if (command?.type === "start") {
     void start(command.mode);
+  } else if (command?.type === "refresh") {
+    refreshFromGateway();
   } else if (command?.type === "frame") {
     const patch = awaitingSnapshot ? null : state.flush();
     if (patch) statusScope.postMessage(patch, transferablesOf(patch));

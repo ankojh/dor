@@ -104,7 +104,7 @@ func (n *normalizer) handle(ctx context.Context, msg *Message, out *Emitter) err
 		n.log.Debug("normalizer: dropped article", "raw_id", raw.Id, "reason", reason)
 		return nil
 	}
-	if reason := n.duplicate(ctx, clean); reason != "" {
+	if reason := n.claim(ctx, msg.ID(), clean); reason != "" {
 		n.drop(reason)
 		return nil
 	}
@@ -114,6 +114,8 @@ func (n *normalizer) handle(ctx context.Context, msg *Message, out *Emitter) err
 		return fmt.Errorf("normalizer: marshal clean article: %w", err)
 	}
 	if err := out.Publish(ctx, bus.SubjectArticleClean, data, bus.WithMsgID("clean:"+clean.Id)); err != nil {
+		// The exact claim stays; a retry of the same input id is allowed
+		// through, while a different source cannot race in behind it.
 		return fmt.Errorf("normalizer: publish clean: %w", err)
 	}
 	n.metrics.published.Inc()
@@ -148,12 +150,19 @@ func (n *normalizer) normalize(raw *dorv1.RawArticle) (*dorv1.Article, store.Art
 	if published <= 0 {
 		published = now.Unix()
 	}
-	publishedAt := time.Unix(published, 0).UTC()
-	lang := strings.TrimSpace(raw.Lang)
-	if lang == "" {
-		lang = "en"
+	// A source that reports local time as UTC (22:52 at 14:58 UTC) must not
+	// enter the pipeline in the future: clamp at ingest so the store, wire,
+	// story panel and worker LAG all agree. FetchedAt is the producer's clock.
+	limit := now.Unix()
+	if raw.FetchedAt > 0 && raw.FetchedAt < limit {
+		limit = raw.FetchedAt
 	}
-	id := ArticleID(canonical)
+	if published > limit {
+		published = limit
+	}
+	publishedAt := time.Unix(published, 0).UTC()
+	lang := resolveLanguage(raw.Lang, title, lede)
+	id := articleIDFor(canonical, raw.Hints)
 	clean := &dorv1.Article{
 		Id:          id,
 		SourceId:    raw.SourceId,
@@ -249,6 +258,22 @@ func trackingParam(key string) bool {
 func ArticleID(canonical string) string {
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
+}
+
+// articleIDFor folds a hazard event revision into the article identity. A
+// revised hazard (new magnitude, severity or alert level) is a new immutable
+// article instead of a duplicate URL, so the clusterer can merge it into the
+// existing story as an idempotent update. Non-revisioned articles keep the
+// canonical-URL identity.
+func articleIDFor(canonical string, hints *dorv1.RawHints) string {
+	if hints == nil {
+		return ArticleID(canonical)
+	}
+	event, revision := strings.TrimSpace(hints.GetEventId()), strings.TrimSpace(hints.GetRevision())
+	if event == "" || revision == "" {
+		return ArticleID(canonical)
+	}
+	return ArticleID(canonical + "#event=" + event + "@" + revision)
 }
 
 // cleanText unescapes HTML and removes tags, collapsing whitespace. It never
@@ -357,17 +382,55 @@ func simHashKeys(id string, h uint64) []string {
 	return keys
 }
 
-func (n *normalizer) duplicate(ctx context.Context, clean *dorv1.Article) string {
+// claim atomically reserves the canonical article id before the clean message
+// is published. Two concurrent normalizer workers cannot both emit the same
+// article, and a redelivery of the same raw input is allowed through so a
+// publish failure does not lose it. The stored value is the input message id.
+func (n *normalizer) claim(ctx context.Context, inputID string, clean *dorv1.Article) string {
 	kv := n.dedupeKV(ctx)
 	if kv == nil {
 		return ""
 	}
-	if _, err := kv.Get(ctx, "norm.exact."+clean.Id); err == nil {
-		return "exact"
-	} else if !isKVNotFound(err) {
-		n.metrics.dedupeErrors.Inc()
-		n.log.Warn("normalizer: exact dedupe lookup failed; continuing", "err", err)
+	// A hazard revision is a real update with near-identical text; the SimHash
+	// near-duplicate rule must not swallow it.
+	revisioned := clean.Hints != nil && strings.TrimSpace(clean.Hints.GetEventId()) != "" && strings.TrimSpace(clean.Hints.GetRevision()) != ""
+	if !revisioned {
+		if reason := n.nearDuplicate(ctx, kv, clean); reason != "" {
+			return reason
+		}
 	}
+	key := "norm.exact." + clean.Id
+	value := []byte(inputID)
+	if inputID == "" {
+		value = []byte("clean:" + clean.Id)
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		entry, err := kv.Get(ctx, key)
+		if err == nil {
+			if string(entry.Value()) == string(value) {
+				// Redelivery of the input that already claimed this id.
+				return ""
+			}
+			return "exact"
+		}
+		if !isKVNotFound(err) {
+			n.metrics.dedupeErrors.Inc()
+			n.log.Warn("normalizer: exact dedupe lookup failed; continuing", "err", err)
+			return ""
+		}
+		if _, err := kv.Create(ctx, key, value); err == nil {
+			return ""
+		} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			n.metrics.dedupeErrors.Inc()
+			n.log.Warn("normalizer: exact dedupe claim failed; continuing", "err", err)
+			return ""
+		}
+		// Lost the create race: re-read and decide against the winner.
+	}
+	return "exact"
+}
+
+func (n *normalizer) nearDuplicate(ctx context.Context, kv jetstream.KeyValue, clean *dorv1.Article) string {
 	text := clean.Title + " " + clean.Lede
 	if len(strings.Fields(text)) < 4 {
 		return ""
@@ -405,10 +468,6 @@ func (n *normalizer) remember(ctx context.Context, clean *dorv1.Article) {
 	kv := n.dedupeKV(ctx)
 	if kv == nil {
 		return
-	}
-	if _, err := kv.Put(ctx, "norm.exact."+clean.Id, []byte{1}); err != nil {
-		n.metrics.dedupeErrors.Inc()
-		n.log.Warn("normalizer: exact dedupe write failed", "err", err)
 	}
 	sim := SimHash(clean.Title + " " + clean.Lede)
 	if len(strings.Fields(clean.Title+" "+clean.Lede)) < 4 {

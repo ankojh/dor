@@ -3,7 +3,7 @@ import { categoryColor, categoryLabel } from "./encoding";
 import type { HudFocus } from "../worker/fake/protocol";
 
 export const STORY_LABEL_SOURCE = "dor-story-labels";
-const STORY_LABEL_LAYER = "dor-story-labels";
+export const STORY_LABEL_LAYER = "dor-story-labels";
 
 type LabelFeature = {
   type: "Feature";
@@ -16,7 +16,8 @@ function hex(rgb: readonly [number, number, number]): string {
 }
 
 export function storyLabel(category: number, place: string): string {
-  return `${categoryLabel(category).toUpperCase()} · ${place.toUpperCase()}`;
+  const compact = place.split(",")[0]?.trim() || place;
+  return `${categoryLabel(category).toUpperCase()} · ${compact.toUpperCase()}`;
 }
 
 export type AmbientLabel = { lng: number; lat: number; category: number; place: string };

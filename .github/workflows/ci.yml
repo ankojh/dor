@@ -11,6 +11,22 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: dor
+          POSTGRES_PASSWORD: dor
+          POSTGRES_DB: dor_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U dor -d dor_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DOR_TEST_DATABASE_URL: postgres://dor:dor@127.0.0.1:5433/dor_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 

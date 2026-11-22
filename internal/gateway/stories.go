@@ -25,6 +25,7 @@ type StoryStore interface {
 	GetArticlesByIDs(ctx context.Context, ids []string) ([]store.StoryArticle, error)
 	GetSources(ctx context.Context, ids []string) ([]store.SourceInfo, error)
 	SearchStories(ctx context.Context, query string, limit int) ([]store.StorySummary, error)
+	ArticleHistogram(ctx context.Context, start, end time.Time, bins int) (store.ArticleHistogram, error)
 }
 
 const storyArticleLimit = 20
@@ -37,17 +38,26 @@ type storyDetailJSON struct {
 }
 
 type storyJSON struct {
-	ID             string         `json:"id"`
-	Title          string         `json:"title"`
-	Brief          string         `json:"brief"`
-	BriefAvailable bool           `json:"brief_available"`
-	Category       string         `json:"category"`
-	SourceCount    int            `json:"source_count"`
-	Heat           float64        `json:"heat"`
-	FirstSeen      int64          `json:"first_seen"`
-	UpdatedAt      int64          `json:"updated_at"`
-	Primary        uint32         `json:"primary"`
-	Locations      []locationJSON `json:"locations"`
+	ID                 string         `json:"id"`
+	Title              string         `json:"title"`
+	TitleSource        string         `json:"title_source"`
+	Brief              string         `json:"brief"`
+	BriefAvailable     bool           `json:"brief_available"`
+	BriefSource        string         `json:"brief_source"`
+	Category           string         `json:"category"`
+	CategoryBackend    string         `json:"category_backend"`
+	CategoryConfidence float32        `json:"category_confidence"`
+	Degraded           bool           `json:"degraded"`
+	Fallback           bool           `json:"fallback"`
+	PlaceBackend       string         `json:"place_backend"`
+	PlaceDegraded      bool           `json:"place_degraded"`
+	PlaceFallback      bool           `json:"place_fallback"`
+	SourceCount        int            `json:"source_count"`
+	Heat               float64        `json:"heat"`
+	FirstSeen          int64          `json:"first_seen"`
+	UpdatedAt          int64          `json:"updated_at"`
+	Primary            uint32         `json:"primary"`
+	Locations          []locationJSON `json:"locations"`
 }
 
 type locationJSON struct {
@@ -58,6 +68,7 @@ type locationJSON struct {
 	Precision string  `json:"precision"`
 	Role      string  `json:"role"`
 	Weight    float32 `json:"weight"`
+	Country   string  `json:"country"`
 }
 
 type articleJSON struct {
@@ -191,14 +202,18 @@ func (s *Server) currentStory(ctx context.Context, id string) (storyDetailJSON, 
 			sort.SliceStable(articles, func(i, j int) bool { return articles[i].PublishedAt.After(articles[j].PublishedAt) })
 		}
 	}
-	brief, briefOK := "", false
+	brief, briefOK, briefSource := "", false, live.BriefNone
 	if s.cfg.Text != nil {
 		if t, ok := s.cfg.Text.Story(ctx, id); ok {
 			brief, briefOK = t.Brief, t.Available
+			briefSource = t.Provenance
+			if briefSource == "" {
+				briefSource = live.BriefNone
+			}
 		}
 	}
 	return storyDetailJSON{
-		Story:             storyFromProto(story, brief, briefOK),
+		Story:             storyFromProto(story, brief, briefOK, briefSource),
 		Articles:          articlesJSON(articles, s.sourcesFor(ctx, articles)),
 		Sources:           sourcesJSON(s.sourcesFor(ctx, articles)),
 		ArticlesTruncated: truncated,
@@ -208,13 +223,27 @@ func (s *Server) currentStory(ctx context.Context, id string) (storyDetailJSON, 
 func (s *Server) detailFromStore(ctx context.Context, d store.StoryDetail) storyDetailJSON {
 	brief := d.Brief
 	briefOK := strings.TrimSpace(brief) != ""
+	briefSource := d.BriefSource
+	if briefSource == "" {
+		briefSource = live.BriefNone
+		if briefOK {
+			briefSource = live.BriefSourceSnippet
+		}
+	}
 	if s.cfg.Text != nil {
 		if t, ok := s.cfg.Text.Story(ctx, d.ID); ok && t.Available {
 			brief, briefOK = t.Brief, true
+			briefSource = t.Provenance
+			if briefSource == "" {
+				briefSource = live.BriefGenerated
+			}
 		}
 	}
+	if !briefOK && briefSource == live.BriefGenerated {
+		briefSource = live.BriefNone
+	}
 	return storyDetailJSON{
-		Story:             storyFromStore(d, brief, briefOK),
+		Story:             storyFromStore(d, brief, briefOK, briefSource),
 		Articles:          articlesJSON(d.Articles, d.Sources),
 		Sources:           sourcesJSON(d.Sources),
 		ArticlesTruncated: d.ArticlesTruncated,
@@ -240,7 +269,7 @@ func (s *Server) kvArticles(ctx context.Context, kv jetstream.KeyValue, ids []st
 	return out
 }
 
-func storyFromProto(story *dorv1.Story, brief string, briefOK bool) storyJSON {
+func storyFromProto(story *dorv1.Story, brief string, briefOK bool, briefSource string) storyJSON {
 	locations := make([]locationJSON, 0, len(story.Locations))
 	for _, l := range story.Locations {
 		if l == nil {
@@ -249,30 +278,157 @@ func storyFromProto(story *dorv1.Story, brief string, briefOK bool) storyJSON {
 		locations = append(locations, locationJSON{
 			PlaceID: l.PlaceId, Name: l.Name, Lat: float64(l.Lat), Lon: float64(l.Lon),
 			Precision: precisionName(l.Precision), Role: roleName(l.Role), Weight: l.Weight,
+			Country: l.Country,
 		})
 	}
+	primary := story.Primary
+	deduped := dedupeLocationJSON(locations)
+	if int(primary) < len(locations) {
+		key := locationKey(locations[primary])
+		for index, location := range deduped {
+			if locationKey(location) == key {
+				primary = uint32(index)
+				break
+			}
+		}
+	}
 	return storyJSON{
-		ID: story.Id, Title: story.Title, Brief: brief, BriefAvailable: briefOK,
-		Category: categoryName(int16(story.Category)), SourceCount: int(story.SourceCount),
-		Heat: float64(story.Heat), FirstSeen: story.FirstSeen, UpdatedAt: story.UpdatedAt,
-		Primary: story.Primary, Locations: locations,
+		ID: story.Id, Title: story.Title, TitleSource: story.GetTitleSource(),
+		Brief: brief, BriefAvailable: briefOK, BriefSource: briefSource,
+		Category: categoryName(int16(story.Category)), CategoryBackend: story.GetCategoryBackend(),
+		CategoryConfidence: story.GetCategoryConfidence(), Degraded: story.GetDegraded(),
+		Fallback: story.GetFallback(), PlaceBackend: story.GetPlaceBackend(),
+		PlaceDegraded: story.GetPlaceDegraded(), PlaceFallback: story.GetPlaceFallback(),
+		SourceCount: int(story.SourceCount),
+		Heat:        float64(story.Heat), FirstSeen: story.FirstSeen, UpdatedAt: story.UpdatedAt,
+		Primary: primary, Locations: deduped,
 	}
 }
 
-func storyFromStore(d store.StoryDetail, brief string, briefOK bool) storyJSON {
+func storyFromStore(d store.StoryDetail, brief string, briefOK bool, briefSource string) storyJSON {
 	locations := make([]locationJSON, 0, len(d.Locations))
 	for _, l := range d.Locations {
 		locations = append(locations, locationJSON{
 			PlaceID: l.PlaceID, Name: l.Name, Lat: l.Lat, Lon: l.Lon,
 			Precision: precisionName(dorv1.Precision(l.Precision)),
 			Role:      roleName(dorv1.Role(l.Role)), Weight: l.Weight,
+			Country: l.Country,
 		})
 	}
+	primary := d.Primary
+	deduped := dedupeLocationJSON(locations)
+	if int(primary) < len(locations) {
+		key := locationKey(locations[primary])
+		for index, location := range deduped {
+			if locationKey(location) == key {
+				primary = uint32(index)
+				break
+			}
+		}
+	}
 	return storyJSON{
-		ID: d.ID, Title: d.Title, Brief: brief, BriefAvailable: briefOK,
-		Category: categoryName(d.Category), SourceCount: d.SourceCount, Heat: d.Heat,
+		ID: d.ID, Title: d.Title, TitleSource: d.TitleSource,
+		Brief: brief, BriefAvailable: briefOK, BriefSource: briefSource,
+		Category: categoryName(d.Category), CategoryBackend: d.CategoryBackend,
+		CategoryConfidence: d.CategoryConfidence, Degraded: d.Degraded, Fallback: d.Fallback,
+		PlaceBackend: d.PlaceBackend, PlaceDegraded: d.PlaceDegraded, PlaceFallback: d.PlaceFallback,
+		SourceCount: d.SourceCount, Heat: d.Heat,
 		FirstSeen: d.FirstSeen.Unix(), UpdatedAt: d.UpdatedAt.Unix(),
-		Primary: d.Primary, Locations: locations,
+		Primary: primary, Locations: deduped,
+	}
+}
+
+// storyLocationLimit bounds one panel's place list. The first entry is the
+// story's primary place and is never moved or dropped.
+const storyLocationLimit = 12
+
+// dedupeLocationJSON collapses repeated place rows from different source
+// articles (the live review saw "Berlin, Berlin, Germany" three times) while
+// keeping the most decisive role and the most precise coordinate for a place.
+// Order is preserved so the primary stays first.
+func dedupeLocationJSON(in []locationJSON) []locationJSON {
+	if len(in) <= 1 {
+		return in
+	}
+	out := make([]locationJSON, 0, len(in))
+	seen := make(map[string]int, len(in))
+	for _, location := range in {
+		key := locationKey(location)
+		if at, ok := seen[key]; ok {
+			previous := &out[at]
+			if rolePriority(location.Role) < rolePriority(previous.Role) {
+				previous.Role = location.Role
+			}
+			if precisionPriority(location.Precision) > precisionPriority(previous.Precision) {
+				previous.Precision = location.Precision
+				previous.Lat = location.Lat
+				previous.Lon = location.Lon
+				previous.PlaceID = location.PlaceID
+				if location.Country != "" {
+					previous.Country = location.Country
+				}
+			}
+			if previous.Country == "" {
+				previous.Country = location.Country
+			}
+			if previous.PlaceID == "" {
+				previous.PlaceID = location.PlaceID
+			}
+			previous.Weight += location.Weight
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, location)
+	}
+	if len(out) > storyLocationLimit {
+		out = out[:storyLocationLimit]
+	}
+	return out
+}
+
+func locationKey(location locationJSON) string {
+	name := location.Name
+	for i, r := range name {
+		if r == ',' {
+			name = name[:i]
+			break
+		}
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	// Coordinates are rounded to ~1 km so a city centroid from the gazetteer
+	// and the same city from Photon collapse without moving the dot.
+	return name + "|" +
+		strconv.FormatFloat(location.Lat, 'f', 2, 64) + "," +
+		strconv.FormatFloat(location.Lon, 'f', 2, 64)
+}
+
+func rolePriority(role string) int {
+	switch role {
+	case "venue":
+		return 0
+	case "origin":
+		return 1
+	case "party":
+		return 2
+	case "affected":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func precisionPriority(precision string) int {
+	switch precision {
+	case "point":
+		return 4
+	case "street":
+		return 3
+	case "city":
+		return 2
+	case "region":
+		return 1
+	default:
+		return 0
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"archive/zip"
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +24,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -39,6 +43,8 @@ type Place struct {
 	Name        string
 	Normalized  string
 	Admin       string
+	AdminCode   string
+	RegionAlias string
 	Country     string
 	CountryCode string
 	Lat         float64
@@ -61,42 +67,72 @@ type Country struct {
 // Gazetteer is an in-memory name index. It is safe for concurrent reads after
 // Load returns.
 type Gazetteer struct {
-	byName      map[string][]Place
-	skip        map[string]struct{}
-	countries   map[string]Country
-	byCountry   map[string][]Place
-	names       []string
-	majors      []Place
-	countryList []Place
-	loaded      bool
-	loadedNames int
+	byName           map[string][]Place
+	byID             map[string]Place
+	aliases          map[string][]string
+	skip             map[string]struct{}
+	countries        map[string]Country
+	byCountry        map[string][]Place
+	regionPopulation map[string]int64
+	names            []string
+	majors           []Place
+	countryList      []Place
+	fingerprint      string
+	loaded           bool
+	loadedNames      int
 }
 
 // Load downloads (once) and indexes the GeoNames files under dir. The context
 // bounds both the downloads and the file reads.
 func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error) {
+	return load(ctx, dir, log, true)
+}
+
+// LoadExisting is the repair/audit loader. It never downloads or creates data:
+// an incomplete cache must not silently select a different dataset at apply.
+func LoadExisting(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error) {
+	return load(ctx, dir, log, false)
+}
+
+func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool) (*Gazetteer, error) {
 	if dir == "" {
 		dir = DefaultDir
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("geo: create cache %s: %w", dir, err)
+	var citiesPath, countryPath, admin1Path string
+	var err error
+	if allowDownload {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		citiesPath, err = ensureCities(ctx, dir)
+		if err != nil {
+			return nil, err
+		}
+		countryPath, err = ensureFile(ctx, dir, "countryInfo.txt", countryURL)
+		if err != nil {
+			return nil, err
+		}
+		admin1Path, err = ensureFile(ctx, dir, "admin1CodesASCII.txt", admin1URL)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		for _, name := range []string{"cities15000.txt", "countryInfo.txt", "admin1CodesASCII.txt"} {
+			info, statErr := os.Stat(filepath.Join(dir, name))
+			if statErr != nil {
+				return nil, fmt.Errorf("geo: existing dataset %s: %w", name, statErr)
+			}
+			if !info.Mode().IsRegular() || info.Size() == 0 {
+				return nil, fmt.Errorf("geo: incomplete existing dataset: %s", name)
+			}
+		}
+		citiesPath = filepath.Join(dir, "cities15000.txt")
+		countryPath = filepath.Join(dir, "countryInfo.txt")
+		admin1Path = filepath.Join(dir, "admin1CodesASCII.txt")
 	}
-	citiesPath, err := ensureCities(ctx, dir)
-	if err != nil {
-		return nil, err
-	}
-	countryPath, err := ensureFile(ctx, dir, "countryInfo.txt", countryURL)
-	if err != nil {
-		return nil, err
-	}
-	admin1Path, err := ensureFile(ctx, dir, "admin1CodesASCII.txt", admin1URL)
-	if err != nil {
-		return nil, err
-	}
-
 	countries, err := readCountries(countryPath)
 	if err != nil {
 		return nil, err
@@ -109,8 +145,13 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 	if err != nil {
 		return nil, err
 	}
+	if !allowDownload && (len(countries) == 0 || len(admin1) == 0 || len(places) == 0) {
+		return nil, fmt.Errorf("geo: incomplete existing dataset: no valid countries, regions or populated places")
+	}
 	g := &Gazetteer{
 		byName:    make(map[string][]Place, len(places)*2),
+		byID:      make(map[string]Place),
+		aliases:   make(map[string][]string),
 		skip:      ambiguousNames(),
 		countries: make(map[string]Country, len(countries)),
 		byCountry: make(map[string][]Place, len(countries)),
@@ -118,6 +159,19 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 	}
 	for _, p := range places {
 		g.add(p)
+		if p.Normalized == normalize(p.Name) {
+			for _, form := range []string{expandedPlaceName(p.Name), abbreviatedPlaceName(p.Name)} {
+				if form != p.Normalized {
+					g.addAlias(form, p)
+				}
+			}
+			// Index the short form of a multiword "... City" name independently
+			// of GeoNames' bounded alternate-name list. Dateline matching still
+			// validates the candidate's jurisdiction and population.
+			if short, ok := strings.CutSuffix(p.Normalized, " city"); ok && len(strings.Fields(short)) >= 2 {
+				g.addAlias(short, p)
+			}
+		}
 	}
 	for code, c := range countries {
 		countryPlace := Place{
@@ -129,8 +183,8 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 			CountryID:   true,
 			Feature:     "PCLI",
 		}
-		// The capital city is the country centroid fallback. A countryInfo
-		// capital is a name, not a coordinate; resolve it from the city list.
+		// A known capital is on a supported populated-place coordinate. A
+		// weighted centre may lie offshore or in another jurisdiction.
 		if capPlace, ok := g.capitalPlace(code, c.Capital); ok {
 			countryPlace.Lat, countryPlace.Lon = capPlace.Lat, capPlace.Lon
 		}
@@ -138,12 +192,26 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 		g.add(countryPlace)
 	}
 	// Add country and admin names as aliases after cities exist, so a country
-	// candidate can carry its capital coordinates.
+	// candidate can carry its supported capital coordinates.
 	for code, c := range countries {
 		cp := g.countries[code].Place
 		g.addAlias(c.Name, cp)
+		g.addAlias(code, cp)
+		g.addAlias(c.ISO3, cp)
+		if code == "PS" {
+			g.addAlias("Palestine", cp)
+		}
+		if code == "US" {
+			g.addAlias("U.S.", cp)
+			g.addAlias("U.S.A.", cp)
+		} else if code == "GB" {
+			g.addAlias("UK", cp)
+			g.addAlias("U.K.", cp)
+		}
 		cp.ID = "country:" + code
-		g.byCountry[code] = append(g.byCountry[code], cp)
+		if ValidCoordinates(cp.Lat, cp.Lon) {
+			g.byCountry[code] = append(g.byCountry[code], cp)
+		}
 	}
 	for key, name := range admin1 {
 		parts := strings.SplitN(key, ".", 2)
@@ -157,15 +225,44 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 				Name:        name,
 				Normalized:  normalize(name),
 				Admin:       name,
+				AdminCode:   parts[1],
 				Country:     cp.Name,
 				CountryCode: code,
 				Feature:     "ADM1",
 			}
+			if lat, lon, ok := regionCentre(places, code, parts[1]); ok {
+				alias.Lat, alias.Lon = lat, lon
+			} else {
+				// An unsupported region is only as precise as its country.
+				alias = cp.Place
+				alias.RegionAlias = name
+			}
 			g.addAlias(name, alias)
+			for _, form := range []string{expandedPlaceName(name), abbreviatedPlaceName(name)} {
+				if form != normalize(name) {
+					g.addAlias(form, alias)
+				}
+			}
 		}
 	}
 	g.buildSearchIndex()
 	g.loadedNames = len(g.byName)
+	h := sha256.New()
+	for _, path := range []string{citiesPath, countryPath, admin1Path} {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		_, copyErr := io.Copy(h, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return nil, copyErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
+	g.fingerprint = hex.EncodeToString(h.Sum(nil))
 	log.Info("gazetteer loaded", "places", len(places), "names", g.loadedNames, "countries", len(g.countries), "dir", dir)
 	return g, nil
 }
@@ -175,7 +272,9 @@ func Load(ctx context.Context, dir string, log *slog.Logger) (*Gazetteer, error)
 func NewEmpty() *Gazetteer {
 	return &Gazetteer{
 		byName:    map[string][]Place{},
-		skip:      map[string]struct{}{},
+		byID:      map[string]Place{},
+		aliases:   map[string][]string{},
+		skip:      ambiguousNames(),
 		countries: map[string]Country{},
 		byCountry: map[string][]Place{},
 	}
@@ -185,31 +284,44 @@ func NewEmpty() *Gazetteer {
 func (g *Gazetteer) Loaded() bool { return g != nil && g.loaded }
 
 func (g *Gazetteer) add(p Place) {
-	if g == nil || len(p.Normalized) < 3 || p.Normalized == "" {
+	if g == nil || len(p.Normalized) < 3 || !ValidCoordinates(p.Lat, p.Lon) {
 		return
 	}
-	if _, bad := g.skip[p.Normalized]; bad {
-		return
+	for _, existing := range g.byName[p.Normalized] {
+		if existing.ID == p.ID {
+			return
+		}
+	}
+	// Only the canonical row contributes population; alternate-name entries are
+	// separate index copies of the same city and would multiply the total.
+	if p.CountryCode != "" && p.AdminCode != "" && strings.HasPrefix(p.Feature, "PPL") && p.Normalized == normalize(p.Name) {
+		if g.regionPopulation == nil {
+			g.regionPopulation = make(map[string]int64)
+		}
+		g.regionPopulation[p.CountryCode+"."+p.AdminCode] += p.Population
 	}
 	g.byName[p.Normalized] = append(g.byName[p.Normalized], p)
+	g.byID[p.ID] = p
+	g.aliases[p.ID] = append(g.aliases[p.ID], p.Normalized)
 	if p.CountryCode != "" && !p.CountryID {
 		g.byCountry[p.CountryCode] = append(g.byCountry[p.CountryCode], p)
 	}
 }
 
 func (g *Gazetteer) addAlias(name string, p Place) {
-	if g == nil {
+	if g == nil || !ValidCoordinates(p.Lat, p.Lon) {
 		return
 	}
 	n := normalize(name)
-	if len(n) < 3 {
+	if len(n) < 2 {
 		return
 	}
 	p.Normalized = n
-	if _, bad := g.skip[n]; bad {
-		return
-	}
 	g.byName[n] = append(g.byName[n], p)
+	g.aliases[p.ID] = append(g.aliases[p.ID], n)
+	if _, exists := g.byID[p.ID]; !exists {
+		g.byID[p.ID] = p
+	}
 }
 
 func (g *Gazetteer) capitalPlace(code, capital string) (Place, bool) {
@@ -220,7 +332,7 @@ func (g *Gazetteer) capitalPlace(code, capital string) (Place, bool) {
 		if p.CountryID {
 			continue
 		}
-		if p.Feature == "PPLC" || (want != "" && p.Normalized == want) {
+		if p.Feature == "PPLC" || (want != "" && normalize(p.Name) == want) {
 			if !found || p.Population > best.Population {
 				best, found = p, true
 			}
@@ -242,7 +354,7 @@ func (g *Gazetteer) buildSearchIndex() {
 	seenCity := make(map[string]bool)
 	for _, list := range g.byName {
 		for _, p := range list {
-			if p.CountryID || p.Lat == 0 && p.Lon == 0 || seenCity[p.ID] {
+			if p.CountryID || !ValidCoordinates(p.Lat, p.Lon) || seenCity[p.ID] {
 				continue
 			}
 			seenCity[p.ID] = true
@@ -260,7 +372,7 @@ func (g *Gazetteer) buildSearchIndex() {
 	}
 	seenCountry := make(map[string]bool)
 	for _, c := range g.countries {
-		if c.Place.ID == "" || seenCountry[c.Code] {
+		if c.Place.ID == "" || !ValidCoordinates(c.Place.Lat, c.Place.Lon) || seenCountry[c.Code] {
 			continue
 		}
 		seenCountry[c.Code] = true
@@ -293,7 +405,7 @@ func (g *Gazetteer) Search(query string, limit int) []Place {
 	}
 	found := make(map[string]scored)
 	add := func(p Place) {
-		if p.ID == "" || p.Lat == 0 && p.Lon == 0 || p.CountryID && p.Lat == 0 && p.Lon == 0 {
+		if p.ID == "" || !ValidCoordinates(p.Lat, p.Lon) {
 			return
 		}
 		score := 0.0
@@ -393,113 +505,18 @@ func (g *Gazetteer) Fallback(limit int) []Place {
 }
 
 // Candidates returns up to max places mentioned in title/lede/dateline,
-// ranked with the title and dateline as priors. countryHint is an ISO code or
-// English country name; when it matches candidates, non-matching candidates
-// are dropped so "Paris" resolves to Paris, France.
+// ranked with the title and dateline as priors. countryHint is an explicit
+// country qualifier for ambiguous cities. Distinct country/party mentions
+// remain available to the plotter.
 func (g *Gazetteer) Candidates(text, title, dateline, countryHint string, max int) []Place {
-	if g == nil || !g.loaded || len(g.byName) == 0 {
-		return nil
-	}
 	if max <= 0 {
 		max = 8
 	}
-	text = strings.TrimSpace(text + " " + title + " " + dateline)
-	words := tokenize(text)
-	if len(words) == 0 {
-		return nil
+	list := g.matchedPlaces(text, title, dateline, countryHint)
+	if len(list) > max {
+		list = list[:max]
 	}
-	titleSet := wordSet(tokenize(title))
-	dateSet := wordSet(tokenize(dateline))
-	hintCode := g.CountryCode(countryHint)
-	hintName := normalize(countryHint)
-
-	scores := make(map[string]float64)
-	found := make(map[string]Place)
-	for n := 3; n >= 1; n-- {
-		for i := 0; i+n <= len(words); i++ {
-			if !capitalized(words[i].raw) {
-				continue
-			}
-			parts := make([]string, n)
-			for k := 0; k < n; k++ {
-				parts[k] = words[i+k].norm
-			}
-			phrase := strings.Join(parts, " ")
-			list, ok := g.byName[phrase]
-			if !ok {
-				continue
-			}
-			for _, p := range list {
-				score := math.Log10(float64(p.Population) + 10)
-				if _, ok := titleSet[phrase]; ok {
-					score += 6
-				}
-				if _, ok := dateSet[phrase]; ok {
-					score += 8
-				}
-				score += float64(n) * 2
-				if p.CountryID {
-					score -= 2
-				}
-				if hintCode != "" && p.CountryCode == hintCode {
-					score += 7
-				} else if hintName != "" && normalize(p.Country) == hintName {
-					score += 6
-				}
-				if prev, ok := scores[p.ID]; !ok || score > prev {
-					scores[p.ID] = score
-					p.Score = score
-					found[p.ID] = p
-				}
-			}
-		}
-	}
-	if len(found) == 0 {
-		return nil
-	}
-
-	list := make([]Place, 0, len(found))
-	for _, p := range found {
-		list = append(list, p)
-	}
-	if hintCode != "" {
-		scoped := make([]Place, 0, len(list))
-		for _, p := range list {
-			if p.CountryCode == hintCode || (p.CountryID && p.CountryCode == hintCode) {
-				scoped = append(scoped, p)
-			}
-		}
-		if len(scoped) > 0 {
-			list = scoped
-		}
-	}
-	// One candidate per (name, country); a country candidate is redundant when
-	// a city with the same name is present.
-	byKey := make(map[string]Place, len(list))
-	for _, p := range list {
-		key := p.Normalized + "|" + p.CountryCode
-		if prev, ok := byKey[key]; !ok || p.Score > prev.Score || (p.Score == prev.Score && !p.CountryID) {
-			byKey[key] = p
-		}
-	}
-	list = list[:0]
-	for _, p := range byKey {
-		list = append(list, p)
-	}
-	sort.SliceStable(list, func(i, j int) bool {
-		if list[i].CountryID != list[j].CountryID && list[i].Score == list[j].Score {
-			return !list[i].CountryID
-		}
-		if list[i].Score != list[j].Score {
-			return list[i].Score > list[j].Score
-		}
-		return list[i].Population > list[j].Population
-	})
-	out := list
-	if len(out) > max {
-		out = out[:max]
-	}
-	return out
+	return list
 }
 
 // Lookup resolves a name from Claude/Photon to the best gazetteer entry.
@@ -546,6 +563,11 @@ func (g *Gazetteer) Country(codeOrName string) (Country, bool) {
 		return c, true
 	}
 	want := normalize(codeOrName)
+	if want == "palestine" {
+		if c, ok := g.countries["PS"]; ok {
+			return c, true
+		}
+	}
 	for _, c := range g.countries {
 		if normalize(c.Name) == want {
 			return c, true
@@ -581,7 +603,7 @@ func (g *Gazetteer) CountryCode(codeOrName string) string {
 // CountryCentroid returns the country-place fallback.
 func (g *Gazetteer) CountryCentroid(codeOrName string) (Place, bool) {
 	c, ok := g.Country(codeOrName)
-	if !ok {
+	if !ok || !ValidCoordinates(c.Place.Lat, c.Place.Lon) {
 		return Place{}, false
 	}
 	return c.Place, true
@@ -772,8 +794,11 @@ func readCities(path string, countries map[string]rawCountry, admin1 map[string]
 		if len(fields) < 15 {
 			continue
 		}
-		lat, _ := strconv.ParseFloat(fields[4], 64)
-		lon, _ := strconv.ParseFloat(fields[5], 64)
+		lat, latErr := strconv.ParseFloat(fields[4], 64)
+		lon, lonErr := strconv.ParseFloat(fields[5], 64)
+		if latErr != nil || lonErr != nil || !ValidCoordinates(lat, lon) {
+			continue
+		}
 		pop, _ := strconv.ParseInt(fields[14], 10, 64)
 		cc := fields[8]
 		adm := admin1[cc+"."+fields[10]]
@@ -786,6 +811,7 @@ func readCities(path string, countries map[string]rawCountry, admin1 map[string]
 			Name:        name,
 			Normalized:  normalize(name),
 			Admin:       adm,
+			AdminCode:   fields[10],
 			Country:     countries[cc].Name,
 			CountryCode: cc,
 			Lat:         lat,
@@ -805,7 +831,7 @@ func readCities(path string, countries map[string]rawCountry, admin1 map[string]
 				if len(normalize(alias)) >= 3 {
 					out = append(out, Place{
 						ID: p.ID, Name: p.Name, Normalized: normalize(alias),
-						Admin: p.Admin, Country: p.Country, CountryCode: p.CountryCode,
+						Admin: p.Admin, AdminCode: p.AdminCode, Country: p.Country, CountryCode: p.CountryCode,
 						Lat: p.Lat, Lon: p.Lon, Population: p.Population, Feature: p.Feature,
 					})
 				}
@@ -815,9 +841,14 @@ func readCities(path string, countries map[string]rawCountry, admin1 map[string]
 	return out, sc.Err()
 }
 
+var latinFold = strings.NewReplacer("đ", "dj", "ł", "l", "ø", "o", "æ", "ae", "œ", "oe", "ß", "ss", "ð", "d", "þ", "th")
+
 func normalize(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
+	s = latinFold.Replace(norm.NFD.String(strings.ToLower(strings.TrimSpace(s))))
 	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
 			return r
 		}
@@ -829,27 +860,30 @@ func normalize(s string) string {
 type token struct {
 	norm string
 	raw  string
+	sep  string
 }
 
 func tokenize(s string) []token {
 	var out []token
-	var cur []rune
+	var cur, separator []rune
 	flush := func() {
 		if len(cur) == 0 {
 			return
 		}
 		raw := string(cur)
 		if n := normalize(raw); n != "" {
-			out = append(out, token{norm: n, raw: raw})
+			out = append(out, token{norm: n, raw: raw, sep: string(separator)})
 		}
 		cur = cur[:0]
+		separator = separator[:0]
 	}
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '\'' || r == '’' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			cur = append(cur, r)
 			continue
 		}
 		flush()
+		separator = append(separator, r)
 	}
 	flush()
 	return out
@@ -881,16 +915,56 @@ func ambiguousNames() map[string]struct{} {
 		"commerce", "general", "independence", "liberty", "union", "salem",
 		"decatur", "north", "south", "east", "west", "central", "national",
 		"federal", "government", "president", "minister", "court", "bank",
+		// A generic administrative name in Portuguese/Spanish that exists as a
+		// first-level region in several countries (Brazil, Venezuela, Mexico).
+		// Bare use cannot choose one jurisdiction; qualification still resolves.
+		"distrito federal",
 		"market", "school", "university", "airport", "station", "park", "lake",
 		"river", "hill", "beach", "port", "new", "hope", "victory", "trinity",
+		"marathon", "from", "frome", "nis", "niš", "ini", "palmares", "uniao", "união", "big", "biga", "paul", "saint",
+		"saints", "san", "santa", "santiago", "man", "men", "woman", "women",
+		"best", "great", "grand", "young", "royal", "rising", "high", "low",
+		"love", "black", "white", "green", "red", "blue", "brown", "gray",
+		"king", "queen", "prince", "george", "john", "james", "peter", "david",
+		"the", "this", "that", "these", "those", "there", "here", "then",
+		"and", "but", "for", "with", "without", "into", "over", "under",
+		"after", "before", "since", "while", "during", "about", "more", "most",
+		"some", "many", "any", "all", "one", "two", "three", "four", "five",
+		"who", "what", "when", "where", "why", "how", "can", "may", "will",
+		"german", "french", "english", "american", "spanish", "chinese", "indian",
+		"march", "april", "may", "june", "august", "paradise", "surprise", "temple",
+		"christian", "sale", "deal", "bury", "live", "rivers", "river", "coast",
+		"upper", "lower", "eastern", "western", "northern", "southern", "capital",
+		"toyota", "google", "lula", "international", "delta", "stat", "africa", "asia", "europe", "paramount", "spring", "sparks", "derby", "manhattan", "roman", "commonwealth",
+		"jackson", "michael", "hamilton", "lincoln", "austin", "florence",
+		"charlotte", "phoenix", "taylor", "chelsea", "mercedes", "batman",
+		// Common words and personal names also used as ADM1 labels.
+		"van", "mary", "colon", "unity", "centre", "nacional",
+		"acre", "mono", "donga", "littoral", "plateau", "plateaux", "pool", "cuvette",
+		"forest", "vale", "bride", "peel", "northwest", "northeast", "saga", "ogre",
+		"bar", "mon", "rota", "muscat", "cascade", "ascension", "grad", "bay",
+		"lac", "maritime", "male", "mascara", "oriental", "savannah",
+		"somali", "balkan", "harari", "afar", "falcon", "sud", "tabasco", "quiche",
+		"sunrise", "confederation", "rugby", "metro", "springs", "como", "natal", "sabha", "vitoria", "franca",
+		"police", "hit", "fountain", "normal", "meta", "republica", "safety", "health", "fight", "union", "prospect", "progress", "freedom", "reform", "peace", "justice",
 	}
 	out := make(map[string]struct{}, len(names))
 	for _, n := range names {
 		out[n] = struct{}{}
 	}
-	// These are real places but also very common words; they stay in the index.
-	for _, n := range []string{"paris", "london", "berlin", "rome", "athens", "victoria"} {
+	// Personal names use contextual/person-pattern guards rather than the
+	// common-word rejection rule, so valid historical city evidence survives.
+	for _, n := range strings.Fields("paul santiago george john james peter david jackson michael hamilton lincoln austin florence charlotte phoenix taylor chelsea") {
 		delete(out, n)
 	}
+
 	return out
+}
+
+// DatasetFingerprint identifies the exact cached source files used for a plan.
+func (g *Gazetteer) DatasetFingerprint() string {
+	if g == nil {
+		return ""
+	}
+	return g.fingerprint
 }

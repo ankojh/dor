@@ -180,7 +180,7 @@ anywhere else.
 | `story.changed.<0..15>` | clusterer/editor → relation judge/matcher |
 | `link.changed` | relation judge → publisher |
 | `article.placed` | clusterer → matcher |
-| `match.filter.<client>` | matcher → gateway |
+| `match.filter.<client>` | reserved; no producer/consumer in this build |
 | `match.alert` | matcher → notifier |
 | `delta.out` | publisher → gateway |
 | `echo.in` / `echo.out` | dev sample only |
@@ -190,9 +190,11 @@ anywhere else.
 
 Streams are per domain; the full table (subjects, storage, MaxAge, MaxBytes,
 dedupe) is in [decisions.md](decisions.md#bus). Summary: INGEST, ENRICH, STORY,
-ALERT, DELTA, MATCH (memory), DLQ and ECHO. All use Limits retention and
-`DiscardOld`; `MaxBytes` binds before `MaxAge` under load. The processing
-streams use a 20 min dedupe horizon; DELTA 10 min, MATCH 2 min.
+ALERT, DELTA, MATCH (reserved, memory), DLQ and ECHO. All use Limits retention
+and `DiscardOld`; `MaxBytes` binds before `MaxAge` under load. The processing
+streams use a 20 min dedupe horizon; DELTA 10 min, MATCH 2 min. No producer or
+consumer uses the MATCH stream yet; client filters are handled over the
+WebSocket.
 
 Publishing always sets `Nats-Msg-Id`; an agent that can be retried must pass a
 stable stage-namespaced id (for example `clean:<articleID>`). JetStream dedupe
@@ -292,6 +294,14 @@ a free port itself before starting the server; do not pass port 0 straight to
 `server.Options`. Tests must not rely on Docker or network, and `go test -race
 -count=1 ./...` should stay green when packages run in parallel.
 
+Tests must never connect to the live developer stack. Postgres integration
+tests use `DOR_TEST_DATABASE_URL` with a scratch database; `store.Open` refuses
+the database name `dor` from a test binary unless `DOR_ALLOW_TEST_LIVE_DB=1` is
+set explicitly. Re-exec tests that spawn `dor run` pass `--db-url off` (or a
+scratch DSN), `--nats-listen 127.0.0.1:0`, and scrub inherited
+`DOR_DATABASE_URL`/`DOR_NATS_URL` targets so a developer's shell cannot redirect
+them at live services.
+
 ## Protobuf workflow
 
 - Source: `proto/dor/v1/dor.proto`, package `dor.v1`.
@@ -326,8 +336,9 @@ Vite 7 + SolidJS 1.9 + TypeScript strict (`noUncheckedIndexedAccess`), pnpm,
 ESLint flat config, Prettier, Vitest. The data worker is
 `web/src/worker/index.ts`, loaded with
 `new Worker(new URL("./worker/index.ts", import.meta.url), { type: "module" })`.
-It posts `{type: "ready", ...}` after a protobuf round-trip; the shell renders
-that line. Do not put data work on the main thread.
+It owns the gateway socket, decode, resume and patch path. The old `ready`
+probe is no longer posted or rendered; it remains only as a protobuf-codegen
+round-trip test. Do not put data work on the main thread.
 
 ## Docker
 

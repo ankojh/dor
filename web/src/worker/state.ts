@@ -5,6 +5,7 @@ import {
   buildLiveGlobe,
   linkKey,
   storyLocation,
+  threadRankScore,
   type LiveStory,
 } from "../globe/live-data";
 import { categoryColor, encodeArc } from "../globe/encoding";
@@ -15,6 +16,7 @@ import type { AdjacencyArrays, FakeInit, StreamPatch } from "./fake/protocol";
 import type {
   LinkPatch,
   MatchBytes,
+  MatchSummary,
   StoryPatch,
   WireFilters,
   WorkerInit,
@@ -135,6 +137,7 @@ export class LiveState {
       init: structuredClone(this.init),
       summaries: structuredClone(this.entries),
       recentWire: [...this.wire.values()],
+      match: this.matchSummary(),
     };
   }
 
@@ -284,7 +287,7 @@ export class LiveState {
       this.topology = true;
     }
     const old = this.entries[index];
-    const category = Math.max(0, Math.min(8, story.category));
+    const category = Math.max(0, Math.min(10, story.category));
     const color = [...categoryColor(category), 255] as LiveStory["color"];
     const entry: LiveStory = {
       index,
@@ -302,20 +305,25 @@ export class LiveState {
         heat: story.heat,
         firstSeen: story.firstSeen,
         updatedAt: story.updatedAt,
-        locations: story.locations.map(({ name, lat, lon, role, precision }) => ({
+        hazard: story.hazard,
+        magnitude: story.magnitude,
+        locations: story.locations.map(({ name, lat, lon, role, precision, placeId }) => ({
           name,
           lat,
           lon,
           role,
           precision,
+          placeId,
         })),
       },
       parties: story.locations
         .filter((place) => place.role === 2)
         .slice(0, 6)
         .map((place) => ({ lng: place.lon, lat: place.lat, label: place.name })),
+      partyTotal: story.locations.filter((place) => place.role === 2).length,
       degree: old?.degree ?? 0,
       strongestLink: old?.strongestLink ?? 0,
+      strongestVerified: old?.strongestVerified ?? 0,
     };
     this.entries[index] = entry;
     const [x, y] = lngLatToMercator(entry.lng, entry.lat);
@@ -545,11 +553,16 @@ export class LiveState {
       if (entry) {
         entry.degree = counts[entry.index]!;
         entry.strongestLink = 0;
+        entry.strongestVerified = 0;
       }
     for (const index of this.linkSlots.values())
       for (const i of [this.init.links.a[index]!, this.init.links.b[index]!]) {
         const entry = this.entries[i]!;
-        entry.strongestLink = Math.max(entry.strongestLink, this.init.links.strength[index]!);
+        const strength = this.init.links.strength[index]!;
+        entry.strongestLink = Math.max(entry.strongestLink, strength);
+        if (!this.init.links.unverified?.[index]) {
+          entry.strongestVerified = Math.max(entry.strongestVerified, strength);
+        }
       }
     this.init.adjacency = { adjStart, adjList, adjLink };
     return this.init.adjacency;
@@ -560,6 +573,7 @@ export class LiveState {
       if (entry) {
         entry.degree = 0;
         entry.strongestLink = 0;
+        entry.strongestVerified = 0;
         this.dirtyStories.add(i);
       }
     }
@@ -569,9 +583,29 @@ export class LiveState {
         const entry = this.entries[i];
         if (entry) {
           entry.degree++;
-          entry.strongestLink = Math.max(entry.strongestLink, this.init.links.strength[index]!);
+          const strength = this.init.links.strength[index]!;
+          entry.strongestLink = Math.max(entry.strongestLink, strength);
+          if (!this.init.links.unverified?.[index]) {
+            entry.strongestVerified = Math.max(entry.strongestVerified, strength);
+          }
         }
       }
+  }
+
+  private matchSummary(): MatchSummary {
+    const f = this.filters;
+    const active =
+      this.prompts.length > 0 ||
+      (!!f &&
+        (f.categories.length > 0 || f.regions.length > 0 || f.minSources > 0 || f.radiusKm > 0));
+    let matched = 0;
+    let total = 0;
+    for (const entry of this.entries) {
+      if (!entry) continue;
+      total++;
+      if (!this.dimmedStories.has(entry.index)) matched++;
+    }
+    return { active, matched, total };
   }
 
   private refreshMatches(): void {
@@ -628,19 +662,12 @@ export class LiveState {
     )
       return null;
     this.refreshMatches();
+    const match = this.matchSummary();
     const adjacency = this.topology ? this.adjacency() : undefined;
     this.refreshGraphStats();
     const top = this.entries
       .filter(Boolean)
-      .sort(
-        (a, b) =>
-          b.story.heat * 2 +
-          Math.min(10, b.degree) * 0.15 +
-          Math.min(30, b.story.sourceCount) * 0.01 -
-          (a.story.heat * 2 +
-            Math.min(10, a.degree) * 0.15 +
-            Math.min(30, a.story.sourceCount) * 0.01),
-      )
+      .sort((a, b) => threadRankScore(b) - threadRankScore(a))
       .slice(0, 300);
     const stream = emptyStream(now);
     const changed = [...this.dirtyStories];
@@ -678,6 +705,7 @@ export class LiveState {
       stream,
       storyStates: range(this.storyDims),
       linkStates: range(this.linkDims),
+      match,
       ...(adjacency ? { adjacency: structuredClone(adjacency) } : {}),
       topStories: Uint16Array.from(top.map((entry) => entry.index)),
       wire: [...this.dirtyWire.values()],

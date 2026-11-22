@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -15,12 +16,14 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/config"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/decide"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/store"
 )
@@ -31,11 +34,41 @@ const ClusterDurable = "cluster"
 const (
 	clusterJoinDeadline = 2 * time.Second
 	clusterStoryTTL     = 48 * time.Hour
+	// clusterANTimeout bounds the optional pgvector shortlist. The clusterer is
+	// the single story writer and must fall back to its loaded story map rather
+	// than wait behind Postgres.
+	clusterANTimeout = 150 * time.Millisecond
+	// Heat cooling: quiet stories lose heat over time so the globe visibly
+	// settles. The stored UpdatedAt stays the last content change (and therefore
+	// the expiry anchor); only the derived Heat value cools.
+	clusterHeatHalfLife = 6 * time.Hour
+	clusterCoolInterval = 30 * time.Second
+	clusterHeatGrace    = 5 * time.Minute
+	clusterHeatFloor    = 0.05
+	clusterCoolMinDrop  = 0.01
+	clusterCoolMaxBatch = 200
+	// clusterRetryDelay throttles retries of a failed join so a persistent
+	// failure does not spin the sweeper.
+	clusterRetryDelay     = 5 * time.Second
+	clusterTombstoneSweep = time.Minute
 )
+
+// clusterTombstoneRetention bounds delete markers left by completed joins and
+// commit records in the non-expiring joins bucket. Pending joins are never
+// touched; only markers older than this are purged. A variable so tests can
+// exercise retirement without waiting.
+var clusterTombstoneRetention = 5 * time.Minute
 
 // StorySink is the non-blocking durable story path. *store.Writer satisfies it.
 type StorySink interface {
 	EnqueueStory(record store.StoryRecord) bool
+}
+
+// EnrichmentSink is the optional durable article-enrichment path. It is a
+// separate interface so a test or embedding that only stores stories keeps
+// working. *store.Writer satisfies it.
+type EnrichmentSink interface {
+	EnqueueArticleEnrichment(record store.ArticleEnrichmentRecord) bool
 }
 
 // StoryIndex is the optional pgvector ANN candidate source. *store.Store
@@ -67,16 +100,65 @@ type storyMeta struct {
 }
 
 type storyState struct {
-	Story         *dorv1.Story
-	ArticleIDs    []string
-	SourceIDs     []string
-	Embedding     []float32
-	Entities      []string
-	Cell          string
-	ExpiresAt     time.Time
-	FirstSeen     int64
-	UpdatedAt     int64
+	Story      *dorv1.Story
+	ArticleIDs []string
+	SourceIDs  []string
+	Embedding  []float32
+	Entities   []string
+	Cell       string
+	ExpiresAt  time.Time
+	FirstSeen  int64
+	UpdatedAt  int64
+	// CooledAt is the last time Heat was decayed. It is process-local: a
+	// restart resumes cooling from the last content update.
+	CooledAt      int64
 	StoreQueuedAt int64
+	// EventKey is the first durable hazard-event -> story map key, kept for
+	// compatibility; EventKeys holds every explicit event identity that has
+	// joined this story.
+	EventKey  string
+	EventKeys []string
+
+	// Provenance is process-local: it is copied onto the Story proto on each
+	// write. It never enters storymeta and never changes story identity.
+	CategoryBackend    string
+	CategoryConfidence float32
+	CategoryDegraded   bool
+	CategoryFallback   bool
+	PlaceBackend       string
+	PlaceDegraded      bool
+	PlaceFallback      bool
+	Hazard             string
+	Magnitude          float64
+}
+
+// storyCheckpoint is the single authoritative cluster write: the full story,
+// its membership and its location/vector state. Derived story.<id>,
+// storymeta.<id>, article.<id> and storymap.<id> keys are republished from it.
+// A crash can therefore leave the merge either fully present or fully absent,
+// never half-applied.
+type storyCheckpoint struct {
+	Story      []byte    `json:"story"`
+	ArticleIDs []string  `json:"article_ids"`
+	SourceIDs  []string  `json:"source_ids"`
+	Embedding  []float32 `json:"embedding"`
+	Entities   []string  `json:"entities"`
+	Cell       string    `json:"cell,omitempty"`
+	ExpiresAt  int64     `json:"expires_at"` // unix nanoseconds
+	FirstSeen  int64     `json:"first_seen"`
+	UpdatedAt  int64     `json:"updated_at"`
+	EventKey   string    `json:"event_key,omitempty"`
+	EventKeys  []string  `json:"event_keys,omitempty"`
+}
+
+// storyCommit is the durable completion marker for story outputs. storymeta
+// alone cannot distinguish "written but outputs never published" from "fully
+// committed"; this record is written only after the story and placed messages
+// are acknowledged, and the join record is deleted only after it.
+type storyCommit struct {
+	StoryID    string   `json:"story_id"`
+	ArticleIDs []string `json:"article_ids"`
+	UpdatedAt  int64    `json:"updated_at"`
 }
 
 type candidateMatch struct {
@@ -91,15 +173,29 @@ type candidateMatch struct {
 // enrichment lanes and uses the join bucket rather than holding the input
 // messages: a missing embedder still lets the story form after 2 s.
 func NewClusterer(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (Agent, error) {
+	now := deps.ClusterNow
+	if now == nil {
+		now = time.Now
+	}
+	heatHalfLife := deps.ClusterHeatHalfLife
+	if heatHalfLife <= 0 {
+		heatHalfLife = clusterHeatHalfLife
+	}
 	c := &clusterer{
-		bus:          b,
-		log:          log,
-		deps:         deps,
-		stories:      make(map[string]*storyState),
-		articleStory: make(map[string]string),
-		readyCh:      make(chan string, 1024),
-		expireCh:     make(chan struct{}, 1),
-		queued:       make(map[string]bool),
+		bus:             b,
+		log:             log,
+		deps:            deps,
+		stories:         make(map[string]*storyState),
+		articleStory:    make(map[string]string),
+		resume:          make(map[string]string),
+		eventStories:    make(map[string]string),
+		readyCh:         make(chan string, 1024),
+		expireCh:        make(chan struct{}, 1),
+		queued:          make(map[string]bool),
+		retryAt:         make(map[string]time.Time),
+		expiredForLinks: make(map[string]bool),
+		now:             now,
+		heatHalfLife:    heatHalfLife,
 	}
 	base, err := NewBase(b, metrics, log, Spec{
 		Name:           ClusterDurable,
@@ -123,13 +219,32 @@ type clusterer struct {
 	log  *slog.Logger
 	deps Deps
 
+	// mu guards stories, articleStory, resume and every mutable storyState
+	// field. The processor, expiry and cooling loops all touch them.
+	mu           sync.Mutex
 	stories      map[string]*storyState
 	articleStory map[string]string
+	// resume maps an article whose storymeta was persisted but whose outputs
+	// were not committed to that story. A retry re-emits the outputs for the
+	// same story instead of merging the article a second time.
+	resume map[string]string
+	// eventStories is the in-process mirror of the durable hazard event map.
+	eventStories map[string]string
 
 	readyCh  chan string
 	expireCh chan struct{}
 	queuedMu sync.Mutex
 	queued   map[string]bool
+	retryAt  map[string]time.Time
+
+	now          func() time.Time
+	heatHalfLife time.Duration
+	lastCool     time.Time
+	// Link cascade is batched: expiries are frequent at scale and scanning the
+	// whole link keyspace on every one would dominate the sweeper.
+	expiredForLinks    map[string]bool
+	lastLinkSweep      time.Time
+	lastTombstoneSweep time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -221,7 +336,7 @@ func (c *clusterer) handle(ctx context.Context, msg *Message, out *Emitter) erro
 	if vector != nil {
 		state.Vector = vector
 	}
-	state.UpdatedAt = time.Now().UTC().UnixNano()
+	state.UpdatedAt = c.now().UTC().UnixNano()
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("cluster: encode join: %w", err)
@@ -287,29 +402,113 @@ func (c *clusterer) clearQueued(id string) {
 	c.queuedMu.Unlock()
 }
 
+func (c *clusterer) deferRetry(id string) {
+	c.queuedMu.Lock()
+	c.retryAt[id] = c.now().Add(clusterRetryDelay)
+	c.queuedMu.Unlock()
+}
+
+func (c *clusterer) clearRetry(id string) {
+	c.queuedMu.Lock()
+	delete(c.retryAt, id)
+	c.queuedMu.Unlock()
+}
+
 func (c *clusterer) expireStories(ctx context.Context) {
-	now := time.Now().UTC()
+	now := c.now().UTC()
 	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
 	if err != nil {
 		return
 	}
-	var expired []string
+	joins, jerr := c.bus.KV(ctx, bus.KVBucketJoins)
+
+	c.mu.Lock()
+	var expired []*storyState
+	expiredIDs := make(map[string]bool)
 	for id, st := range c.stories {
 		if st != nil && now.After(st.ExpiresAt) {
-			expired = append(expired, id)
+			expired = append(expired, st)
+			expiredIDs[id] = true
 		}
 	}
-	for _, id := range expired {
-		st := c.stories[id]
-		if st != nil {
-			for _, articleID := range st.ArticleIDs {
-				delete(c.articleStory, articleID)
+	for _, st := range expired {
+		for _, articleID := range st.ArticleIDs {
+			delete(c.articleStory, articleID)
+			delete(c.resume, articleID)
+		}
+		for _, key := range append([]string{st.EventKey}, st.EventKeys...) {
+			if key != "" {
+				delete(c.eventStories, key)
 			}
 		}
-		delete(c.stories, id)
-		_ = live.Delete(ctx, "story."+id)
-		_ = live.Delete(ctx, "storymeta."+id)
+		delete(c.stories, st.Story.Id)
 	}
+	for id := range expiredIDs {
+		c.expiredForLinks[id] = true
+	}
+	sweep := false
+	var sweepIDs map[string]bool
+	// The cascade has its own deadline: a queued expiry must drain even when
+	// no further story expires.
+	if len(c.expiredForLinks) > 0 && now.Sub(c.lastLinkSweep) >= time.Minute {
+		sweep = true
+		c.lastLinkSweep = now
+		sweepIDs = c.expiredForLinks
+		c.expiredForLinks = make(map[string]bool)
+	}
+	c.mu.Unlock()
+
+	for _, st := range expired {
+		_ = live.Delete(ctx, "story."+st.Story.Id)
+		_ = live.Delete(ctx, "storymeta."+st.Story.Id)
+		_ = live.Delete(ctx, checkpointKey(st.Story.Id))
+		for _, key := range append([]string{st.EventKey}, st.EventKeys...) {
+			if key != "" {
+				_ = live.Delete(ctx, key)
+			}
+		}
+		if jerr == nil {
+			_ = joins.Delete(ctx, commitKey(st.Story.Id))
+		}
+	}
+	if sweep {
+		if err := c.removeExpiredLinks(ctx, live, sweepIDs); err != nil {
+			// Keep the ids queued so a later pass retries the cascade.
+			c.mu.Lock()
+			for id := range sweepIDs {
+				c.expiredForLinks[id] = true
+			}
+			c.mu.Unlock()
+		}
+	}
+}
+
+// removeExpiredLinks deletes live-state links that reference a story that just
+// expired. The publisher independently drops them from its snapshot and emits
+// removal deltas; this keeps the KV cache consistent even when the relation
+// judge is offline.
+func (c *clusterer) removeExpiredLinks(ctx context.Context, live jetstream.KeyValue, expired map[string]bool) error {
+	lister, err := live.ListKeysFiltered(ctx, "link.>")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lister.Stop() }()
+	for key := range lister.Keys() {
+		entry, err := live.Get(ctx, key)
+		if err != nil {
+			continue
+		}
+		var link dorv1.Link
+		if proto.Unmarshal(entry.Value(), &link) != nil {
+			continue
+		}
+		if expired[link.A] || expired[link.B] {
+			if err := live.Delete(ctx, key); err != nil && !isKVNotFound(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *clusterer) processor(ctx context.Context) {
@@ -321,10 +520,14 @@ func (c *clusterer) processor(ctx context.Context) {
 		case id := <-c.readyCh:
 			if err := c.process(ctx, id); err != nil {
 				c.log.Warn("cluster: process failed; will retry", "article_id", id, "err", err)
+				c.deferRetry(id)
+			} else {
+				c.clearRetry(id)
 			}
 			c.clearQueued(id)
 		case <-c.expireCh:
 			c.expireStories(ctx)
+			c.coolStories(ctx)
 		}
 	}
 }
@@ -334,12 +537,16 @@ func (c *clusterer) sweeper(ctx context.Context) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	c.scanJoins(ctx)
+	c.retireTombstones(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			c.scanJoins(ctx)
+			if c.now().Sub(c.lastTombstoneSweep) >= clusterTombstoneSweep {
+				c.retireTombstones(ctx)
+			}
 			select {
 			case c.expireCh <- struct{}{}:
 			default:
@@ -348,6 +555,65 @@ func (c *clusterer) sweeper(ctx context.Context) {
 	}
 }
 
+// retireTombstones bounds the physical cost of completed joins in the
+// non-expiring bucket. PurgeDeletes only removes delete markers older than the
+// retention window; live (pending) join keys are never touched.
+func (c *clusterer) retireTombstones(ctx context.Context) {
+	c.mu.Lock()
+	c.lastTombstoneSweep = c.now()
+	c.mu.Unlock()
+	kv, err := c.bus.KV(ctx, bus.KVBucketJoins)
+	if err != nil {
+		return
+	}
+	purgeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	// PurgeDeletes snapshots markers and then purges each subject
+	// unconditionally, which can delete a join recreated after the snapshot.
+	// Retire each observed marker with LastRevision instead: a newer Put has a
+	// higher revision, so the conditional purge fails and preserves the new
+	// acknowledged work.
+	watcher, err := kv.WatchAll(purgeCtx)
+	if err != nil {
+		c.log.Debug("cluster: join tombstone scan deferred", "err", err)
+		return
+	}
+	now := c.now()
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		op := entry.Operation()
+		if op != jetstream.KeyValueDelete && op != jetstream.KeyValuePurge {
+			continue
+		}
+		if clusterTombstoneRetention >= 0 && now.Sub(entry.Created()) < clusterTombstoneRetention {
+			continue
+		}
+		if err := c.purgeJoinSubject(purgeCtx, entry.Key(), entry.Revision()); err != nil {
+			c.log.Debug("cluster: join tombstone retirement deferred", "key", entry.Key(), "err", err)
+			_ = watcher.Stop()
+			return
+		}
+	}
+	_ = watcher.Stop()
+}
+
+// purgeJoinSubject removes a join's messages through a revision fence. A Put
+// that lands after the observed marker has a higher stream sequence, so a
+// subject purge bounded at marker+1 cannot delete it.
+func (c *clusterer) purgeJoinSubject(ctx context.Context, key string, revision uint64) error {
+	stream, err := c.bus.JS().Stream(ctx, "KV_"+bus.KVBucketJoins)
+	if err != nil {
+		return err
+	}
+	subject := "$KV." + bus.KVBucketJoins + "." + key
+	return stream.Purge(ctx, jetstream.WithPurgeSubject(subject), jetstream.WithPurgeSequence(revision+1))
+}
+
+// scanJoins re-enqueues durable joins. A join is never deleted here: the only
+// deletion is in process after the story, placed and completion outputs commit.
+// This is what makes a stop or backlog lose no acknowledged article.
 func (c *clusterer) scanJoins(ctx context.Context) {
 	kv, err := c.bus.KV(ctx, bus.KVBucketJoins)
 	if err != nil {
@@ -360,7 +626,8 @@ func (c *clusterer) scanJoins(ctx context.Context) {
 		}
 		return
 	}
-	now := time.Now().UTC()
+	defer func() { _ = lister.Stop() }()
+	now := c.now().UTC()
 	for key := range lister.Keys() {
 		entry, err := kv.Get(ctx, key)
 		if err != nil {
@@ -368,18 +635,27 @@ func (c *clusterer) scanJoins(ctx context.Context) {
 		}
 		var state joinState
 		if err := json.Unmarshal(entry.Value(), &state); err != nil {
-			continue
-		}
-		age := now.Sub(time.Unix(0, state.UpdatedAt))
-		if age > 25*time.Second {
+			// A malformed join can never become a story; drop it so it does
+			// not block the scan forever.
 			_ = kv.Delete(ctx, key)
 			continue
 		}
-		if joinComplete(&state) || age >= clusterJoinDeadline {
-			c.enqueue(strings.TrimPrefix(key, "join."))
+		age := now.Sub(time.Unix(0, state.UpdatedAt))
+		if age < 0 {
+			age = 0
 		}
+		if !joinComplete(&state) && age < clusterJoinDeadline {
+			continue
+		}
+		id := strings.TrimPrefix(key, "join.")
+		c.queuedMu.Lock()
+		retry := c.retryAt[id]
+		c.queuedMu.Unlock()
+		if !retry.IsZero() && now.Before(retry) {
+			continue
+		}
+		c.enqueue(id)
 	}
-	_ = lister.Stop()
 }
 
 func (c *clusterer) process(ctx context.Context, articleID string) error {
@@ -401,9 +677,8 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	}
 	article := join.Article
 	if article == nil || article.Id == "" {
-		return nil
-	}
-	if c.articleStory[articleID] != "" {
+		// Nothing can become a story without the clean article. Drop the
+		// record instead of retrying forever.
 		_ = kv.Delete(ctx, key)
 		return nil
 	}
@@ -418,60 +693,271 @@ func (c *clusterer) process(ctx context.Context, articleID string) error {
 	if join.Vector != nil && len(join.Vector.GetVector()) == embeddingDim {
 		vector = append([]float32(nil), join.Vector.GetVector()...)
 	}
-	now := time.Now().UTC()
-	var story *storyState
+	now := c.now().UTC()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.articleStory[articleID] != "" {
+		_ = kv.Delete(ctx, key)
+		return nil
+	}
+
+	story := c.storyForArticleLocked(articleID)
 	joinKind := dorv1.JoinKind_JOIN_KIND_NEW
-	if cand := c.findCandidate(ctx, article, join.Place, category, vector, entities, now); cand != nil {
-		merge, err := c.shouldMerge(ctx, cand, article, join.Place, category, vector, entities)
-		if err != nil {
-			return err
+	evKey := eventMapKey(article.SourceId, article.GetHints().GetEventId())
+	var eventStory *storyState
+	if evKey != "" {
+		if sid := c.eventStories[evKey]; sid != "" {
+			eventStory = c.stories[sid]
 		}
-		if merge {
-			story = c.mergeStory(cand.story, article, join.Place, category, vector, entities, now)
+		if eventStory == nil {
+			if liveKV, err := c.bus.KV(ctx, bus.KVBucketLiveState); err == nil {
+				if e, err := liveKV.Get(ctx, evKey); err == nil {
+					eventStory = c.stories[string(e.Value())]
+					if eventStory != nil {
+						c.eventStories[evKey] = eventStory.Story.Id
+					} else {
+						_ = liveKV.Delete(ctx, evKey)
+					}
+				}
+			}
+		}
+	}
+	switch {
+	case story != nil:
+		// The article is already part of this story from a previous attempt or
+		// restart. Re-emit its outputs; never merge it a second time.
+		if story.Story.Id != newStoryID(articleID) {
 			joinKind = dorv1.JoinKind_JOIN_KIND_JOINED
 		}
+	default:
+		if eventStory != nil {
+			// A stable hazard event identity wins over similarity: a revised
+			// magnitude/epicenter updates the original story even without an
+			// embedding.
+			story = c.mergeStory(eventStory, article, join.Place, category, vector, entities, now)
+			joinKind = dorv1.JoinKind_JOIN_KIND_JOINED
+		} else if cand := c.findCandidate(ctx, article, join.Place, category, vector, entities, evKey, now); cand != nil {
+			merge, err := c.shouldMerge(ctx, cand, article, join.Place, category, vector, entities)
+			if err != nil {
+				return err
+			}
+			if merge {
+				story = c.mergeStory(cand.story, article, join.Place, category, vector, entities, now)
+				joinKind = dorv1.JoinKind_JOIN_KIND_JOINED
+			}
+		}
+		if story == nil {
+			story = c.buildStory(article, join.Place, category, vector, entities, now)
+			c.stories[story.Story.Id] = story
+		}
+		story.ArticleIDs = appendUnique(story.ArticleIDs, articleID)
+		story.SourceIDs = appendUnique(story.SourceIDs, article.SourceId)
+		story.Entities = uniqueStrings(append(story.Entities, entities...))
+		story.UpdatedAt = now.Unix()
+		story.Story.UpdatedAt = story.UpdatedAt
+		story.ExpiresAt = now.Add(clusterStoryTTL)
+		story.Story.SourceCount = uint32(len(story.SourceIDs))
+		story.Story.Primary = 0
+		story.CooledAt = now.UnixNano()
+		// Remember the in-flight membership now: if a later output fails, the
+		// retry resumes this story instead of re-running the merge decision.
+		c.resume[articleID] = story.Story.Id
 	}
-	if story == nil {
-		story = c.buildStory(article, join.Place, category, vector, entities, now)
-		c.stories[story.Story.Id] = story
+	if evKey != "" {
+		if story.EventKey == "" {
+			story.EventKey = evKey
+		}
+		if !slices.Contains(story.EventKeys, evKey) {
+			story.EventKeys = append(story.EventKeys, evKey)
+		}
+		c.eventStories[evKey] = story.Story.Id
 	}
 	story.ArticleIDs = appendUnique(story.ArticleIDs, articleID)
-	story.SourceIDs = appendUnique(story.SourceIDs, article.SourceId)
-	story.Entities = uniqueStrings(append(story.Entities, entities...))
-	story.UpdatedAt = now.Unix()
-	story.Story.UpdatedAt = story.UpdatedAt
-	story.ExpiresAt = now.Add(clusterStoryTTL)
-	story.Story.SourceCount = uint32(len(story.SourceIDs))
-	story.Story.Primary = 0
+	c.applyJoinProvenance(story, join.Place, join.Class, article)
 
 	outCtx := context.WithoutCancel(ctx)
 	if err := c.persist(outCtx, story, article); err != nil {
 		return err
 	}
+	if evKeys := append([]string{story.EventKey}, story.EventKeys...); len(evKeys) > 0 {
+		if liveKV, err := c.bus.KV(outCtx, bus.KVBucketLiveState); err == nil {
+			seen := map[string]bool{}
+			for _, key := range evKeys {
+				if key == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				if _, err := liveKV.Put(outCtx, key, []byte(story.Story.Id)); err != nil {
+					return fmt.Errorf("cluster: persist event identity: %w", err)
+				}
+			}
+		}
+	}
 	if err := c.publishStory(outCtx, story, article); err != nil {
 		return err
 	}
-	if err := c.publishPlaced(outCtx, article, story, joinKind); err != nil {
+	if err := c.publishPlaced(outCtx, article, story, joinKind, join.Place); err != nil {
+		return err
+	}
+	// Completion is recorded separately from storymeta, so a crash after the
+	// metadata write but before the outputs is replayed rather than treated as
+	// complete.
+	if err := c.markCommitted(outCtx, kv, story.Story.Id, articleID); err != nil {
 		return err
 	}
 	c.articleStory[articleID] = story.Story.Id
+	delete(c.resume, articleID)
 	c.enqueueStore(story, article)
+	c.enqueueEnrichment(join.Place, join.Class, article)
 	_ = kv.Delete(ctx, key)
 	return nil
 }
 
+// storyForArticleLocked returns the story an article belongs to in memory.
+// articleStory holds committed members; resume holds members whose metadata was
+// written but whose outputs have not committed yet.
+func (c *clusterer) storyForArticleLocked(articleID string) *storyState {
+	if sid := c.articleStory[articleID]; sid != "" {
+		return c.stories[sid]
+	}
+	if sid := c.resume[articleID]; sid != "" {
+		return c.stories[sid]
+	}
+	return nil
+}
+
+func commitKey(storyID string) string { return "commit." + storyID }
+
+func checkpointKey(storyID string) string { return "cs." + storyID }
+
+// eventMapKey is the durable hazard source/event -> story identity. Hashing the
+// composite keeps it inside the KV key charset regardless of upstream ids.
+func eventMapKey(sourceID, eventID string) string {
+	sourceID, eventID = strings.TrimSpace(sourceID), strings.TrimSpace(eventID)
+	if eventID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sourceID + "\x00" + eventID))
+	return "ev." + hex.EncodeToString(sum[:16])
+}
+
+// markCommitted records that this article's story and placed outputs are
+// acknowledged. It unions with the previous marker rather than copying
+// storymeta: storymeta contains articles whose outputs may still be pending,
+// and marking those complete would lose their emission on restart.
+func (c *clusterer) markCommitted(ctx context.Context, kv jetstream.KeyValue, storyID, articleID string) error {
+	rec := storyCommit{StoryID: storyID, UpdatedAt: c.now().Unix()}
+	key := commitKey(storyID)
+	if entry, err := kv.Get(ctx, key); err == nil {
+		var prev storyCommit
+		if json.Unmarshal(entry.Value(), &prev) == nil {
+			rec.ArticleIDs = append(rec.ArticleIDs, prev.ArticleIDs...)
+			if prev.UpdatedAt > rec.UpdatedAt {
+				rec.UpdatedAt = prev.UpdatedAt
+			}
+		}
+	}
+	rec.ArticleIDs = appendUnique(rec.ArticleIDs, articleID)
+	slices.Sort(rec.ArticleIDs)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	if _, err := kv.Put(ctx, key, data); err != nil {
+		return fmt.Errorf("cluster: persist completion: %w", err)
+	}
+	return nil
+}
+
+// applyJoinProvenance folds this article's place/class provenance into the
+// story. Category provenance follows the highest-confidence classification;
+// place provenance follows the strongest backend (a model pick beats a hint or
+// gazetteer fallback).
+func (c *clusterer) applyJoinProvenance(story *storyState, place *dorv1.PlacedArticle, class *dorv1.ClassifiedArticle, article *dorv1.Article) {
+	if story == nil {
+		return
+	}
+	if class != nil && class.GetCategory() == story.Story.GetCategory() {
+		// Provenance must describe the category actually displayed. Story
+		// keeps the first non-OTHER category; a higher-confidence class for a
+		// different category cannot relabel the displayed one.
+		if story.CategoryBackend == "" || class.GetConfidence() >= story.CategoryConfidence {
+			story.CategoryBackend = class.GetBackend()
+			story.CategoryConfidence = class.GetConfidence()
+			story.CategoryDegraded = class.GetDegraded()
+			story.CategoryFallback = class.GetFallback()
+		}
+	}
+	if place != nil {
+		if placeBackendRank(place.GetBackend()) >= placeBackendRank(story.PlaceBackend) {
+			story.PlaceBackend = place.GetBackend()
+			story.PlaceDegraded = place.GetDegraded()
+			story.PlaceFallback = place.GetFallback()
+		}
+	}
+	if hints := article.GetHints(); hints != nil {
+		if hints.GetHazard() != "" && hints.GetMagnitude() >= story.Magnitude {
+			story.Hazard = hints.GetHazard()
+			story.Magnitude = hints.GetMagnitude()
+		}
+	}
+	story.Story.Degraded = story.CategoryDegraded || story.PlaceDegraded
+	story.Story.Fallback = story.CategoryFallback || story.PlaceFallback
+	story.Story.CategoryBackend = story.CategoryBackend
+	story.Story.CategoryConfidence = story.CategoryConfidence
+	story.Story.PlaceBackend = story.PlaceBackend
+	story.Story.PlaceDegraded = story.PlaceDegraded
+	story.Story.PlaceFallback = story.PlaceFallback
+	story.Story.Hazard = story.Hazard
+	story.Story.Magnitude = story.Magnitude
+}
+
+// placeBackendRank orders place sources from model-picked to deterministic.
+func placeBackendRank(backend string) int {
+	switch backend {
+	case "jev":
+		return 4
+	case "claude":
+		return 3
+	case "gazetteer":
+		return 2
+	case "hints":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func (c *clusterer) buildStory(article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *storyState {
-	locations := cloneLocations(place.GetLocations())
-	primary := place.GetPrimary()
-	if int(primary) >= len(locations) {
+	source := place.GetLocations()
+	locations := cloneLocations(source)
+	primary := 0
+	if len(source) > 0 {
+		requested := int(place.GetPrimary())
+		if requested < 0 || requested >= len(source) {
+			requested = 0
+		}
+		// Dedupe can move the primary; find the surviving entry by key.
+		key := locationKey(source[requested])
+		for index, location := range locations {
+			if locationKey(location) == key {
+				primary = index
+				break
+			}
+		}
+	}
+	if primary >= len(locations) {
 		primary = 0
 	}
 	story := &dorv1.Story{
 		Id:          newStoryID(article.Id),
 		Title:       firstNonEmpty(article.GetTitle(), "Untitled"),
+		TitleSource: "source",
 		Category:    category,
 		Locations:   locations,
-		Primary:     primary,
+		Primary:     uint32(primary),
 		SourceCount: 1,
 		Heat:        initialHeat(article),
 		FirstSeen:   now.Unix(),
@@ -514,22 +1000,30 @@ func (c *clusterer) mergeStory(st *storyState, article *dorv1.Article, place *do
 	return st
 }
 
-func (c *clusterer) findCandidate(ctx context.Context, article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, now time.Time) *candidateMatch {
+func (c *clusterer) findCandidate(ctx context.Context, article *dorv1.Article, place *dorv1.PlacedArticle, category dorv1.Category, vector []float32, entities []string, eventKey string, now time.Time) *candidateMatch {
 	var best *candidateMatch
 	primary := primaryLocation(place)
 	candidates := map[string]bool(nil)
 	if c.deps.StoryIndex != nil && len(vector) > 0 {
-		ids, err := c.deps.StoryIndex.FindStoryCandidates(ctx, vector, 32)
+		anCtx, cancel := context.WithTimeout(ctx, clusterANTimeout)
+		ids, err := c.deps.StoryIndex.FindStoryCandidates(anCtx, vector, 32)
+		cancel()
 		if err == nil && len(ids) > 0 {
 			candidates = make(map[string]bool, len(ids))
 			for _, id := range ids {
 				candidates[id] = true
 			}
 		} else if err != nil {
+			// The shortlist is an optimisation. Fall back to the loaded map so
+			// the single writer never waits on Postgres.
 			c.log.Debug("cluster: story ANN unavailable; scanning loaded stories", "err", err)
 		}
 	}
 	for _, st := range c.stories {
+		if eventKey != "" && len(st.EventKeys) > 0 && !slices.Contains(st.EventKeys, eventKey) {
+			// An explicit different hazard identity vetoes a similarity merge.
+			continue
+		}
 		if candidates != nil && !candidates[st.Story.Id] {
 			// The async store writer may not have flushed a story created
 			// moments ago. Always scan recent in-memory stories; the ANN is a
@@ -655,8 +1149,14 @@ func (c *clusterer) persist(ctx context.Context, st *storyState, article *dorv1.
 	if err != nil {
 		return fmt.Errorf("cluster: live_state kv: %w", err)
 	}
+	c.overlayEditorTitle(ctx, live, st)
 	storyData, err := proto.Marshal(st.Story)
 	if err != nil {
+		return err
+	}
+	// One authoritative write contains both the story and its membership.
+	// Everything below is derived and can be republished after a crash.
+	if _, err := c.writeCheckpointWithStory(ctx, live, st, storyData); err != nil {
 		return err
 	}
 	meta := storyMeta{
@@ -691,21 +1191,151 @@ func (c *clusterer) persist(ctx context.Context, st *storyState, article *dorv1.
 	return nil
 }
 
+func (c *clusterer) writeCheckpoint(ctx context.Context, live jetstream.KeyValue, st *storyState) (uint64, error) {
+	data, err := proto.Marshal(st.Story)
+	if err != nil {
+		return 0, err
+	}
+	return c.writeCheckpointWithStory(ctx, live, st, data)
+}
+
+func (c *clusterer) writeCheckpointWithStory(ctx context.Context, live jetstream.KeyValue, st *storyState, storyData []byte) (uint64, error) {
+	cp := storyCheckpoint{
+		Story:      storyData,
+		ArticleIDs: append([]string{}, st.ArticleIDs...),
+		SourceIDs:  append([]string{}, st.SourceIDs...),
+		Embedding:  append([]float32{}, st.Embedding...),
+		Entities:   append([]string{}, st.Entities...),
+		Cell:       st.Cell,
+		ExpiresAt:  st.ExpiresAt.UnixNano(),
+		FirstSeen:  st.FirstSeen,
+		UpdatedAt:  st.UpdatedAt,
+		EventKey:   st.EventKey,
+		EventKeys:  append([]string{}, st.EventKeys...),
+	}
+	cpData, err := json.Marshal(cp)
+	if err != nil {
+		return 0, err
+	}
+	rev, err := live.Put(ctx, checkpointKey(st.Story.Id), cpData)
+	if err != nil {
+		return 0, fmt.Errorf("cluster: persist checkpoint: %w", err)
+	}
+	return rev, nil
+}
+
 func (c *clusterer) publishStory(ctx context.Context, st *storyState, article *dorv1.Article) error {
+	return c.publishStoryUpdate(ctx, st, "story:"+st.Story.Id+":"+article.Id,
+		nats.Header{bus.HeaderArticleID: []string{article.Id}})
+}
+
+// publishStoryUpdate emits a story change with a caller-supplied message id.
+// The message id is the dedupe key: content updates use the article id, while
+// cooling uses the heat revision so it is not mistaken for the same update.
+func (c *clusterer) publishStoryUpdate(ctx context.Context, st *storyState, msgID string, header nats.Header) error {
 	data, err := proto.Marshal(st.Story)
 	if err != nil {
 		return err
 	}
 	return c.base.Publish(ctx, bus.StoryChangedSubject(st.Story.Id), data,
-		bus.WithMsgID("story:"+st.Story.Id+":"+article.Id),
-		bus.WithHeaders(nats.Header{bus.HeaderArticleID: []string{article.Id}}),
+		bus.WithMsgID(msgID),
+		bus.WithHeaders(header),
 	)
 }
 
-func (c *clusterer) publishPlaced(ctx context.Context, article *dorv1.Article, st *storyState, join dorv1.JoinKind) error {
+// coolStories decays the heat of quiet stories and emits a story update when
+// the change is visible. UpdatedAt/ExpiresAt are deliberately untouched: expiry
+// is anchored to the last content change, not to the derived heat value.
+func (c *clusterer) coolStories(ctx context.Context) {
+	now := c.now().UTC()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.lastCool.IsZero() && now.Sub(c.lastCool) < clusterCoolInterval {
+		return
+	}
+	c.lastCool = now
+	type cooled struct {
+		st   *storyState
+		heat float32
+		at   int64
+	}
+	batch := make([]cooled, 0, 32)
+	for _, st := range c.stories {
+		if st == nil || st.Story == nil || st.Story.Heat <= clusterHeatFloor {
+			continue
+		}
+		last := st.CooledAt
+		if last == 0 {
+			last = time.Unix(st.UpdatedAt, 0).UnixNano()
+		}
+		if last == 0 {
+			last = now.UnixNano()
+			st.CooledAt = last
+			continue
+		}
+		dt := now.Sub(time.Unix(0, last))
+		if dt <= 0 {
+			continue
+		}
+		// Each story has been quiet for at least the grace period since its
+		// last content update; skip stories that are still settling.
+		if st.UpdatedAt > 0 && now.Sub(time.Unix(st.UpdatedAt, 0)) < clusterHeatGrace {
+			continue
+		}
+		factor := math.Exp(-dt.Hours() * math.Ln2 / c.heatHalfLife.Hours())
+		heat := float32(float64(st.Story.Heat) * factor)
+		if float64(st.Story.Heat)-float64(heat) < clusterCoolMinDrop {
+			continue
+		}
+		if heat < clusterHeatFloor {
+			heat = 0
+		}
+		batch = append(batch, cooled{st: st, heat: heat, at: now.UnixNano()})
+		if len(batch) >= clusterCoolMaxBatch {
+			break
+		}
+	}
+	if len(batch) == 0 {
+		return
+	}
+	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		return
+	}
+	outCtx := context.WithoutCancel(ctx)
+	for _, item := range batch {
+		prevHeat, prevCooled := item.st.Story.Heat, item.st.CooledAt
+		item.st.Story.Heat = item.heat
+		item.st.CooledAt = item.at
+		c.applyEditorTitleMarker(outCtx, live, item.st)
+		if err := c.publishStoryUpdate(outCtx, item.st,
+			fmt.Sprintf("story:%s:cool:%d", item.st.Story.Id, item.at), nil); err != nil {
+			// Keep the old value so the next tick retries a visible step.
+			item.st.Story.Heat, item.st.CooledAt = prevHeat, prevCooled
+			c.log.Debug("cluster: cool publish failed", "story_id", item.st.Story.Id, "err", err)
+			continue
+		}
+		if data, err := proto.Marshal(item.st.Story); err == nil {
+			_, _ = live.Put(outCtx, "story."+item.st.Story.Id, data)
+		}
+	}
+}
+
+func (c *clusterer) publishPlaced(ctx context.Context, article *dorv1.Article, st *storyState, join dorv1.JoinKind, place *dorv1.PlacedArticle) error {
 	placed := proto.Clone(article).(*dorv1.Article)
 	placed.StoryId = st.Story.Id
 	placed.Join = join
+	placed.Degraded = st.Story.GetDegraded()
+	placed.Fallback = st.Story.GetFallback()
+	placed.CategoryBackend = st.Story.GetCategoryBackend()
+	placed.CategoryConfidence = st.Story.GetCategoryConfidence()
+	placed.PlaceBackend = st.Story.GetPlaceBackend()
+	placed.PlaceDegraded = st.Story.GetPlaceDegraded()
+	placed.PlaceFallback = st.Story.GetPlaceFallback()
+	placed.Country = placedCountry(place)
+	if placed.Country == "" {
+		placed.Country = primaryCountry(st.Story)
+	}
 	data, err := proto.Marshal(placed)
 	if err != nil {
 		return err
@@ -720,28 +1350,128 @@ func (c *clusterer) enqueueStore(st *storyState, article *dorv1.Article) {
 	if c.deps.StorySink == nil {
 		return
 	}
-	st.StoreQueuedAt = time.Now().UTC().UnixNano()
+	// The story record carries the assignment; the store writer applies it as
+	// a story_id-only UPDATE and retries if the article row has not landed
+	// yet. Never send a full article record here: it would reset enrichment
+	// fields (category, cat_conf) to their zero values.
+	st.StoreQueuedAt = c.now().UTC().UnixNano()
 	primaryLoc := ""
 	if st.Story.Primary < uint32(len(st.Story.Locations)) && st.Story.Locations[st.Story.Primary] != nil {
 		primaryLoc = st.Story.Locations[st.Story.Primary].PlaceId
 	}
+	titleSource := st.Story.GetTitleSource()
+	if titleSource == "" {
+		titleSource = "source"
+	}
 	if !c.deps.StorySink.EnqueueStory(store.StoryRecord{
-		ID:          st.Story.Id,
-		Title:       st.Story.Title,
-		Brief:       article.GetLede(),
-		Category:    int16(st.Story.Category),
-		PrimaryLoc:  primaryLoc,
-		SourceCount: int(st.Story.SourceCount),
-		Heat:        float64(st.Story.Heat),
-		Centroid:    append([]float32(nil), st.Embedding...),
-		Entities:    append([]string(nil), st.Entities...),
-		FirstSeen:   time.Unix(st.FirstSeen, 0).UTC(),
-		UpdatedAt:   time.Unix(st.UpdatedAt, 0).UTC(),
-		ExpiresAt:   st.ExpiresAt,
-		Locations:   locationRecords(st.Story.Locations),
-		ArticleIDs:  []string{article.Id},
+		ID:                 st.Story.Id,
+		Title:              st.Story.Title,
+		TitleSource:        titleSource,
+		Brief:              "",
+		BriefSource:        live.BriefNone,
+		Category:           int16(st.Story.Category),
+		CategoryBackend:    st.CategoryBackend,
+		CategoryConfidence: st.CategoryConfidence,
+		PrimaryLoc:         primaryLoc,
+		SourceCount:        int(st.Story.SourceCount),
+		Heat:               float64(st.Story.Heat),
+		Degraded:           st.Story.Degraded,
+		Fallback:           st.Story.Fallback,
+		PlaceBackend:       st.PlaceBackend,
+		PlaceDegraded:      st.PlaceDegraded,
+		PlaceFallback:      st.PlaceFallback,
+		Centroid:           append([]float32(nil), st.Embedding...),
+		Entities:           append([]string(nil), st.Entities...),
+		FirstSeen:          time.Unix(st.FirstSeen, 0).UTC(),
+		UpdatedAt:          time.Unix(st.UpdatedAt, 0).UTC(),
+		ExpiresAt:          st.ExpiresAt,
+		Locations:          locationRecords(st.Story.Locations),
+		ArticleIDs:         []string{article.Id},
 	}) {
 		c.log.Debug("cluster: store queue full", "story_id", st.Story.Id)
+	}
+}
+
+// overlayEditorTitle keeps F1·2's editor-owned title across a cluster restart.
+// The cs checkpoint is authoritative for membership and identity, but it may
+// predate the editor's title. A storytitle.<id> marker (or the live story's
+// title_source=editor field) wins for display only; the next persist writes
+// the preserved title back into the checkpoint.
+func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValue, st *storyState) {
+	if st == nil || st.Story == nil {
+		return
+	}
+	markerApplied := c.applyEditorTitleMarker(ctx, kv, st)
+	latest, ok := live.LoadStory(ctx, kv, st.Story.Id)
+	if !ok || latest == nil {
+		return
+	}
+	// Heat is derived and cooling writes only story.<id>. Adopt it only when
+	// the derived story's content matches the checkpoint; a torn, uncommitted
+	// merge must not contribute its heat before the join is replayed. This
+	// must compose with the title overlay: an editor marker must not skip
+	// persisted cooled heat.
+	if sameStoryContentIgnoringHeat(st.Story, latest) {
+		st.Story.Heat = latest.Heat
+	}
+	if !markerApplied && latest.Title != "" && latest.GetTitleSource() == "editor" {
+		st.Story.Title = latest.Title
+		st.Story.TitleSource = "editor"
+	}
+}
+
+// applyEditorTitleMarker overlays only the editor-owned title fields from the
+// durable storytitle.<id> marker. Everything else stays cluster-owned.
+func (c *clusterer) applyEditorTitleMarker(ctx context.Context, kv jetstream.KeyValue, st *storyState) bool {
+	if st == nil || st.Story == nil {
+		return false
+	}
+	entry, err := kv.Get(ctx, "storytitle."+st.Story.Id)
+	if err != nil {
+		return false
+	}
+	var marker struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal(entry.Value(), &marker) != nil || strings.TrimSpace(marker.Title) == "" {
+		return false
+	}
+	st.Story.Title = marker.Title
+	st.Story.TitleSource = "editor"
+	return true
+}
+
+func sameStoryContentIgnoringHeat(a, b *dorv1.Story) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	ca, cb := proto.Clone(a).(*dorv1.Story), proto.Clone(b).(*dorv1.Story)
+	ca.Heat, cb.Heat = 0, 0
+	return proto.Equal(ca, cb)
+}
+
+// enqueueEnrichment persists the place votes and classification that arrived
+// with this article. It is separate from story assignment and never writes
+// story_id.
+func (c *clusterer) enqueueEnrichment(place *dorv1.PlacedArticle, class *dorv1.ClassifiedArticle, article *dorv1.Article) {
+	sink, ok := c.deps.StorySink.(EnrichmentSink)
+	if !ok || sink == nil || article == nil || article.Id == "" || (place == nil && class == nil) {
+		return
+	}
+	rec := store.ArticleEnrichmentRecord{
+		ID:        article.Id,
+		Locations: locationRecords(place.GetLocations()),
+	}
+	if class != nil {
+		rec.Category = int16(class.GetCategory())
+		rec.CategoryConfidence = class.GetConfidence()
+		rec.Lang = class.GetLang()
+	}
+	if rec.Lang == "" {
+		rec.Lang = article.GetLang()
+	}
+	if !sink.EnqueueArticleEnrichment(rec) {
+		c.log.Debug("cluster: enrichment queue full", "article_id", article.Id)
 	}
 }
 
@@ -750,54 +1480,205 @@ func (c *clusterer) load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	lister, err := live.ListKeysFiltered(ctx, "story.*")
-	if err != nil {
-		if isKVNotFound(err) {
-			return nil
-		}
-		return err
+	joins, jerr := c.bus.KV(ctx, bus.KVBucketJoins)
+	if jerr != nil {
+		c.log.Warn("cluster: completion records unavailable; treating storymeta as uncommitted", "err", jerr)
 	}
-	defer func() { _ = lister.Stop() }()
-	for key := range lister.Keys() {
-		if !strings.HasPrefix(key, "story.") || strings.HasPrefix(key, "storymeta.") || strings.HasPrefix(key, "storymap.") {
-			continue
+	commits := make(map[string]map[string]bool)
+	commitKeys := make(map[string]bool)
+	if jerr == nil {
+		if lister, err := joins.ListKeysFiltered(ctx, "commit.*"); err == nil {
+			for key := range lister.Keys() {
+				entry, err := joins.Get(ctx, key)
+				if err != nil {
+					continue
+				}
+				var rec storyCommit
+				if json.Unmarshal(entry.Value(), &rec) != nil {
+					continue
+				}
+				ids := make(map[string]bool, len(rec.ArticleIDs))
+				for _, id := range rec.ArticleIDs {
+					ids[id] = true
+				}
+				commits[rec.StoryID] = ids
+				commitKeys[rec.StoryID] = true
+			}
+			_ = lister.Stop()
 		}
-		id := strings.TrimPrefix(key, "story.")
-		entry, err := live.Get(ctx, key)
-		if err != nil {
-			continue
-		}
-		var s dorv1.Story
-		if err := proto.Unmarshal(entry.Value(), &s); err != nil {
-			continue
-		}
-		st := &storyState{
-			Story:     &s,
-			FirstSeen: s.FirstSeen,
-			UpdatedAt: s.UpdatedAt,
-			ExpiresAt: time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
-		}
-		if st.Story.Primary < uint32(len(st.Story.Locations)) {
-			st.Cell = locationCell(st.Story.Locations[st.Story.Primary])
-		}
-		if metaEntry, err := live.Get(ctx, "storymeta."+id); err == nil {
-			var meta storyMeta
-			if json.Unmarshal(metaEntry.Value(), &meta) == nil {
-				st.ArticleIDs = meta.ArticleIDs
-				st.SourceIDs = meta.SourceIDs
-				st.Embedding = meta.Embedding
-				st.Entities = meta.Entities
-				st.FirstSeen = meta.FirstSeen
-				st.UpdatedAt = meta.UpdatedAt
-				st.ExpiresAt = time.Unix(meta.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
-				for _, articleID := range meta.ArticleIDs {
+	}
+
+	restored := make(map[string]bool)
+	// The checkpoint record is authoritative. Read it before (and instead of)
+	// the derived story/storymeta keys so a torn derived write cannot be
+	// mistaken for a second merge.
+	if lister, err := live.ListKeysFiltered(ctx, "cs.>"); err == nil {
+		for key := range lister.Keys() {
+			entry, err := live.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var cp storyCheckpoint
+			if json.Unmarshal(entry.Value(), &cp) != nil || len(cp.Story) == 0 {
+				continue
+			}
+			var s dorv1.Story
+			if proto.Unmarshal(cp.Story, &s) != nil || s.Id == "" {
+				continue
+			}
+			st := &storyState{
+				Story:              &s,
+				ArticleIDs:         cp.ArticleIDs,
+				SourceIDs:          cp.SourceIDs,
+				Embedding:          cp.Embedding,
+				Entities:           cp.Entities,
+				Cell:               cp.Cell,
+				ExpiresAt:          time.Unix(0, cp.ExpiresAt).UTC(),
+				FirstSeen:          cp.FirstSeen,
+				UpdatedAt:          cp.UpdatedAt,
+				CooledAt:           c.now().UnixNano(),
+				EventKey:           cp.EventKey,
+				CategoryBackend:    s.CategoryBackend,
+				CategoryConfidence: s.CategoryConfidence,
+				CategoryDegraded:   s.CategoryBackend == "rule",
+				CategoryFallback:   s.Fallback,
+				PlaceBackend:       s.PlaceBackend,
+				PlaceDegraded:      s.PlaceDegraded,
+				PlaceFallback:      s.PlaceFallback,
+				Hazard:             s.Hazard,
+				Magnitude:          s.Magnitude,
+			}
+			if st.ExpiresAt.IsZero() && st.UpdatedAt > 0 {
+				st.ExpiresAt = time.Unix(st.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
+			}
+			if len(st.EventKeys) == 0 && st.EventKey != "" {
+				st.EventKeys = []string{st.EventKey}
+			}
+			c.overlayEditorTitle(ctx, live, st)
+			committed := commits[s.Id]
+			for _, articleID := range st.ArticleIDs {
+				if committed != nil && committed[articleID] {
 					c.articleStory[articleID] = s.Id
+				} else {
+					c.resume[articleID] = s.Id
 				}
 			}
+			c.stories[s.Id] = st
+			restored[s.Id] = true
+			delete(commitKeys, s.Id)
+			// Repair the derived cache from the authoritative record.
+			if data, err := proto.Marshal(&s); err == nil {
+				_, _ = live.Put(ctx, "story."+s.Id, data)
+			}
+			meta := storyMeta{ID: s.Id, ArticleIDs: st.ArticleIDs, SourceIDs: st.SourceIDs, Embedding: st.Embedding, Entities: st.Entities, FirstSeen: st.FirstSeen, UpdatedAt: st.UpdatedAt}
+			if data, err := json.Marshal(meta); err == nil {
+				_, _ = live.Put(ctx, "storymeta."+s.Id, data)
+			}
 		}
-		c.stories[s.Id] = st
+		_ = lister.Stop()
 	}
-	c.log.Info("cluster: loaded live stories", "stories", len(c.stories))
+
+	lister, err := live.ListKeysFiltered(ctx, "story.*")
+	if err != nil && !isKVNotFound(err) {
+		return err
+	}
+	if lister != nil {
+		for key := range lister.Keys() {
+			if !strings.HasPrefix(key, "story.") || strings.HasPrefix(key, "storymeta.") || strings.HasPrefix(key, "storymap.") {
+				continue
+			}
+			id := strings.TrimPrefix(key, "story.")
+			if restored[id] {
+				continue
+			}
+			entry, err := live.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var s dorv1.Story
+			if err := proto.Unmarshal(entry.Value(), &s); err != nil {
+				continue
+			}
+			st := &storyState{
+				Story:              &s,
+				FirstSeen:          s.FirstSeen,
+				UpdatedAt:          s.UpdatedAt,
+				ExpiresAt:          time.Unix(s.UpdatedAt, 0).UTC().Add(clusterStoryTTL),
+				CategoryBackend:    s.CategoryBackend,
+				CategoryConfidence: s.CategoryConfidence,
+				CategoryDegraded:   s.CategoryBackend == "rule",
+				CategoryFallback:   s.Fallback,
+				PlaceBackend:       s.PlaceBackend,
+				PlaceDegraded:      s.PlaceDegraded,
+				PlaceFallback:      s.PlaceFallback,
+				Hazard:             s.Hazard,
+				Magnitude:          s.Magnitude,
+				// Resume cooling from the persisted heat at process start.
+				CooledAt: c.now().UnixNano(),
+			}
+			if st.Story.Primary < uint32(len(st.Story.Locations)) {
+				st.Cell = locationCell(st.Story.Locations[st.Story.Primary])
+			}
+			if metaEntry, err := live.Get(ctx, "storymeta."+id); err == nil {
+				var meta storyMeta
+				if json.Unmarshal(metaEntry.Value(), &meta) == nil {
+					st.ArticleIDs = meta.ArticleIDs
+					st.SourceIDs = meta.SourceIDs
+					st.Embedding = meta.Embedding
+					st.Entities = meta.Entities
+					st.FirstSeen = meta.FirstSeen
+					st.UpdatedAt = meta.UpdatedAt
+					st.ExpiresAt = time.Unix(meta.UpdatedAt, 0).UTC().Add(clusterStoryTTL)
+					committed := commits[s.Id]
+					for _, articleID := range meta.ArticleIDs {
+						// A missing completion record means the story was
+						// written by an older build or outputs never committed.
+						// Its durable join (when present) is replayed, so keep
+						// it resumable.
+						if committed != nil && committed[articleID] {
+							c.articleStory[articleID] = s.Id
+						} else {
+							c.resume[articleID] = s.Id
+						}
+					}
+				}
+			}
+			c.overlayEditorTitle(ctx, live, st)
+			c.stories[s.Id] = st
+			if data, err := proto.Marshal(st.Story); err == nil {
+				_, _ = live.Put(ctx, "story."+s.Id, data)
+			}
+			meta := storyMeta{ID: s.Id, ArticleIDs: st.ArticleIDs, SourceIDs: st.SourceIDs, Embedding: st.Embedding, Entities: st.Entities, FirstSeen: st.FirstSeen, UpdatedAt: st.UpdatedAt}
+			if data, err := json.Marshal(meta); err == nil {
+				_, _ = live.Put(ctx, "storymeta."+s.Id, data)
+			}
+			delete(commitKeys, s.Id)
+			// Upgrade legacy state to the authoritative checkpoint format.
+			if _, err := c.writeCheckpoint(ctx, live, st); err != nil {
+				c.log.Debug("cluster: could not upgrade legacy story checkpoint", "story_id", s.Id, "err", err)
+			}
+		}
+		_ = lister.Stop()
+	}
+
+	// Rebuild the hazard event identity from the checkpoints and repair any
+	// map entry a crash left unwritten.
+	for _, st := range c.stories {
+		for _, key := range append([]string{st.EventKey}, st.EventKeys...) {
+			if key == "" {
+				continue
+			}
+			c.eventStories[key] = st.Story.Id
+			_, _ = live.Put(ctx, key, []byte(st.Story.Id))
+		}
+	}
+	// Completion records for stories that no longer exist are orphans.
+	if jerr == nil {
+		for storyID := range commitKeys {
+			_ = joins.Delete(ctx, commitKey(storyID))
+		}
+	}
+	c.log.Info("cluster: loaded live stories", "stories", len(c.stories), "resumed_articles", len(c.resume))
 	return nil
 }
 
@@ -805,10 +1686,13 @@ func (c *clusterer) nextHeat(st *storyState, article *dorv1.Article, now time.Ti
 	if st == nil {
 		return initialHeat(article)
 	}
-	age := now.Sub(time.Unix(st.UpdatedAt, 0)).Hours()
-	if age < 0 {
-		age = 0
+	// Story timestamps are second-resolution; use the same resolution here so
+	// a retry in the same second computes exactly the same heat.
+	ageSeconds := now.Unix() - st.UpdatedAt
+	if ageSeconds < 0 {
+		ageSeconds = 0
 	}
+	age := float64(ageSeconds) / 3600
 	base := float64(st.Story.Heat) * math.Exp(-age/24)
 	base += 0.08
 	if st.Story.SourceCount > 1 {
@@ -870,6 +1754,41 @@ func initialHeat(article *dorv1.Article) float32 {
 		heat += 0.2 + 0.2*clamp01(article.GetHints().GetSeverity())
 	}
 	return float32(clamp01(heat))
+}
+
+// placedCountry returns the canonical country of the article's resolved place.
+func placedCountry(place *dorv1.PlacedArticle) string {
+	if place == nil || len(place.Locations) == 0 {
+		return ""
+	}
+	idx := int(place.Primary)
+	if idx < 0 || idx >= len(place.Locations) {
+		idx = 0
+	}
+	if loc := place.Locations[idx]; loc != nil {
+		return loc.Country
+	}
+	return ""
+}
+
+// primaryCountry returns the canonical country of the story's primary place.
+func primaryCountry(story *dorv1.Story) string {
+	if story == nil || len(story.Locations) == 0 {
+		return ""
+	}
+	idx := int(story.Primary)
+	if idx < 0 || idx >= len(story.Locations) {
+		idx = 0
+	}
+	if loc := story.Locations[idx]; loc != nil && loc.Country != "" {
+		return loc.Country
+	}
+	for _, loc := range story.Locations {
+		if loc != nil && loc.Country != "" {
+			return loc.Country
+		}
+	}
+	return ""
 }
 
 func primaryLocation(place *dorv1.PlacedArticle) *dorv1.Location {
@@ -980,6 +1899,7 @@ func locationRecords(in []*dorv1.Location) []store.LocationRecord {
 		out = append(out, store.LocationRecord{
 			PlaceID: l.PlaceId, Name: l.Name, Lat: float64(l.Lat), Lon: float64(l.Lon),
 			Precision: int16(l.Precision), Role: int16(l.Role), Weight: l.Weight,
+			Confidence: l.Weight, Country: l.Country,
 		})
 	}
 	return out

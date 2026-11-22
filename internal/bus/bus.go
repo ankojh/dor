@@ -59,8 +59,15 @@ const (
 	KVBucketSession    = "session"
 	KVBucketSessionTTL = 0
 
-	KVSeenTTL            = 48 * time.Hour
-	KVJoinsTTL           = 30 * time.Second
+	KVSeenTTL = 48 * time.Hour
+	// KVJoinsTTL is zero: the clusterer acknowledges an enrichment message only
+	// after its join is durable, so the join must outlive a process stop or
+	// backlog. The clusterer deletes a join after its story and placed outputs
+	// commit, and removes orphaned join records on restart.
+	KVJoinsTTL = 0
+	// KVJoinsMarkerTTL bounds the delete markers completed joins leave behind
+	// in the non-expiring bucket. Pending joins are live keys and are unaffected.
+	KVJoinsMarkerTTL     = 5 * time.Minute
 	KVBudgetsTTL         = time.Hour
 	KVSpendTTL           = 48 * time.Hour
 	KVLiveStateTTL       = 48 * time.Hour
@@ -378,22 +385,23 @@ func (b *Bus) warnPolicyMismatch(name string, want StreamPolicy, got jetstream.S
 }
 
 type kvSpec struct {
-	name string
-	ttl  time.Duration
+	name      string
+	ttl       time.Duration
+	markerTTL time.Duration
 }
 
 func kvBuckets() []kvSpec {
 	return []kvSpec{
-		{KVBucketSeen, KVSeenTTL},
-		{KVBucketJoins, KVJoinsTTL},
-		{KVBucketBudgets, KVBudgetsTTL},
-		{KVBucketSpend, KVSpendTTL},
-		{KVBucketLiveState, KVLiveStateTTL},
-		{KVBucketPublisher, KVPublisherTTL},
-		{KVBucketAlertDelivery, KVAlertDeliveryTTL},
-		{KVBucketSourceHealth, KVSourceHealthTTL},
-		{KVBucketEvalPending, KVEvalPendingTTL},
-		{KVBucketSession, KVBucketSessionTTL},
+		{KVBucketSeen, KVSeenTTL, 0},
+		{KVBucketJoins, KVJoinsTTL, KVJoinsMarkerTTL},
+		{KVBucketBudgets, KVBudgetsTTL, 0},
+		{KVBucketSpend, KVSpendTTL, 0},
+		{KVBucketLiveState, KVLiveStateTTL, 0},
+		{KVBucketPublisher, KVPublisherTTL, 0},
+		{KVBucketAlertDelivery, KVAlertDeliveryTTL, 0},
+		{KVBucketSourceHealth, KVSourceHealthTTL, 0},
+		{KVBucketEvalPending, KVEvalPendingTTL, 0},
+		{KVBucketSession, KVBucketSessionTTL, 0},
 	}
 }
 
@@ -417,11 +425,12 @@ func (b *Bus) provisionKV(ctx context.Context) error {
 			}
 		}
 		kv, err := b.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-			Bucket:   spec.name,
-			History:  1,
-			TTL:      spec.ttl,
-			Storage:  jetstream.FileStorage,
-			MaxBytes: maxBytes,
+			Bucket:         spec.name,
+			History:        1,
+			TTL:            spec.ttl,
+			Storage:        jetstream.FileStorage,
+			MaxBytes:       maxBytes,
+			LimitMarkerTTL: spec.markerTTL,
 		})
 		if err != nil {
 			return fmt.Errorf("bus: provision kv %s: %w", spec.name, err)
@@ -674,6 +683,9 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	kv, ok := b.kv[bucket]
 	b.kvMu.Unlock()
 	if ok {
+		if bucket == KVBucketJoins {
+			return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+		}
 		return kv, nil
 	}
 	kv, err := b.js.KeyValue(ctx, bucket)
@@ -683,7 +695,51 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	b.kvMu.Lock()
 	b.kv[bucket] = kv
 	b.kvMu.Unlock()
+	if bucket == KVBucketJoins {
+		// The joins bucket must never use the library's PurgeDeletes: it
+		// snapshots markers and then purges each subject unconditionally,
+		// which can erase a join recreated after the snapshot.
+		return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+	}
 	return kv, nil
+}
+
+// safeJoinsKV replaces the destructive PurgeDeletes implementation with a
+// revision-fenced retirement. Each observed delete marker is removed with a
+// subject purge bounded at marker+1; a Put that arrives later has a higher
+// stream sequence and survives.
+type safeJoinsKV struct {
+	jetstream.KeyValue
+	bus    *Bus
+	bucket string
+}
+
+func (s *safeJoinsKV) PurgeDeletes(ctx context.Context, _ ...jetstream.KVPurgeOpt) error {
+	watcher, err := s.KeyValue.WatchAll(ctx)
+	if err != nil {
+		return err
+	}
+	var markers []jetstream.KeyValueEntry
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		if op := entry.Operation(); op == jetstream.KeyValueDelete || op == jetstream.KeyValuePurge {
+			markers = append(markers, entry)
+		}
+	}
+	_ = watcher.Stop()
+	stream, err := s.bus.JS().Stream(ctx, "KV_"+s.bucket)
+	if err != nil {
+		return err
+	}
+	for _, entry := range markers {
+		subject := "$KV." + s.bucket + "." + entry.Key()
+		if err := stream.Purge(ctx, jetstream.WithPurgeSubject(subject), jetstream.WithPurgeSequence(entry.Revision()+1)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close drains the client, waits for the closed callback, then shuts down the

@@ -29,7 +29,7 @@ func NewPhoton(base string) *Photon {
 }
 
 // Geocode returns up to limit Photon features for query, biased near lat/lon
-// when both are non-zero.
+// when the bias is valid.
 func (p *Photon) Geocode(ctx context.Context, query string, lat, lon float64, limit int) ([]Place, error) {
 	if p == nil {
 		return nil, fmt.Errorf("geo: photon disabled")
@@ -40,7 +40,7 @@ func (p *Photon) Geocode(ctx context.Context, query string, lat, lon float64, li
 	q := url.Values{}
 	q.Set("q", query)
 	q.Set("limit", strconv.Itoa(limit))
-	if lat != 0 || lon != 0 {
+	if ValidCoordinates(lat, lon) {
 		q.Set("lat", fmt.Sprintf("%.5f", lat))
 		q.Set("lon", fmt.Sprintf("%.5f", lon))
 	}
@@ -79,7 +79,7 @@ func (p *Photon) Geocode(ctx context.Context, query string, lat, lon float64, li
 	}
 	out := make([]Place, 0, len(body.Features))
 	for _, f := range body.Features {
-		if len(f.Geometry.Coordinates) < 2 {
+		if len(f.Geometry.Coordinates) < 2 || !ValidCoordinates(f.Geometry.Coordinates[1], f.Geometry.Coordinates[0]) {
 			continue
 		}
 		name := f.Properties.Name

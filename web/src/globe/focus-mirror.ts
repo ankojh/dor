@@ -179,13 +179,34 @@ export class FocusMirror {
   get litStoryCount(): number {
     return this.litStories.size;
   }
-
   get litLinkCount(): number {
     return this.litLinks.size;
   }
 
   get litStoryIndices(): ReadonlySet<number> {
     return this.litStories;
+  }
+
+  /**
+   * Every lit byte, as if from a focus switch. Used after a WebGL context
+   * restore: the shader state is fresh, so the mirror must re-send the full
+   * thread rather than only the next delta.
+   */
+  snapshot(nowSec: number): {
+    storyChanges: FocusStoryChange[];
+    linkChanges: FocusLinkChange[];
+  } {
+    const storyChanges: FocusStoryChange[] = [];
+    for (const story of this.litStories) {
+      const state = this.storyState[story]!;
+      storyChanges.push({ index: story, state, prev: state, at: nowSec });
+    }
+    const linkChanges: FocusLinkChange[] = [];
+    for (const link of this.litLinks) {
+      const state = this.linkState[link]!;
+      linkChanges.push({ index: link, state, prev: state, at: nowSec });
+    }
+    return { storyChanges, linkChanges };
   }
 
   degree(storyIndex: number): number {

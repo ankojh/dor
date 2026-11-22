@@ -5,6 +5,7 @@ import type {
   Map as MapLibreMap,
 } from "maplibre-gl";
 import { CATEGORY_COLORS, DEFAULT_STRENGTH_FLOOR, LINK_COLORS } from "../encoding";
+import { choosePick, decodePickId, type PickHit } from "../pick";
 import { lngLatToMercator, matrixTranslate, splitMercator } from "../mercator";
 import type { FakeInit, FocusPatch, StreamPatch } from "../../worker/fake/protocol";
 import { GlobeGpuData } from "./buffers";
@@ -21,6 +22,8 @@ import {
   TETHER_VERT,
   PICK_FRAG,
   PICK_VERT,
+  PICK_ARC_FRAG,
+  PICK_ARC_VERT,
 } from "./shaders";
 
 type ProgramInfo = {
@@ -96,6 +99,7 @@ const COMMON_UNIFORMS = [
   "uAnchorLo",
   "uViewport",
   "uTime",
+  "uFocusAt",
   "uHasFocus",
   "uFloor",
   "uStoryTexWidth",
@@ -122,6 +126,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
   private data: GlobeGpuData | null = null;
   private init: FakeInit | null = null;
   private hasFocus = false;
+  private focusAt = 0;
   private floor = DEFAULT_STRENGTH_FLOOR;
   private linesVisible = true;
   private tethersVisible = true;
@@ -134,12 +139,15 @@ export class CustomGlobeLayer implements CustomLayerInterface {
   private tetherProgram: ProgramInfo | null = null;
   private ringProgram: ProgramInfo | null = null;
   private pickProgram: ProgramInfo | null = null;
+  private pickArcProgram: ProgramInfo | null = null;
 
   private pickFramebuffer: WebGLFramebuffer | null = null;
   private pickTexture: WebGLTexture | null = null;
   private pickWidth = 0;
   private pickHeight = 0;
   private readonly pickPixel = new Uint8Array(4);
+  private pickPassCount = 0;
+  private pickReadCount = 0;
 
   private readonly renderState = {
     main: new Float32Array(16),
@@ -151,6 +159,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     globe: true,
     zoom: 0,
     time: 0,
+    focusAt: 0,
     hasFocus: 0,
     floor: DEFAULT_STRENGTH_FLOOR,
     storyTexWidth: 2048,
@@ -183,6 +192,17 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     }
     this.map = map;
     this.gl = gl;
+    // A restored context hands us a new GL object: no program, VAO, texture or
+    // framebuffer from the old one is valid. Rebuild them lazily on the next
+    // frame, and rebuild the GPU data from the retained init if we have one.
+    this.variantName = null;
+    this.disposePrograms();
+    this.pickFramebuffer = null;
+    this.pickTexture = null;
+    this.pickWidth = 0;
+    this.pickHeight = 0;
+    this.data?.dispose();
+    this.data = null;
     for (let i = 0; i < 11; i++) {
       const rgb = CATEGORY_COLORS[i] ?? CATEGORY_COLORS[0]!;
       this.categoryColors[i * 3] = rgb[0] / 255;
@@ -195,6 +215,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       this.linkColors[i * 3 + 1] = rgb[1] / 255;
       this.linkColors[i * 3 + 2] = rgb[2] / 255;
     }
+    if (this.init) this.data = new GlobeGpuData(gl, this.init);
   }
 
   /**
@@ -217,6 +238,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     this.arcProgram = createProgram(gl, vertex(ARC_VERT), ARC_FRAG, "arcs", [
       ...COMMON_UNIFORMS,
       "uArcFocusTex",
+      "uArcDirTex",
       "uLinkColors[0]",
     ]);
     this.rippleProgram = createProgram(gl, vertex(RIPPLE_VERT), RIPPLE_FRAG, "ripples", [
@@ -234,6 +256,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       ...COMMON_UNIFORMS,
       "uStoryTex",
     ]);
+    this.pickArcProgram = createProgram(gl, vertex(PICK_ARC_VERT), PICK_ARC_FRAG, "pick-arcs", [
+      ...COMMON_UNIFORMS,
+      "uArcFocusTex",
+    ]);
   }
 
   private disposePrograms(): void {
@@ -246,6 +272,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       this.tetherProgram,
       this.ringProgram,
       this.pickProgram,
+      this.pickArcProgram,
     ]) {
       if (info) gl.deleteProgram(info.program);
     }
@@ -255,6 +282,7 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     this.tetherProgram = null;
     this.ringProgram = null;
     this.pickProgram = null;
+    this.pickArcProgram = null;
   }
 
   onRemove(): void {
@@ -262,54 +290,101 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     this.data?.dispose();
     this.data = null;
     this.disposePickTarget();
+    // Drop the dead context reference. setInit() may still arrive while the
+    // layer is detached; onAdd() rebuilds from the retained init later.
+    this.gl = null;
+    this.variantName = null;
+  }
+
+  /** Called when the canvas reports context loss, before the style is torn down. */
+  handleContextLost(): void {
+    this.disposePrograms();
+    this.data?.dispose();
+    this.data = null;
+    this.pickFramebuffer = null;
+    this.pickTexture = null;
+    this.pickWidth = 0;
+    this.pickHeight = 0;
+    this.gl = null;
+    this.variantName = null;
   }
 
   setInit(init: FakeInit): void {
+    // Retain the init even while the context is lost so onAdd can rebuild the
+    // GPU data when MapLibre hands us the restored context.
+    this.init = init;
     if (!this.gl) return;
     this.data?.dispose();
-    this.init = init;
     this.data = new GlobeGpuData(this.gl, init);
   }
 
   /**
-   * Read the id of the last rendered frame at a CSS pixel. The id pass is
-   * redrawn once per frame, so a click only pays for a 1-pixel readback
-   * (occlusion-correct, no CPU projection loop).
+   * Pick under a CSS pixel. The id pass is *not* drawn per frame: both passes
+   * are rendered lazily here, on the click, then a single pixel is read back.
+   * Dots are read first and win over arcs, which is what "click a dot focuses
+   * its story" means when a link crosses the dot.
    */
-  pickNow(clientX: number, clientY: number): number | null {
+  pickNow(clientX: number, clientY: number): PickHit | null {
     if (!this.gl || !this.data || !this.map) return null;
-    if (!this.pickFramebuffer) return null;
-    const gl = this.gl;
-    const canvas = this.map.getCanvas();
-    const cssWidth = canvas.clientWidth || 1;
-    const dpr = gl.drawingBufferWidth / cssWidth;
-    const width = this.pickWidth;
-    const height = this.pickHeight;
-    const pixelX = Math.max(0, Math.min(width - 1, Math.floor(clientX * dpr)));
-    const pixelY = Math.max(0, Math.min(height - 1, height - 1 - Math.floor(clientY * dpr)));
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFramebuffer);
-    gl.readPixels(pixelX, pixelY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.pickPixel);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    const id = this.pickPixel[0]! + this.pickPixel[1]! * 256 + this.pickPixel[2]! * 65536;
-    return id > 0 ? id - 1 : null;
+    const story = this.pickPass(clientX, clientY, (gl) => this.renderStoryPickPass(gl));
+    if (story !== null) return choosePick(story, null);
+    const link = this.pickPass(clientX, clientY, (gl) => this.renderArcPickPass(gl));
+    return choosePick(null, link);
   }
 
-  /** Redraw the story id buffer for the frame just drawn. */
-  private renderPickPass(gl: WebGL2RenderingContext): void {
-    const data = this.data;
-    const pick = this.pickProgram;
-    if (!data || !pick) return;
+  /** Hover uses the last drawn projection and CPU mirrors; GPU readback stays click-only. */
+  hoverFocusedArc(indices: readonly number[], x: number, y: number): number | null {
+    if (!this.gl || !this.data || !this.linesVisible || !this.hasFocus || !this.frames) return null;
+    return this.data.hitFocusedArc(indices, this.renderState, x, y, {
+      zoom: this.renderState.zoom,
+      time: this.renderState.time,
+      focusAt: this.focusAt,
+      hasFocus: this.hasFocus,
+      floor: this.floor,
+      dropThematic: this.quality >= 3,
+    });
+  }
+
+  private pickPass(
+    clientX: number,
+    clientY: number,
+    draw: (gl: WebGL2RenderingContext) => void,
+  ): number | null {
+    const gl = this.gl;
+    const map = this.map;
+    if (!gl || !map) return null;
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
     this.ensurePickTarget(width, height);
-    if (!this.pickFramebuffer) return;
+    if (!this.pickFramebuffer) return null;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFramebuffer);
     gl.viewport(0, 0, width, height);
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.colorMask(true, true, true, true);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
+    draw(gl);
+    gl.bindVertexArray(null);
+    this.pickPassCount++;
+    const canvas = map.getCanvas();
+    const cssWidth = canvas.clientWidth || 1;
+    const dpr = width / cssWidth;
+    const pixelX = Math.max(0, Math.min(width - 1, Math.floor(clientX * dpr)));
+    const pixelY = Math.max(0, Math.min(height - 1, height - 1 - Math.floor(clientY * dpr)));
+    gl.readPixels(pixelX, pixelY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.pickPixel);
+    this.pickReadCount++;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
+    const id = decodePickId(this.pickPixel[0]!, this.pickPixel[1]!, this.pickPixel[2]!);
+    return id > 0 ? id - 1 : null;
+  }
+
+  private renderStoryPickPass(gl: WebGL2RenderingContext): void {
+    const data = this.data;
+    const pick = this.pickProgram;
+    if (!data || !pick) return;
     gl.useProgram(pick.program);
     this.applyCommon(gl, pick);
     gl.activeTexture(gl.TEXTURE0);
@@ -319,8 +394,21 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     gl.bindVertexArray(data.dotMesh.vao);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, data.counts.stories);
     gl.bindVertexArray(null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, width, height);
+  }
+
+  private renderArcPickPass(gl: WebGL2RenderingContext): void {
+    const data = this.data;
+    const pick = this.pickArcProgram;
+    if (!data || !pick || !this.linesVisible) return;
+    gl.useProgram(pick.program);
+    this.applyCommon(gl, pick);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, data.arcFocusTex);
+    const linkLocation = pick.uniforms.get("uArcFocusTex");
+    if (linkLocation) gl.uniform1i(linkLocation, 0);
+    gl.bindVertexArray(data.arcMesh.vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, data.arcMesh.instanceCount);
+    gl.bindVertexArray(null);
   }
 
   private ensurePickTarget(width: number, height: number): void {
@@ -384,6 +472,8 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     if (viewport) gl.uniform2f(viewport, state.width, state.height);
     const time = set("uTime");
     if (time) gl.uniform1f(time, state.time);
+    const focusAt = set("uFocusAt");
+    if (focusAt) gl.uniform1f(focusAt, state.focusAt);
     const hasFocus = set("uHasFocus");
     if (hasFocus) gl.uniform1f(hasFocus, state.hasFocus);
     const floor = set("uFloor");
@@ -432,8 +522,15 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     linkChanges: FocusPatch["linkChanges"],
     focusActive: boolean,
   ): void {
+    if (focusActive !== this.hasFocus) {
+      this.focusAt = this.timeSeconds();
+    }
     this.hasFocus = focusActive;
     this.data?.updateFocusChanges(storyChanges, linkChanges);
+  }
+
+  private timeSeconds(): number {
+    return this.timeOverride ?? (Date.now() - (this.init?.epochMs ?? 0)) / 1000;
   }
 
   /** Worker-followed data: surface tethers for the focused story. */
@@ -575,12 +672,16 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     globeFrames: number;
     mercatorFrames: number;
     globe: boolean;
+    pickPasses: number;
+    pickReads: number;
   } {
     return {
       frames: this.frames,
       globeFrames: this.globeFrames,
       mercatorFrames: this.mercatorFrames,
       globe: this.lastGlobe,
+      pickPasses: this.pickPassCount,
+      pickReads: this.pickReadCount,
     };
   }
 
@@ -623,7 +724,8 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     state.clip.set(projection.clippingPlane);
     state.transition = projection.projectionTransition;
     state.zoom = this.map.getZoom();
-    state.time = this.timeOverride ?? (Date.now() - (this.init?.epochMs ?? 0)) / 1000;
+    state.time = this.timeSeconds();
+    state.focusAt = this.focusAt;
     state.hasFocus = this.hasFocus ? 1 : 0;
     state.floor = this.floor;
     const widths = data.textureWidths;
@@ -685,6 +787,10 @@ export class CustomGlobeLayer implements CustomLayerInterface {
       gl.bindTexture(gl.TEXTURE_2D, data.arcFocusTex);
       const textureLocation = this.arcProgram.uniforms.get("uArcFocusTex");
       if (textureLocation) gl.uniform1i(textureLocation, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, data.arcDirTex);
+      const dirLocation = this.arcProgram.uniforms.get("uArcDirTex");
+      if (dirLocation) gl.uniform1i(dirLocation, 1);
       const linkColorLocation = this.arcProgram.uniforms.get("uLinkColors[0]");
       if (linkColorLocation) gl.uniform3fv(linkColorLocation, this.linkColors);
       gl.bindVertexArray(data.arcMesh.vao);
@@ -708,6 +814,5 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     }
 
     gl.bindVertexArray(null);
-    this.renderPickPass(gl);
   }
 }

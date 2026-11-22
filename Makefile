@@ -26,6 +26,7 @@ go-build:
 	$(GO) build -o $(BIN)/probe ./tools/probe
 	$(GO) build -o $(BIN)/replayer ./tools/replayer
 
+# Operator release/rollback hold: docs/operations.md#mandatory-gateway-and-web-worker-release-gate
 run: build ## Build and run dor (AGENTS=classify,plot; loads .env when present)
 	$(LOAD_ENV) ./$(BIN)/dor run --agents=$(or $(AGENTS),all)
 
@@ -71,6 +72,7 @@ web-typecheck: ## tsc --noEmit
 web-test: ## Vitest
 	cd $(WEB) && $(PNPM) test
 
+# Building does not authorize publishing; see docs/operations.md#mandatory-gateway-and-web-worker-release-gate
 web-build: ## Production web build
 	cd $(WEB) && $(PNPM) build
 

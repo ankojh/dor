@@ -292,9 +292,11 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 	c.seq = snap.Seq
 	c.pending, c.order, c.waiters = make(map[string]*dorv1.Delta), nil, nil
 	c.stories, c.links, c.wireRows = make(map[string]*dorv1.Story), make(map[string]*dorv1.Link), make(map[string]*dorv1.WireRow)
+	c.cooledAt = make(map[string]int64)
 	c.wire, c.wireOrder = nil, nil
 	for _, story := range snap.Stories {
 		c.stories[story.Id] = story
+		c.cooledAt[story.Id] = c.now().UnixNano()
 	}
 	for _, link := range snap.Links {
 		c.links[link.A+"|"+link.B] = link
@@ -305,7 +307,9 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 		c.wireOrder = append(c.wireOrder, row.ArticleId)
 	}
 	c.mu.Unlock()
+	c.mu.Lock()
 	c.inflight = nil
+	c.mu.Unlock()
 	if len(cp.Pending) > 0 || cp.PendingRevisions != nil {
 		var batch dorv1.DeltaBatch
 		if err := proto.Unmarshal(cp.Pending, &batch); err != nil {
@@ -318,7 +322,9 @@ func (c *publisherCore) restoreV1(ctx context.Context) error {
 			}
 			next++
 		}
+		c.mu.Lock()
 		c.inflight = &publisherBatch{data: cp.Pending, deltas: batch.Deltas, reserved: true, revisions: maps.Clone(cp.PendingRevisions), scores: cloneScores(cp.PendingScores)}
+		c.mu.Unlock()
 		for _, d := range batch.Deltas {
 			if row := d.GetWire(); row != nil {
 				if c.wireRows[row.ArticleId] == nil {
@@ -580,16 +586,26 @@ func (c *publisherCore) applyDeltaLocked(d *dorv1.Delta) {
 	case *dorv1.Delta_StoryUpsert:
 		if s := body.StoryUpsert; s != nil {
 			c.stories[s.Id] = s
+			c.cooledAt[s.Id] = c.now().UnixNano()
 		}
 	case *dorv1.Delta_StoryExpire:
 		delete(c.stories, body.StoryExpire)
+		delete(c.cooledAt, body.StoryExpire)
 	case *dorv1.Delta_LinkUpsert:
 		if l := body.LinkUpsert; l != nil {
-			c.links[l.A+"|"+l.B] = l
+			a, bb := l.A, l.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			c.links[a+"|"+bb] = l
 		}
 	case *dorv1.Delta_LinkRemove:
 		if l := body.LinkRemove; l != nil {
-			delete(c.links, l.A+"|"+l.B)
+			a, bb := l.A, l.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			delete(c.links, a+"|"+bb)
 		}
 	case *dorv1.Delta_Wire:
 		if row := body.Wire; row != nil {

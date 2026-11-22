@@ -600,7 +600,10 @@ async function boot(): Promise<void> {
   api.removeStory = (index) => {
     worker?.postMessage({ type: "story", action: "remove", index } satisfies WorkerCommand);
   };
-  api.pickAt = (x, y) => (customLayer ? customLayer.pickNow(x, y) : null);
+  api.pickAt = (x, y) => {
+    const hit = customLayer?.pickNow(x, y);
+    return hit?.kind === "story" ? hit.index : null;
+  };
   api.degree = (index) => mirror?.degree(index) ?? 0;
   api.cameraCancel = () => {
     camera.cancel();
@@ -726,7 +729,8 @@ async function boot(): Promise<void> {
     originalEvent?: unknown;
   }): void => {
     if (!init || !customLayer || !event.originalEvent) return;
-    lastPick = customLayer.pickNow(event.point.x, event.point.y);
+    const pick = customLayer.pickNow(event.point.x, event.point.y);
+    lastPick = pick?.kind === "story" ? pick.index : null;
     lastPickAt = performance.now();
     lastPickPoint = { x: event.point.x, y: event.point.y };
     lastInteractionAt = lastPickAt;
@@ -743,7 +747,8 @@ async function boot(): Promise<void> {
       lastPickPoint !== null &&
       performance.now() - lastPickAt < 1000 &&
       Math.hypot(lastPickPoint.x - event.point.x, lastPickPoint.y - event.point.y) < 8;
-    const picked = cached ? lastPick : (customLayer?.pickNow(event.point.x, event.point.y) ?? null);
+    const pick = cached ? null : customLayer?.pickNow(event.point.x, event.point.y);
+    const picked = cached ? lastPick : pick?.kind === "story" ? pick.index : null;
     if (picked !== null && picked >= 0) {
       lastInteractionAt = performance.now();
       focusFromInput(picked, inputAt, "click");

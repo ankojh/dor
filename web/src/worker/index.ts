@@ -26,7 +26,7 @@ import type {
 } from "./messages";
 import { LiveState } from "./state";
 import { transferablesOf, type FeedMessage } from "./messages";
-import { DeltaSequence, hasWireConstraints } from "./sequence";
+import { DeltaSequence } from "./sequence";
 import { resolveSocketUrl } from "./url";
 
 const statusScope = globalThis as unknown as {
@@ -159,18 +159,17 @@ function awaitSnapshot(connection: WebSocket): void {
 
 /**
  * Apply one delta batch in order, dropping duplicates and out-of-order frames.
- * When the gateway is not filtering wire rows, a sequence gap means frames
- * were lost: reconnect from the last contiguous seq so the gateway can replay
- * them or answer with Resync + snapshot. With wire filters active, skipped
- * rows create legitimate gaps, so they are applied rather than resynced.
+ * The gateway keeps the global sequence contiguous by replacing per-client
+ * filtered deltas with seq-only no-ops, so a gap always means frames were lost:
+ * reconnect from the last contiguous seq so the gateway can replay them or
+ * answer with Resync + snapshot.
  */
 function handleDeltaBatch(connection: WebSocket, batch: Delta[]): void {
-  const allowGaps = hasWireConstraints(activeFilters);
   let applied = 0;
   let gapAt: number | null = null;
   for (const delta of batch) {
     const seq = Number(delta.seq);
-    const disposition = sequencing.classify(seq, allowGaps);
+    const disposition = sequencing.classify(seq);
     if (disposition === "duplicate") {
       debug.duplicates = Number(debug.duplicates) + 1;
       continue;

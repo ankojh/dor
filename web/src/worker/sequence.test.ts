@@ -1,25 +1,13 @@
 /**
- * Behaviour of the delta-sequence guard and the wire-constraint predicate.
+ * Behaviour of the delta-sequence guard.
  *
  * The guard's job is to tell three outcomes apart: a delta to apply, a
- * duplicate/out-of-order frame to drop silently, and a gap that only means
- * lost transport frames when the gateway is not filtering on this client's
- * behalf.
+ * duplicate/out-of-order frame to drop silently, and a gap that means lost
+ * transport frames. The gateway keeps filtered deltas in the sequence as
+ * seq-only no-ops, so a hole is never legitimate.
  */
 import { describe, expect, it } from "vitest";
-import { DeltaSequence, hasWireConstraints } from "./sequence";
-import type { WireFilters } from "./messages";
-
-const unconstrained: WireFilters = {
-  categories: [],
-  regions: [],
-  minSources: 0,
-  lang: [],
-  sources: [],
-  lat: 0,
-  lon: 0,
-  radiusKm: 0,
-};
+import { DeltaSequence } from "./sequence";
 
 describe("DeltaSequence.classify", () => {
   it("classifies the current seq and every older seq as duplicates", () => {
@@ -52,25 +40,22 @@ describe("DeltaSequence.classify", () => {
     expect(sequence.classify(42)).toBe("apply");
   });
 
-  it("reports a gap when gaps are not allowed", () => {
+  it("reports a gap when the next seq is missing", () => {
     const sequence = new DeltaSequence();
     sequence.reset(3);
 
-    expect(sequence.classify(5, false)).toBe("gap");
-    expect(sequence.classify(10, false)).toBe("gap");
+    expect(sequence.classify(5)).toBe("gap");
+    expect(sequence.classify(10)).toBe("gap");
     // A gap is a classification only; it does not advance the marker.
     expect(sequence.lastSeq).toBe(3);
   });
 
-  it("applies a gap when wire filters can explain the missing rows", () => {
+  it("still treats an older seq as a duplicate after a gap", () => {
     const sequence = new DeltaSequence();
     sequence.reset(3);
 
-    expect(sequence.classify(5, true)).toBe("apply");
-    expect(sequence.classify(99, true)).toBe("apply");
-    // Still a duplicate when the seq is not newer, even with gaps allowed.
-    expect(sequence.classify(3, true)).toBe("duplicate");
-    expect(sequence.classify(2, true)).toBe("duplicate");
+    expect(sequence.classify(3)).toBe("duplicate");
+    expect(sequence.classify(2)).toBe("duplicate");
   });
 
   it("floors fractional seqs before comparing", () => {
@@ -138,32 +123,5 @@ describe("DeltaSequence.commit", () => {
     expect(sequence.lastSeq).toBe(6);
     sequence.commit(6.1);
     expect(sequence.lastSeq).toBe(6);
-  });
-});
-
-describe("hasWireConstraints", () => {
-  it("is false without filters and for an empty filter set", () => {
-    expect(hasWireConstraints(null)).toBe(false);
-    expect(hasWireConstraints(undefined)).toBe(false);
-    expect(hasWireConstraints(unconstrained)).toBe(false);
-  });
-
-  it("is true for each filter that can drop wire rows", () => {
-    expect(hasWireConstraints({ ...unconstrained, categories: [1] })).toBe(true);
-    expect(hasWireConstraints({ ...unconstrained, regions: ["EU"] })).toBe(true);
-    expect(hasWireConstraints({ ...unconstrained, minSources: 2 })).toBe(true);
-    expect(hasWireConstraints({ ...unconstrained, lang: ["en"] })).toBe(true);
-    expect(hasWireConstraints({ ...unconstrained, sources: ["wire"] })).toBe(true);
-    expect(hasWireConstraints({ ...unconstrained, radiusKm: 25 })).toBe(true);
-  });
-
-  it("does not treat a bare location as a wire constraint", () => {
-    // A centre without a radius filters nothing server-side.
-    expect(hasWireConstraints({ ...unconstrained, lat: 51.5, lon: -0.12 })).toBe(false);
-  });
-
-  it("ignores prompts, which are not part of the wire filter set", () => {
-    const promptsOnly = { ...unconstrained, prompts: ["ceasefire"] } as unknown as WireFilters;
-    expect(hasWireConstraints(promptsOnly)).toBe(false);
   });
 });

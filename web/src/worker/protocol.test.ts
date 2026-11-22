@@ -14,6 +14,7 @@ import {
   ResyncSchema,
   ServerMessageSchema,
   SnapshotSchema,
+  WireRowSchema,
   type ClientMessage,
   type ServerMessage,
 } from "../gen/dor/v1/dor_pb";
@@ -134,6 +135,36 @@ function deltasFrame(seqs: number[]): Uint8Array {
       deltas: seqs.map((seq) =>
         create(DeltaSchema, { seq: BigInt(seq), body: { case: undefined } }),
       ),
+    }),
+  });
+}
+
+/**
+ * A private-alert seq the gateway projected away (no-op) followed by a public
+ * wire row. This is the wire shape after the gateway keeps the sequence
+ * contiguous for per-client filtered deltas.
+ */
+function noopThenWireFrame(noopSeq: number, wireSeq: number): Uint8Array {
+  return serverMessage({
+    case: "deltas",
+    value: create(DeltaBatchSchema, {
+      deltas: [
+        create(DeltaSchema, { seq: BigInt(noopSeq), body: { case: undefined } }),
+        create(DeltaSchema, {
+          seq: BigInt(wireSeq),
+          body: {
+            case: "wire",
+            value: create(WireRowSchema, {
+              articleId: `article-${wireSeq}`,
+              storyId: `story-${wireSeq}`,
+              title: `public row ${wireSeq}`,
+              source: "test",
+              at: BigInt(wireSeq),
+              category: 1,
+            }),
+          },
+        }),
+      ],
     }),
   });
 }
@@ -401,6 +432,32 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     expect(postedOfType("status").at(-1)?.lastSeq).toBe(6);
   });
 
+  it("applies a public delta after a projected private alert no-op, without reconnecting", async () => {
+    await importWorker();
+    const ws = startAndOpen();
+    ws.receive(snapshotFrame(5));
+    const sentBefore = ws.sent.length;
+
+    // Seq 6 was another session's private alert: the gateway sends a seq-only
+    // no-op so the client can still apply public seq 7.
+    ws.receive(noopThenWireFrame(6, 7));
+
+    expect(ws.closed).toBe(false);
+    expect(instances).toHaveLength(1);
+    expect(ws.sent).toHaveLength(sentBefore + 1);
+    const ack = decodeSent(ws, ws.sent.length - 1);
+    expect(ack.body.case).toBe("ack");
+    expect((ack.body as { value: { seq: bigint } }).value.seq).toBe(7n);
+    expect(postedOfType("status").at(-1)?.lastSeq).toBe(7);
+
+    // Accepting the no-op must not merely advance bookkeeping: the public
+    // row it unblocked has to actually reach the emitted worker state.
+    send({ type: "frame" });
+    const patch = postedOfType("patch").at(-1);
+    const row = patch?.wire.find((candidate) => candidate.articleId === "article-7");
+    expect(row).toMatchObject({ articleId: "article-7", storyId: "story-7" });
+  });
+
   it("closes 4002 on a gap with no wire filters and reconnects with Hello(lastSeq=5)", async () => {
     await importWorker();
     const ws = startAndOpen();
@@ -425,7 +482,7 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(5n);
   });
 
-  it("accepts a gap when a wire filter is active, because filtered rows create legitimate gaps", async () => {
+  it("detects a gap even when a wire filter is active, because filtered deltas arrive as no-ops", async () => {
     await importWorker();
     send({
       type: "filters",
@@ -442,17 +499,22 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     });
     const ws = startAndOpen();
     ws.receive(snapshotFrame(5));
-    const sentBefore = ws.sent.length;
 
     ws.receive(deltasFrame([8]));
 
-    expect(ws.closed).toBe(false);
+    // The gateway accounts for every filtered delta with a seq-only no-op, so
+    // a hole is transport loss even while this client has wire filters.
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toBe(4002);
     expect(instances).toHaveLength(1);
-    expect(ws.sent).toHaveLength(sentBefore + 1);
-    const ack = decodeSent(ws, ws.sent.length - 1);
-    expect(ack.body.case).toBe("ack");
-    expect((ack.body as { value: { seq: bigint } }).value.seq).toBe(8n);
-    expect(postedOfType("status").at(-1)?.lastSeq).toBe(8);
+
+    vi.advanceTimersByTime(1);
+    expect(instances).toHaveLength(2);
+    const replacement = instances[1]!;
+    replacement.open();
+    const hello = lastHello(replacement);
+    expect(hello.body.case).toBe("hello");
+    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(5n);
   });
 
   it("retires the socket on refresh (4001) and sends Hello(lastSeq=0) on the replacement", async () => {

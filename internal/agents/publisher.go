@@ -721,7 +721,11 @@ func (c *publisherCore) onLink(l *dorv1.Link) {
 		}})
 		return
 	}
-	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: l}})
+	// Normalise the pair order before the committed state stores it, so a
+	// later removal (always sorted) deletes the same key.
+	normalised := proto.Clone(l).(*dorv1.Link)
+	normalised.A, normalised.B = a, b
+	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: normalised}})
 }
 
 func (c *publisherCore) enqueue(key string, delta *dorv1.Delta) {

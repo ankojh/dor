@@ -593,11 +593,19 @@ func (c *publisherCore) applyDeltaLocked(d *dorv1.Delta) {
 		delete(c.cooledAt, body.StoryExpire)
 	case *dorv1.Delta_LinkUpsert:
 		if l := body.LinkUpsert; l != nil {
-			c.links[l.A+"|"+l.B] = l
+			a, bb := l.A, l.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			c.links[a+"|"+bb] = l
 		}
 	case *dorv1.Delta_LinkRemove:
 		if l := body.LinkRemove; l != nil {
-			delete(c.links, l.A+"|"+l.B)
+			a, bb := l.A, l.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			delete(c.links, a+"|"+bb)
 		}
 	case *dorv1.Delta_Wire:
 		if row := body.Wire; row != nil {

@@ -61,6 +61,21 @@ func (c *classifier) handle(ctx context.Context, msg *Message, out *Emitter) err
 
 func (c *classifier) classify(ctx context.Context, article *dorv1.Article) *dorv1.ClassifiedArticle {
 	lang := resolveLanguage(article.GetLang(), article.GetTitle(), article.GetLede())
+	// A hazard feed's own hazard field is authoritative: USGS/GDACS/EONET
+	// events are Disaster even when the title has no disaster words. Short-
+	// circuit before any model call so jev/Claude cannot answer "other".
+	if hazard := strings.TrimSpace(article.GetHints().GetHazard()); hazard != "" {
+		return &dorv1.ClassifiedArticle{
+			Article:    article,
+			Category:   dorv1.Category_CATEGORY_DISASTER,
+			Confidence: 1,
+			Accepted:   true,
+			Fallback:   true,
+			Degraded:   false,
+			Backend:    "hints",
+			Lang:       lang,
+		}
+	}
 	if c.deps.Decider != nil {
 		callCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 		resp, err := c.deps.Decider.Decide(callCtx, decide.ClassifyRequest(decideArticle(article)))

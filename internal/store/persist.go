@@ -70,6 +70,9 @@ SET brief = CASE
     brief_source = CASE
         WHEN $2 <> '' THEN CASE WHEN $3 <> '' THEN $3 ELSE 'generated' END
         ELSE brief_source END,
+    brief_model = CASE
+        WHEN $2 <> '' AND $6 <> '' THEN $6
+        ELSE brief_model END,
     title = CASE
         WHEN $4 <> '' AND $5 = 'editor' THEN $4
         ELSE title END,
@@ -81,7 +84,7 @@ WHERE id = $1`
 		if r.ID == "" {
 			continue
 		}
-		if _, err := s.pool.Exec(ctx, sql, r.ID, r.Brief, r.BriefSource, r.Title, r.TitleSource); err != nil {
+		if _, err := s.pool.Exec(ctx, sql, r.ID, r.Brief, r.BriefSource, r.Title, r.TitleSource, r.Model); err != nil {
 			return fmt.Errorf("store: story text %s: %w", r.ID, err)
 		}
 	}

@@ -8,14 +8,12 @@ package textsvc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
@@ -126,7 +124,14 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 			// A successful brief is kept until the story changes; a fallback
 			// is retried after 5 minutes or when the story updates.
 			if cached.Available && !generated.Before(updated) {
-				return withProvenance(cached), true
+				cached = withProvenance(cached)
+				// A cached generated title may predate the storytitle marker
+				// (marker eviction or a restart); restore it without touching
+				// story.<id>.
+				if cached.Provenance == live.BriefGenerated && cached.Title != "" {
+					s.applyEditorTitle(ctx, kv, story, cached.Title)
+				}
+				return cached, true
 			}
 			if !cached.Available && s.now().Sub(generated) < 5*time.Minute && !generated.Before(updated) {
 				return withProvenance(cached), true
@@ -182,10 +187,11 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 	return out, true
 }
 
-// applyEditorTitle makes the Editor's neutral title the live story title:
-// story.<id> carries title_source="editor", story.changed reaches the
-// publisher and browser, and the storytitle marker lets cluster recovery
-// restore it after a crash.
+// applyEditorTitle records the Editor's neutral title in the storytitle
+// marker. The clusterer owns story.<id>; it overlays this marker on the latest
+// story state before writing the checkpoint and publishing story.changed.
+// Writing the story snapshot loaded before the model call here would revert
+// newer sources, locations and heat.
 func (s *Service) applyEditorTitle(ctx context.Context, kv jetstream.KeyValue, story *dorv1.Story, title string) {
 	title = strings.TrimSpace(title)
 	if story == nil || story.Id == "" || title == "" {
@@ -194,28 +200,15 @@ func (s *Service) applyEditorTitle(ctx context.Context, kv jetstream.KeyValue, s
 	if story.Title == title && story.TitleSource == "editor" {
 		return
 	}
-	story.Title = title
-	story.TitleSource = "editor"
-	if !live.PutStory(ctx, kv, story) {
-		s.log.Warn("text: could not write editor title to live state", "story", story.Id)
-		return
-	}
 	marker, err := json.Marshal(map[string]string{
 		"title":        title,
 		"generated_at": s.nowString(),
 	})
-	if err == nil {
-		if _, err := kv.Put(ctx, live.StoryTitleKey(story.Id), marker); err != nil {
-			s.log.Debug("text: editor title marker write failed", "story", story.Id, "err", err)
-		}
-	}
-	data, err := proto.Marshal(story)
 	if err != nil {
 		return
 	}
-	if _, err := s.bus.Publish(ctx, bus.StoryChangedSubject(story.Id), data,
-		bus.WithMsgID(fmt.Sprintf("title:%s:%d", story.Id, s.now().UnixNano()))); err != nil {
-		s.log.Warn("text: story.changed for editor title failed", "story", story.Id, "err", err)
+	if _, err := kv.Put(ctx, live.StoryTitleKey(story.Id), marker); err != nil {
+		s.log.Debug("text: editor title marker write failed", "story", story.Id, "err", err)
 	}
 }
 
@@ -314,7 +307,7 @@ func (s *Service) putStoryText(ctx context.Context, kv jetstream.KeyValue, t liv
 		}
 		s.sink.EnqueueStoryText(store.StoryTextRecord{
 			ID: t.ID, Title: t.Title, TitleSource: titleSource,
-			Brief: t.Brief, BriefSource: briefSource,
+			Brief: t.Brief, BriefSource: briefSource, Model: t.Model,
 		})
 	}
 }
@@ -403,7 +396,9 @@ func (s *Service) linkEnd(ctx context.Context, kv jetstream.KeyValue, id string)
 
 func fallbackStory(story *dorv1.Story, sources []llm.Source, sourceCount int, generated string) live.StoryText {
 	title := story.Title
-	if len(sources) > 0 && strings.TrimSpace(sources[0].Title) != "" {
+	// An applied editor title outranks a source headline even when a later
+	// brief generation falls back. The fallback must not change the heading.
+	if story.GetTitleSource() != "editor" && len(sources) > 0 && strings.TrimSpace(sources[0].Title) != "" {
 		title = sources[0].Title
 	}
 	return live.StoryText{

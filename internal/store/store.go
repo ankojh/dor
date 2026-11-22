@@ -344,7 +344,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 			assigned := make(map[string]bool, len(r.ArticleIDs))
 			rows, err := tx.Query(ctx, `
 UPDATE articles SET story_id = $2,
-    category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
+    category = CASE WHEN category = 0 AND $3::smallint <> 0 THEN $3::smallint ELSE category END
 WHERE id = ANY($1)
 RETURNING id`, r.ArticleIDs, r.ID, r.Category)
 			if err != nil {
@@ -384,7 +384,7 @@ func (s *Store) AssignStory(ctx context.Context, articleID, storyID string, cate
 	}
 	tag, err := s.pool.Exec(ctx, `
 UPDATE articles SET story_id = $2,
-    category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
+    category = CASE WHEN category = 0 AND $3::smallint <> 0 THEN $3::smallint ELSE category END
 WHERE id = $1`, articleID, storyID, category)
 	if err != nil {
 		return false, fmt.Errorf("store: assign article %s: %w", articleID, err)

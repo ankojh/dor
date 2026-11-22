@@ -10,6 +10,7 @@ import (
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/sources"
 	"github.com/ankojh/dor/internal/store"
 )
 
@@ -90,6 +91,32 @@ func TestF12NormalizerStoresDetectedLanguage(t *testing.T) {
 	}
 }
 
+func TestF12HazardFeedsDeclareEnglish(t *testing.T) {
+	if got := hazardLanguage(sources.Source{}); got != "en" {
+		t.Fatalf("hazardLanguage(no source lang) = %q, want en", got)
+	}
+	if got := hazardLanguage(sources.Source{Lang: "fr"}); got != "fr" {
+		t.Fatalf("hazardLanguage(declared fr) = %q, want fr", got)
+	}
+	q := "M 2.2 - 19 km SW of Karluk, Alaska"
+	if got := resolveLanguage("en", q, ""); got != "en" {
+		t.Fatalf("resolveLanguage(declared en, quake) = %q, want en", got)
+	}
+}
+
+func TestF12HazardClassificationShortCircuitsModel(t *testing.T) {
+	article := &dorv1.Article{
+		Id: "quake-hint", Title: "M 1.4 - 7 km SSW of Pahala, Hawaii",
+		Hints: &dorv1.RawHints{Hazard: "earthquake"},
+	}
+	c := &classifier{log: testLogger()}
+	got := c.classify(context.Background(), article)
+	if got.GetCategory() != dorv1.Category_CATEGORY_DISASTER || got.GetBackend() != "hints" ||
+		!got.GetAccepted() || got.GetDegraded() {
+		t.Fatalf("hazard classify = %+v, want hints/disaster/accepted/not-degraded", got)
+	}
+}
+
 func TestF12RuleCategoryHazardQuake(t *testing.T) {
 	quake := &dorv1.Article{
 		Id:    "quake-f12",
@@ -117,8 +144,9 @@ func TestF12ApplyJoinProvenance(t *testing.T) {
 		return &storyState{Story: &dorv1.Story{Id: "story-f12"}}
 	}
 
-	t.Run("highest category confidence wins", func(t *testing.T) {
+	t.Run("provenance follows the displayed category", func(t *testing.T) {
 		st := newStory()
+		st.Story.Category = dorv1.Category_CATEGORY_SPORTS
 		c.applyJoinProvenance(st, nil, &dorv1.ClassifiedArticle{
 			Backend: "claude", Category: dorv1.Category_CATEGORY_SPORTS, Confidence: 0.5,
 		}, &dorv1.Article{})
@@ -126,16 +154,51 @@ func TestF12ApplyJoinProvenance(t *testing.T) {
 			t.Fatalf("first class = (%q, %v), want claude/0.5", st.CategoryBackend, st.CategoryConfidence)
 		}
 		c.applyJoinProvenance(st, nil, &dorv1.ClassifiedArticle{
-			Backend: "rule", Category: dorv1.Category_CATEGORY_DISASTER, Confidence: 0.9,
+			Backend: "rule", Category: dorv1.Category_CATEGORY_SPORTS, Confidence: 0.9,
 		}, &dorv1.Article{})
 		if st.CategoryBackend != "rule" || st.CategoryConfidence != 0.9 {
 			t.Fatalf("stronger class = (%q, %v), want rule/0.9", st.CategoryBackend, st.CategoryConfidence)
 		}
 		c.applyJoinProvenance(st, nil, &dorv1.ClassifiedArticle{
-			Backend: "jev", Category: dorv1.Category_CATEGORY_DISASTER, Confidence: 0.2,
+			Backend: "jev", Category: dorv1.Category_CATEGORY_SPORTS, Confidence: 0.2,
 		}, &dorv1.Article{})
 		if st.CategoryBackend != "rule" || st.CategoryConfidence != 0.9 {
 			t.Fatalf("weaker class overwrote provenance: (%q, %v)", st.CategoryBackend, st.CategoryConfidence)
+		}
+		// A higher-confidence classification for a different category cannot
+		// relabel the category the story actually displays.
+		c.applyJoinProvenance(st, nil, &dorv1.ClassifiedArticle{
+			Backend: "jev", Category: dorv1.Category_CATEGORY_DISASTER, Confidence: 0.99,
+		}, &dorv1.Article{})
+		if st.CategoryBackend != "rule" || st.CategoryConfidence != 0.9 {
+			t.Fatalf("mismatched class overwrote provenance: (%q, %v)", st.CategoryBackend, st.CategoryConfidence)
+		}
+		if st.Story.Category != dorv1.Category_CATEGORY_SPORTS {
+			t.Fatalf("story category = %v, want SPORTS", st.Story.Category)
+		}
+	})
+
+	t.Run("displayed category keeps its own provenance", func(t *testing.T) {
+		now := time.Now()
+		a1 := &dorv1.Article{Id: "a1", SourceId: "s1", Title: "Floods hit region"}
+		place := &dorv1.PlacedArticle{Article: a1, Backend: "gazetteer"}
+		class1 := &dorv1.ClassifiedArticle{Article: a1, Category: dorv1.Category_CATEGORY_DISASTER, Confidence: 0.6, Backend: "rule", Degraded: true, Fallback: true}
+		st := c.buildStory(a1, place, class1.Category, nil, nil, now)
+		c.applyJoinProvenance(st, place, class1, a1)
+
+		a2 := &dorv1.Article{Id: "a2", SourceId: "s2", Title: "Army deployed"}
+		class2 := &dorv1.ClassifiedArticle{Article: a2, Category: dorv1.Category_CATEGORY_CONFLICT, Confidence: 0.85, Backend: "jev", Accepted: true}
+		st = c.mergeStory(st, a2, place, class2.Category, nil, nil, now)
+		c.applyJoinProvenance(st, place, class2, a2)
+
+		if st.Story.Category != dorv1.Category_CATEGORY_DISASTER {
+			t.Fatalf("story category = %v, want the first non-OTHER DISASTER", st.Story.Category)
+		}
+		if st.CategoryBackend != "rule" || st.CategoryConfidence != 0.6 || !st.CategoryDegraded {
+			t.Fatalf("displayed DISASTER provenance = (%q,%v,degraded=%v), want rule/0.6/degraded", st.CategoryBackend, st.CategoryConfidence, st.CategoryDegraded)
+		}
+		if !st.Story.Degraded {
+			t.Fatal("story.Degraded = false; the displayed category is still a rule guess")
 		}
 	})
 
@@ -462,6 +525,36 @@ func TestF12WireWithStory(t *testing.T) {
 			t.Fatalf("wireWithStory changed a row whose metadata and location already differ only by value: %+v", next)
 		}
 	})
+}
+
+// The clusterer publishes story.changed before article.placed. The story is
+// still pending (not in c.stories) when the placed article is handled, so the
+// row must read the pending story instead of staying OTHER.
+func TestF12PlacedAfterPendingStoryUsesPendingMetadata(t *testing.T) {
+	core := newPublisherCore(nil, testLogger())
+	story := &dorv1.Story{
+		Id: "s-pending", Category: dorv1.Category_CATEGORY_DISASTER,
+		CategoryBackend: "rule", CategoryConfidence: 0.6, Degraded: true,
+		Locations: []*dorv1.Location{{PlaceId: "p", Name: "Pahala", Country: "US", Lat: 19.2, Lon: -155.4}},
+	}
+	core.onArticle(&dorv1.Article{Id: "a-pending", Title: "M 4.6 - Pahala", SourceId: "usgs"}, false)
+	core.onStory(story)
+	core.onArticle(&dorv1.Article{
+		Id: "a-pending", Title: "M 4.6 - Pahala", SourceId: "usgs",
+		StoryId: story.Id, Join: dorv1.JoinKind_JOIN_KIND_JOINED,
+	}, true)
+	row := core.wireRows["a-pending"]
+	if row == nil {
+		t.Fatal("wire row missing")
+	}
+	if row.Category != dorv1.Category_CATEGORY_DISASTER || row.CategoryBackend != "rule" ||
+		row.CategoryConfidence != 0.6 || !row.Degraded {
+		t.Fatalf("row = category %v backend %q conf %v degraded %v, want pending story metadata",
+			row.Category, row.CategoryBackend, row.CategoryConfidence, row.Degraded)
+	}
+	if row.Country != "US" || row.Place != "Pahala" || !row.Located {
+		t.Fatalf("row place = (%q,%q,%v), want the pending story's primary place", row.Country, row.Place, row.Located)
+	}
 }
 
 func TestF12OnStoryReconcilesWireRows(t *testing.T) {

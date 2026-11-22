@@ -105,3 +105,38 @@ func TestCheckFetchesAndParsesAllowedFeed(t *testing.T) {
 		t.Fatalf("HTTPStatus = %d, want 200", res.HTTPStatus)
 	}
 }
+
+func TestCheckSameHostRedirectRechecksRobots(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var privateHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "User-agent: *\nDisallow: /private\n")
+	})
+	mux.HandleFunc("/feed", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/private/feed", http.StatusFound)
+	})
+	mux.HandleFunc("/private/feed", func(w http.ResponseWriter, _ *http.Request) {
+		privateHits.Add(1)
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, feedcheckTestRSS)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, robots := feedcheckTestClient(srv, true)
+
+	res := check(ctx, client, robots, sources.Source{
+		ID: "redirected", Kind: sources.KindRSS, URL: srv.URL + "/feed", Enabled: true,
+	})
+	if privateHits.Load() != 0 {
+		t.Fatalf("robots-disallowed redirect target fetched %d times, want 0", privateHits.Load())
+	}
+	if !strings.Contains(res.Error, "robots") {
+		t.Fatalf("Error = %q, want a robots denial for the redirect target", res.Error)
+	}
+	if res.Items != 0 {
+		t.Fatalf("Items = %d, want 0 for a denied redirect target", res.Items)
+	}
+}

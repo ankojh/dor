@@ -45,6 +45,14 @@ func (s *projectionSink) last() []string {
 	return s.calls[len(s.calls)-1]
 }
 
+func (s *projectionSink) callsSnapshot() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]string, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
 func newProjectionClient(h *hub, sink PromptSink) *client {
 	c := newClient(h, nil, sink, nil, projectionLogger())
 	h.addClient(c)

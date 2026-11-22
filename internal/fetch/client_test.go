@@ -517,6 +517,30 @@ func TestClientCrossHostRedirectRechecksRobots(t *testing.T) {
 	}
 }
 
+func TestClientSameHostRedirectRechecksRobots(t *testing.T) {
+	privateHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/robots.txt":
+			_, _ = w.Write([]byte("User-agent: *\nDisallow: /private\n"))
+		case "/feed":
+			http.Redirect(w, r, "/private/feed", http.StatusFound)
+		default:
+			privateHits++
+			_, _ = w.Write([]byte("private"))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(ClientOptions{Robots: NewRobotsCache("DorBot/0.1", time.Second, nil)})
+	_, err := c.Get(context.Background(), srv.URL+"/feed", Conditional{})
+	if !errors.Is(err, ErrRobotsDisallowed) {
+		t.Fatalf("err = %v, want ErrRobotsDisallowed for the same-host redirect target", err)
+	}
+	if privateHits != 0 {
+		t.Error("the same-host redirect target was fetched despite robots")
+	}
+}
+
 func TestClientBodyCap(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(strings.Repeat("x", 200)))

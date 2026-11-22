@@ -9,20 +9,24 @@ import (
 	"testing"
 )
 
-func alertCreateRequest(prompt string) *http.Request {
+func alertCreateRequest(prompt string, cookie *http.Cookie) *http.Request {
 	body, _ := json.Marshal(map[string]string{"prompt": prompt})
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/alerts", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
 	return req
 }
 
 func TestAlertAndBacktestPromptBounds(t *testing.T) {
 	srv, store := newGuardTestServer(t, nil)
+	cookie, _ := issueSession(t, srv)
 	tooLong := strings.Repeat("x", maxAlertPromptRunes+1)
 	atLimit := strings.Repeat("x", maxAlertPromptRunes)
 
 	w := httptest.NewRecorder()
-	srv.http.Handler.ServeHTTP(w, alertCreateRequest(tooLong))
+	srv.http.Handler.ServeHTTP(w, alertCreateRequest(tooLong, cookie))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("oversized alert prompt status = %d, want 400 (body %s)", w.Code, w.Body.String())
 	}
@@ -31,7 +35,7 @@ func TestAlertAndBacktestPromptBounds(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	srv.http.Handler.ServeHTTP(w, alertCreateRequest(atLimit))
+	srv.http.Handler.ServeHTTP(w, alertCreateRequest(atLimit, cookie))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("at-limit alert prompt status = %d, want 201 (body %s)", w.Code, w.Body.String())
 	}
@@ -47,6 +51,7 @@ func TestAlertAndBacktestPromptBounds(t *testing.T) {
 	backtestBody, _ := json.Marshal(map[string]string{"prompt": tooLong})
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/alerts/backtest", strings.NewReader(string(backtestBody)))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	srv.http.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -56,6 +61,7 @@ func TestAlertAndBacktestPromptBounds(t *testing.T) {
 	patchBody, _ := json.Marshal(map[string]string{"prompt": tooLong})
 	req = httptest.NewRequest(http.MethodPatch, "http://localhost/api/alerts/"+created.Alert.ID, strings.NewReader(string(patchBody)))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	srv.http.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {

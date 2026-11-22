@@ -29,8 +29,11 @@ type admissionText struct {
 	generateStory func(ctx context.Context, id string) (live.StoryText, bool)
 }
 
-func (f *admissionText) Story(context.Context, string) (live.StoryText, bool) {
-	return live.StoryText{}, false
+func (f *admissionText) Story(_ context.Context, id string) (live.StoryText, bool) {
+	if id == "missing" {
+		return live.StoryText{}, false
+	}
+	return live.StoryText{Kind: "story", ID: id, Available: false}, true
 }
 
 func (f *admissionText) GenerateStory(ctx context.Context, id string) (live.StoryText, bool) {
@@ -210,13 +213,16 @@ func TestFocusAndGetTextPrefetchIsBounded(t *testing.T) {
 	}
 }
 
-func TestRESTAlertAndTextLimitsArePerAddress(t *testing.T) {
+func TestRESTAlertAndTextLimitsArePerSession(t *testing.T) {
 	text := &admissionText{}
 	srv, _ := newGuardTestServer(t, func(cfg *Config) { cfg.Text = text })
+	cookieA, _ := issueSession(t, srv)
+	cookieB, _ := issueSession(t, srv)
 
-	postAlert := func(addr string) int {
+	postAlert := func(cookie *http.Cookie, addr string) int {
 		req := httptest.NewRequest(http.MethodPost, "http://localhost/api/alerts", strings.NewReader(`{"prompt":"wildfire"}`))
 		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
 		req.RemoteAddr = addr
 		w := httptest.NewRecorder()
 		srv.http.Handler.ServeHTTP(w, req)
@@ -225,7 +231,7 @@ func TestRESTAlertAndTextLimitsArePerAddress(t *testing.T) {
 
 	codes := map[int]int{}
 	for i := 0; i < 40; i++ {
-		codes[postAlert("192.0.2.10:4000")]++
+		codes[postAlert(cookieA, "192.0.2.10:4000")]++
 	}
 	if codes[http.StatusTooManyRequests] == 0 {
 		t.Fatalf("hammering POST /api/alerts produced no 429: %v", codes)
@@ -233,12 +239,14 @@ func TestRESTAlertAndTextLimitsArePerAddress(t *testing.T) {
 	if codes[http.StatusCreated] == 0 {
 		t.Fatalf("hammering POST /api/alerts produced no 201: %v", codes)
 	}
-	if got := postAlert("192.0.2.11:4000"); got == http.StatusTooManyRequests {
-		t.Fatal("a second address inherited the first address's alert limit")
+	// A different session on the same loopback/proxy address is unaffected.
+	if got := postAlert(cookieB, "192.0.2.10:4000"); got == http.StatusTooManyRequests {
+		t.Fatal("a second session inherited the first session's alert limit")
 	}
 
-	getText := func(addr string) int {
+	getText := func(cookie *http.Cookie, addr string) int {
 		req := httptest.NewRequest(http.MethodGet, "http://localhost/api/text?story_id=s1", nil)
+		req.AddCookie(cookie)
 		req.RemoteAddr = addr
 		w := httptest.NewRecorder()
 		srv.http.Handler.ServeHTTP(w, req)
@@ -246,7 +254,7 @@ func TestRESTAlertAndTextLimitsArePerAddress(t *testing.T) {
 	}
 	textCodes := map[int]int{}
 	for i := 0; i < 20; i++ {
-		textCodes[getText("192.0.2.12:4000")]++
+		textCodes[getText(cookieA, "192.0.2.12:4000")]++
 	}
 	if textCodes[http.StatusTooManyRequests] == 0 {
 		t.Fatalf("hammering GET /api/text produced no 429: %v", textCodes)
@@ -254,8 +262,8 @@ func TestRESTAlertAndTextLimitsArePerAddress(t *testing.T) {
 	if textCodes[http.StatusOK] == 0 {
 		t.Fatalf("hammering GET /api/text produced no 200: %v", textCodes)
 	}
-	if got := getText("192.0.2.13:4000"); got == http.StatusTooManyRequests {
-		t.Fatal("a second address inherited the first address's text limit")
+	if got := getText(cookieB, "192.0.2.12:4000"); got == http.StatusTooManyRequests {
+		t.Fatal("a second session inherited the first session's text limit")
 	}
 }
 

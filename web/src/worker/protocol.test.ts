@@ -148,20 +148,20 @@ afterEach(() => {
 });
 
 describe("worker/index.ts: initial connect", () => {
-  it("sends Hello(lastSeq=0) on open, then a snapshot yields init + Ack(snapshot seq)", async () => {
+  it("sends prompts then Hello(lastSeq=0), and a snapshot yields init + Ack(snapshot seq)", async () => {
     await importWorker();
     const ws = startAndOpen();
 
-    const hello = decodeSent(ws, 0);
-    expect(hello.body.case).toBe("hello");
-    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
-
-    // The initial empty prompt set is still sent so a reconnect clears any
-    // prompt the matcher retained from an earlier connection.
-    const initialPrompts = decodeSent(ws, 1);
+    // Prompts are sent first so the gateway can project a resume snapshot
+    // with this client's prompt set.
+    const initialPrompts = decodeSent(ws, 0);
     expect(initialPrompts.body.case).toBe("setPrompts");
     if (initialPrompts.body.case !== "setPrompts") throw new Error("wrong case");
     expect(initialPrompts.body.value.prompts).toEqual([]);
+
+    const hello = decodeSent(ws, 1);
+    expect(hello.body.case).toBe("hello");
+    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
 
     ws.receive(snapshotFrame(5));
 
@@ -187,6 +187,36 @@ describe("worker/index.ts: initial connect", () => {
     expect(removed.body.case).toBe("setPrompts");
     if (removed.body.case !== "setPrompts") throw new Error("wrong case");
     expect(removed.body.value.prompts).toEqual([]);
+  });
+
+  it("reconnect with active prompts sends the prompt set before Hello", async () => {
+    await importWorker();
+    const ws = startAndOpen();
+    ws.receive(snapshotFrame(1)); // established at seq 1
+
+    send({ type: "prompts", prompts: ["wildfire"] });
+    const active = decodeSent(ws, ws.sent.length - 1);
+    expect(active.body.case).toBe("setPrompts");
+    if (active.body.case !== "setPrompts") throw new Error("wrong case");
+    expect(active.body.value.prompts).toEqual(["wildfire"]);
+
+    ws.close(1006, "server dropped");
+    vi.advanceTimersByTime(500);
+    expect(instances).toHaveLength(2);
+    const next = instances[1]!;
+    next.open();
+
+    // The gateway projects the resume snapshot from its current prompt
+    // state, so the client's active prompts must arrive before Hello.
+    expect(next.sent).toHaveLength(2);
+    const prompts = decodeSent(next, 0);
+    expect(prompts.body.case).toBe("setPrompts");
+    if (prompts.body.case !== "setPrompts") throw new Error("wrong case");
+    expect(prompts.body.value.prompts).toEqual(["wildfire"]);
+
+    const hello = decodeSent(next, 1);
+    expect(hello.body.case).toBe("hello");
+    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(1n);
   });
 });
 
@@ -257,7 +287,7 @@ describe("worker/index.ts: socket close during recovery reconnects with a fresh 
     expect(instances).toHaveLength(2);
     const next = instances[1]!;
     next.open();
-    const hello = decodeSent(next, 0);
+    const hello = decodeSent(next, 1);
     expect(hello.body.case).toBe("hello");
     expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
 
@@ -272,7 +302,7 @@ describe("worker/index.ts: the 30s snapshot watchdog", () => {
   it("retires the old socket, reconnects with Hello(0), and never re-sends Hello on the stale socket", async () => {
     await importWorker();
     const ws = startAndOpen(); // awaiting the initial snapshot (lastSeq===0)
-    expect(ws.sent).toHaveLength(2); // the initial Hello and empty prompt set
+    expect(ws.sent).toHaveLength(2); // the initial empty prompt set and Hello
 
     vi.advanceTimersByTime(30_000);
     expect(ws.closed).toBe(true);
@@ -284,7 +314,7 @@ describe("worker/index.ts: the 30s snapshot watchdog", () => {
     const next = instances[1]!;
     next.open();
     expect(next.sent).toHaveLength(2);
-    const hello = decodeSent(next, 0);
+    const hello = decodeSent(next, 1);
     expect(hello.body.case).toBe("hello");
     expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
   });

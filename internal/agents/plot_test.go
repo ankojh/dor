@@ -559,7 +559,7 @@ func TestCachedGazetteerPlotterMatchingWhenConfigured(t *testing.T) {
 		{"Western leaders", "Western leaders meet to discuss aid", "The talks lasted several hours.", "", ""},
 		{"Northern Lights", "Northern Lights visible tonight", "The display may continue through morning.", "", ""},
 		{"Delta Air Lines", "Delta Air Lines cancels hundreds of flights", "The airline cited a technical issue.", "", ""},
-		{"new york dateline alias", "New York weighs tougher e-bike rules", "Officials announced the proposal.", "NEW YORK", "new york"},
+		{"new york dateline alias", "New York weighs tougher e-bike rules", "Officials announced the proposal.", "NEW YORK", "new york city"},
 		{"frome qualified dateline", "Frome residents discuss local plan", "The meeting was held in Frome.", "Frome, England", "frome"},
 		{"nis qualified dateline", "Niš residents welcome new rail service", "The station is in Niš, Serbia.", "Niš, Serbia", "niš"},
 	} {

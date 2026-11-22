@@ -2544,10 +2544,14 @@ export function App() {
               </div>
               <div class="sec">
                 <Show when={storyText()?.available && storyText()?.provenance === "generated"}>
-                  <span class="agentk">AGENT BRIEF · from {details().hud.story.sources} sources</span>
+                  <span class="agentk">
+                    AGENT BRIEF · from {details().hud.story.sources} sources
+                  </span>
                 </Show>
                 <Show when={storyText()?.available && storyText()?.provenance === "source_snippet"}>
-                  <span class="agentk">SOURCE EXCERPT · from {details().hud.story.sources} sources</span>
+                  <span class="agentk">
+                    SOURCE EXCERPT · from {details().hud.story.sources} sources
+                  </span>
                 </Show>
                 <Show
                   when={storyText()?.available}

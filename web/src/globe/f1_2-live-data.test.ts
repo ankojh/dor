@@ -26,9 +26,9 @@ function story(overrides: StoryOverrides): Story {
     updatedAt: 1_700_000_100n,
     hazard: overrides.hazard ?? "",
     magnitude: overrides.magnitude ?? 0,
-    locations:
-      overrides.locations ??
-      [{ name: `Place ${f12Seq}`, lat: 10 + f12Seq, lon: 20 + f12Seq, role: 0, precision: 2 }],
+    locations: overrides.locations ?? [
+      { name: `Place ${f12Seq}`, lat: 10 + f12Seq, lon: 20 + f12Seq, role: 0, precision: 2 },
+    ],
   } as unknown as Story;
 }
 
@@ -45,7 +45,9 @@ function link(a: string, b: string, strength: number, unverified: boolean): Link
   } as unknown as Link;
 }
 
-function entry(overrides: Partial<LiveStory["story"]> & { strongestVerified?: number; degree?: number }): LiveStory {
+function entry(
+  overrides: Partial<LiveStory["story"]> & { strongestVerified?: number; degree?: number },
+): LiveStory {
   const { strongestVerified, degree, ...storyOverrides } = overrides;
   return {
     story: {
@@ -119,10 +121,7 @@ describe("F1·2 live-thread ranking", () => {
     const b = story({ id: "b" });
     const c = story({ id: "c" });
 
-    const data = buildLiveGlobe(
-      [a, b, c],
-      [link("a", "b", 0.9, true), link("a", "c", 0.4, false)],
-    );
+    const data = buildLiveGlobe([a, b, c], [link("a", "b", 0.9, true), link("a", "c", 0.4, false)]);
 
     const aEntry = data.stories.find((s) => s.story.id === "a")!;
     expect(aEntry.strongestLink).toBeCloseTo(0.9, 6);
@@ -150,10 +149,14 @@ describe("F1·2 live-thread ranking", () => {
     );
     expect(largeQuake).toBeGreaterThan(quake);
 
-    const linked = threadRankScore(entry({ heat: 0.7, sourceCount: 4, degree: 2, strongestVerified: 0.9 }));
+    const linked = threadRankScore(
+      entry({ heat: 0.7, sourceCount: 4, degree: 2, strongestVerified: 0.9 }),
+    );
     expect(linked).toBeGreaterThan(verified);
 
-    const multiSource = threadRankScore(entry({ heat: 0.7, sourceCount: 6, strongestVerified: 0.9 }));
+    const multiSource = threadRankScore(
+      entry({ heat: 0.7, sourceCount: 6, strongestVerified: 0.9 }),
+    );
     expect(multiSource).toBeGreaterThan(verified);
   });
 

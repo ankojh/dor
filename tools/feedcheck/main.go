@@ -75,8 +75,8 @@ func main() {
 	if v := os.Getenv("DOR_HTTP_USER_AGENT"); v != "" {
 		ua = v
 	}
-	client := fetch.NewClient(fetch.ClientOptions{UserAgent: ua, Timeout: *timeout})
 	robots := fetch.NewRobotsCache(ua, 10*time.Second, nil)
+	client := fetch.NewClient(fetch.ClientOptions{UserAgent: ua, Timeout: *timeout, Robots: robots})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(srcs)+1)*time.Minute)
 	defer cancel()
 
@@ -135,7 +135,11 @@ func check(ctx context.Context, client *fetch.Client, robots *fetch.RobotsCache,
 		case decision.Allowed:
 			res.Robots = "allow"
 		default:
+			// A denial is final for this run: do not fetch the feed and do
+			// not let the report imply its content was checked.
 			res.Robots = "disallow: " + decision.Reason
+			res.Error = "robots denied: " + decision.Reason
+			return res
 		}
 	}
 	resp, err := client.Get(ctx, src.URL, fetch.Conditional{})

@@ -14,7 +14,7 @@ import (
 
 func (s *Store) listDB(ctx context.Context) ([]Alert, error) {
 	rows, err := s.db.Pool().Query(ctx, `
-		SELECT id, prompt, min_sources, region, strictness, channels, enabled,
+		SELECT id, owner, prompt, min_sources, region, strictness, channels, enabled,
 		       created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc
 		FROM alerts ORDER BY created_at`)
 	if err != nil {
@@ -25,7 +25,7 @@ func (s *Store) listDB(ctx context.Context) ([]Alert, error) {
 	for rows.Next() {
 		var a Alert
 		var channels []byte
-		if err := rows.Scan(&a.ID, &a.Prompt, &a.MinSources, &a.Region, &a.Strictness,
+		if err := rows.Scan(&a.ID, &a.Owner, &a.Prompt, &a.MinSources, &a.Region, &a.Strictness,
 			&channels, &a.Enabled, &a.CreatedAt, &a.UpdatedAt, &a.NtfyTopic, &a.DailyDigest, &a.DigestHourUTC); err != nil {
 			return nil, err
 		}
@@ -39,10 +39,10 @@ func (s *Store) getDB(ctx context.Context, id string) (Alert, error) {
 	var a Alert
 	var channels []byte
 	err := s.db.Pool().QueryRow(ctx, `
-		SELECT id, prompt, min_sources, region, strictness, channels, enabled,
+		SELECT id, owner, prompt, min_sources, region, strictness, channels, enabled,
 		       created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc
 		FROM alerts WHERE id=$1`, id).
-		Scan(&a.ID, &a.Prompt, &a.MinSources, &a.Region, &a.Strictness,
+		Scan(&a.ID, &a.Owner, &a.Prompt, &a.MinSources, &a.Region, &a.Strictness,
 			&channels, &a.Enabled, &a.CreatedAt, &a.UpdatedAt, &a.NtfyTopic, &a.DailyDigest, &a.DigestHourUTC)
 	if err != nil {
 		return Alert{}, err
@@ -54,24 +54,24 @@ func (s *Store) getDB(ctx context.Context, id string) (Alert, error) {
 func (s *Store) insertDB(ctx context.Context, a Alert) error {
 	channels, _ := json.Marshal(a.Channels)
 	_, err := s.db.Pool().Exec(ctx, `
-		INSERT INTO alerts (id, prompt, min_sources, region, strictness, channels, enabled, created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO alerts (id, owner, prompt, min_sources, region, strictness, channels, enabled, created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO NOTHING`,
-		a.ID, a.Prompt, a.MinSources, a.Region, a.Strictness, string(channels), a.Enabled, a.CreatedAt, a.UpdatedAt, a.NtfyTopic, a.DailyDigest, a.DigestHourUTC)
+		a.ID, a.Owner, a.Prompt, a.MinSources, a.Region, a.Strictness, string(channels), a.Enabled, a.CreatedAt, a.UpdatedAt, a.NtfyTopic, a.DailyDigest, a.DigestHourUTC)
 	return err
 }
 
 func (s *Store) upsertDB(ctx context.Context, a Alert) error {
 	channels, _ := json.Marshal(a.Channels)
 	_, err := s.db.Pool().Exec(ctx, `
-		INSERT INTO alerts (id, prompt, min_sources, region, strictness, channels, enabled, created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO alerts (id, owner, prompt, min_sources, region, strictness, channels, enabled, created_at, updated_at, ntfy_topic, daily_digest, digest_hour_utc)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO UPDATE SET
-			prompt=EXCLUDED.prompt, min_sources=EXCLUDED.min_sources, region=EXCLUDED.region,
+			owner=EXCLUDED.owner, prompt=EXCLUDED.prompt, min_sources=EXCLUDED.min_sources, region=EXCLUDED.region,
 			strictness=EXCLUDED.strictness, channels=EXCLUDED.channels, enabled=EXCLUDED.enabled,
 			updated_at=EXCLUDED.updated_at, ntfy_topic=EXCLUDED.ntfy_topic,
  daily_digest=EXCLUDED.daily_digest, digest_hour_utc=EXCLUDED.digest_hour_utc`,
-		a.ID, a.Prompt, a.MinSources, a.Region, a.Strictness, string(channels), a.Enabled, a.CreatedAt, a.UpdatedAt, a.NtfyTopic, a.DailyDigest, a.DigestHourUTC)
+		a.ID, a.Owner, a.Prompt, a.MinSources, a.Region, a.Strictness, string(channels), a.Enabled, a.CreatedAt, a.UpdatedAt, a.NtfyTopic, a.DailyDigest, a.DigestHourUTC)
 	return err
 }
 

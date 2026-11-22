@@ -33,7 +33,12 @@ func TestAlertHitsHTTPEncodesUint64GenerationAsExactDecimalString(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest("GET", "/api/alerts/hits?alert_id=large", nil)
+	cookie, owner := issueSession(t, srv)
+	if _, err := st.Create(ctx, alert.Alert{ID: "large", Owner: owner, Prompt: "large"}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "http://localhost/api/alerts/hits?alert_id=large", nil)
+	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	srv.http.Handler.ServeHTTP(w, req)
 	if w.Code != 200 {

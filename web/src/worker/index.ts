@@ -93,12 +93,15 @@ function sendClient(body: ClientMessage["body"]): void {
 }
 
 function sendHello(): void {
+  // Prompts and filters must be in the gateway's state before it builds the
+  // resume snapshot, otherwise the client's own cached prompt scores are
+  // stripped from that snapshot.
+  sendFilters();
+  sendPrompts();
   sendClient({
     case: "hello",
     value: create(HelloSchema, { lastSeq: BigInt(lastSeq), clientVersion: "dor-web/0.1" }),
   });
-  sendFilters();
-  sendPrompts();
 }
 
 function sendFilters(): void {
@@ -119,7 +122,8 @@ function sendFilters(): void {
 }
 
 function sendPrompts(): void {
-  if (activePrompts.length === 0) return;
+  // Always send, including an empty list: removing the last prompt must reach
+  // the matcher so it stops spending jev calls on a filter nobody watches.
   sendClient({
     case: "setPrompts",
     value: create(SetPromptsSchema, { prompts: activePrompts }),
@@ -273,7 +277,10 @@ function connect(): void {
 
 async function pollHealth(): Promise<void> {
   try {
-    const response = await fetch(healthUrl, { headers: { accept: "application/json" } });
+    const response = await fetch(healthUrl, {
+      credentials: "include",
+      headers: { accept: "application/json" },
+    });
     if (!response.ok) throw new Error(`health ${response.status}`);
     const payload = (await response.json()) as {
       ok?: boolean;

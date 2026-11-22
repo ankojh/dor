@@ -9,26 +9,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ankojh/dor/internal/alert"
+	"github.com/ankojh/dor/internal/httpguard"
 	"github.com/ankojh/dor/internal/push"
+	"github.com/ankojh/dor/internal/session"
 )
 
-const maxAlertBody = 64 << 10
+const (
+	maxAlertBody = 64 << 10
+	// maxAlertPromptRunes bounds an alert or backtest prompt. Alert prompts
+	// are model input on every matching story, so an unbounded body would let
+	// one request drive repeated paid work.
+	maxAlertPromptRunes = 1000
+)
 
-// withCORS adds the headers the local web app needs and answers preflight.
-// Credentials are not used; the gateway is bound to loopback by default.
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func promptWithinBounds(prompt string) bool {
+	return utf8.RuneCountInString(strings.TrimSpace(prompt)) <= maxAlertPromptRunes
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -38,6 +36,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if !httpguard.RequireJSON(w, r) {
+		return false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAlertBody)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
@@ -63,12 +64,28 @@ func (s *Server) alertsUnavailable(w http.ResponseWriter) bool {
 	return true
 }
 
-// handleAlertsList serves GET /api/alerts.
+// ownedAlert loads an alert only when the caller's anonymous session owns it.
+// A foreign id is reported as not found so its existence does not leak.
+func (s *Server) ownedAlert(w http.ResponseWriter, r *http.Request, id string) (alert.Alert, bool) {
+	owner := session.IDFromRequest(r)
+	if owner == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "session unavailable"})
+		return alert.Alert{}, false
+	}
+	a, ok := s.cfg.Alerts.Get(r.Context(), id)
+	if !ok || a.Owner != owner {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "alert not found"})
+		return alert.Alert{}, false
+	}
+	return a, true
+}
+
+// handleAlertsList serves GET /api/alerts for the caller's session only.
 func (s *Server) handleAlertsList(w http.ResponseWriter, r *http.Request) {
 	if s.alertsUnavailable(w) {
 		return
 	}
-	alerts := s.cfg.Alerts.List(r.Context())
+	alerts := s.cfg.Alerts.ListOwned(r.Context(), session.IDFromRequest(r))
 	if alerts == nil {
 		alerts = []alert.Alert{}
 	}
@@ -95,11 +112,21 @@ func (s *Server) handleAlertsCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	if !promptWithinBounds(in.Prompt) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prompt is too long"})
+		return
+	}
+	owner := session.IDFromRequest(r)
+	if owner == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "session unavailable"})
+		return
+	}
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
 	created, err := s.cfg.Alerts.Create(r.Context(), alert.Alert{
+		Owner:         owner,
 		Prompt:        in.Prompt,
 		DailyDigest:   in.DailyDigest,
 		DigestHourUTC: in.DigestHourUTC,
@@ -113,6 +140,7 @@ func (s *Server) handleAlertsCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	s.alertOwners.Store(created.ID, owner)
 	writeJSON(w, http.StatusCreated, map[string]any{"alert": created})
 }
 
@@ -126,8 +154,15 @@ func (s *Server) handleAlertsPatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "alert id is required"})
 		return
 	}
+	if _, ok := s.ownedAlert(w, r, id); !ok {
+		return
+	}
 	var patch alert.Patch
 	if !decodeJSON(w, r, &patch) {
+		return
+	}
+	if patch.Prompt != nil && !promptWithinBounds(*patch.Prompt) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prompt is too long"})
 		return
 	}
 	updated, err := s.cfg.Alerts.Update(r.Context(), id, patch)
@@ -152,10 +187,14 @@ func (s *Server) handleAlertsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "alert id is required"})
 		return
 	}
+	if _, ok := s.ownedAlert(w, r, id); !ok {
+		return
+	}
 	if err := s.cfg.Alerts.Delete(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.alertOwners.Delete(id)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 
@@ -181,8 +220,13 @@ func (s *Server) handleAlertsBacktest(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if strings.TrimSpace(in.Prompt) == "" {
+	in.Prompt = strings.TrimSpace(in.Prompt)
+	if in.Prompt == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prompt is required"})
+		return
+	}
+	if !promptWithinBounds(in.Prompt) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prompt is too long"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -191,12 +235,39 @@ func (s *Server) handleAlertsBacktest(w http.ResponseWriter, r *http.Request) {
 		in.Prompt, in.MinSources, in.Region, in.Strictness))
 }
 
-// handleAlertsHits serves GET /api/alerts/hits?alert_id=.
+// handleAlertsHits serves GET /api/alerts/hits?alert_id= for alerts owned by
+// the caller's session.
 func (s *Server) handleAlertsHits(w http.ResponseWriter, r *http.Request) {
 	if s.alertsUnavailable(w) {
 		return
 	}
-	hits := s.cfg.Alerts.Hits(r.Context(), strings.TrimSpace(r.URL.Query().Get("alert_id")))
+	owner := session.IDFromRequest(r)
+	if owner == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "session unavailable"})
+		return
+	}
+	alertID := strings.TrimSpace(r.URL.Query().Get("alert_id"))
+	owned := make(map[string]bool)
+	if alertID != "" {
+		if _, ok := s.ownedAlert(w, r, alertID); !ok {
+			return
+		}
+		owned[alertID] = true
+	} else {
+		for _, a := range s.cfg.Alerts.ListOwned(r.Context(), owner) {
+			owned[a.ID] = true
+		}
+		if len(owned) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"hits": []alert.Hit{}})
+			return
+		}
+	}
+	var hits []alert.Hit
+	for _, hit := range s.cfg.Alerts.Hits(r.Context(), alertID) {
+		if owned[hit.AlertID] {
+			hits = append(hits, hit)
+		}
+	}
 	if hits == nil {
 		hits = []alert.Hit{}
 	}
@@ -219,6 +290,9 @@ func (s *Server) handleAlertsMute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
+	if _, ok := s.ownedAlert(w, r, id); !ok {
+		return
+	}
 	var in struct {
 		StoryID string `json:"story_id"`
 	}

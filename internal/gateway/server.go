@@ -25,18 +25,44 @@ import (
 	"github.com/ankojh/dor/internal/alert"
 	"github.com/ankojh/dor/internal/bus"
 	"github.com/ankojh/dor/internal/geo"
+	"github.com/ankojh/dor/internal/httpguard"
 	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/pb/dorv1"
+	"github.com/ankojh/dor/internal/session"
 )
 
 // DefaultAddr is the local gateway address from the plan/conventions.
 const DefaultAddr = "127.0.0.1:8080"
 
 // DefaultOrigins are the browser origins accepted by default. A non-browser
-// client (no Origin header) is always accepted.
-var DefaultOrigins = []string{"localhost:*", "127.0.0.1:*"}
+// client (no Origin header) is always accepted. A request whose Origin host
+// equals the request Host is also accepted, so a deployment served from the
+// gateway itself works without listing its own hostname.
+var DefaultOrigins = []string{"localhost:*", "localhost", "127.0.0.1:*", "127.0.0.1"}
+
+const (
+	// maxGenerationConcurrency bounds paid text generation reached through
+	// REST. The text service also bounds background prefetches.
+	maxGenerationConcurrency = 2
+	// maxTextIDLen bounds story ids and link endpoints in URL parameters.
+	maxTextIDLen = 200
+)
+
+// beginGeneration reserves one paid-generation slot. It never waits: a
+// request that finds both slots busy is throttled instead of piling up behind
+// a slow model call.
+func (s *Server) beginGeneration() bool {
+	select {
+	case s.generation <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) endGeneration() { <-s.generation }
 
 // TextService is the brief/why surface the gateway serves. *textsvc.Service
 // satisfies it; nil disables /api/text with a 503.
@@ -106,6 +132,17 @@ type Server struct {
 	closed  sync.Once
 	lastErr error
 	mu      sync.Mutex
+
+	guard       *httpguard.Allowlist
+	sessions    *session.Signer
+	alertLimit  *httpguard.Limiter
+	backtest    *httpguard.Limiter
+	textLookup  *httpguard.Limiter
+	textLimit   *httpguard.Limiter
+	pushLimit   *httpguard.Limiter
+	apiBackstop *httpguard.Limiter
+	generation  chan struct{}
+	alertOwners sync.Map // alert id -> owner session id
 }
 
 // New validates the configuration. Start performs the bind.
@@ -122,10 +159,31 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	s := &Server{cfg: cfg, log: cfg.Logger.With("gateway", cfg.Addr), ready: make(chan struct{})}
+	signerCtx, signerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	sessions, err := session.LoadOrCreate(signerCtx, cfg.Bus)
+	signerCancel()
+	if err != nil {
+		return nil, fmt.Errorf("gateway: session signer: %w", err)
+	}
+	s := &Server{
+		cfg:         cfg,
+		log:         cfg.Logger.With("gateway", cfg.Addr),
+		ready:       make(chan struct{}),
+		guard:       httpguard.NewAllowlist(cfg.Origins).WithHosts(httpguard.HostFromAddr(cfg.Addr)),
+		sessions:    sessions,
+		alertLimit:  httpguard.NewLimiter(30, 10),
+		backtest:    httpguard.NewLimiter(4, 2),
+		textLookup:  httpguard.NewLimiter(120, 20),
+		textLimit:   httpguard.NewLimiter(30, 6),
+		pushLimit:   httpguard.NewLimiter(10, 3),
+		apiBackstop: httpguard.NewLimiter(600, 120),
+		generation:  make(chan struct{}, maxGenerationConcurrency),
+	}
 	s.hub = newHub(cfg.Bus, s.log)
+	s.hub.alertOwner = s.resolveAlertOwner
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
+	mux.HandleFunc("GET /api/session", s.handleSession)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/text", s.handleText)
 	mux.HandleFunc("GET /api/stories", s.handleStories)
@@ -133,15 +191,16 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/places", s.handlePlaces)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/alerts", s.handleAlertsList)
-	mux.HandleFunc("POST /api/alerts", s.handleAlertsCreate)
-	mux.HandleFunc("POST /api/alerts/backtest", s.handleAlertsBacktest)
+	mux.Handle("POST /api/alerts", s.alertLimit.MiddlewareKey(s.restKey, http.HandlerFunc(s.handleAlertsCreate)))
+	mux.Handle("POST /api/alerts/backtest", s.backtest.MiddlewareKey(s.restKey, http.HandlerFunc(s.handleAlertsBacktest)))
 	mux.HandleFunc("GET /api/alerts/hits", s.handleAlertsHits)
-	mux.HandleFunc("PATCH /api/alerts/{id}", s.handleAlertsPatch)
-	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleAlertsDelete)
-	mux.HandleFunc("POST /api/alerts/{id}/mute", s.handleAlertsMute)
+	mux.Handle("PATCH /api/alerts/{id}", s.alertLimit.MiddlewareKey(s.restKey, http.HandlerFunc(s.handleAlertsPatch)))
+	mux.Handle("DELETE /api/alerts/{id}", s.alertLimit.MiddlewareKey(s.restKey, http.HandlerFunc(s.handleAlertsDelete)))
+	mux.Handle("POST /api/alerts/{id}/mute", s.alertLimit.MiddlewareKey(s.restKey, http.HandlerFunc(s.handleAlertsMute)))
 	mux.HandleFunc("GET /api/push/key", s.handlePushKey)
-	mux.HandleFunc("POST /api/push/subscriptions", s.handlePushSubscription)
+	mux.Handle("POST /api/push/subscriptions", s.pushLimit.MiddlewareKey(s.restKey, http.HandlerFunc(s.handlePushSubscription)))
 	if cfg.Ops != nil {
+		cfg.Ops.Key = s.restKey
 		cfg.Ops.Gateway = func() ops.GatewayInfo {
 			return ops.GatewayInfo{
 				Available:   true,
@@ -153,7 +212,11 @@ func New(cfg Config) (*Server, error) {
 		}
 		cfg.Ops.Mount(mux)
 	}
-	s.http = &http.Server{Handler: withCORS(mux), ReadHeaderTimeout: 5 * time.Second}
+	// Order: trusted Host/origin boundary, then the anonymous session, then
+	// the coarse IP backstop, so per-route session limits and handlers can
+	// both see the session id.
+	handler := s.guard.Middleware(s.sessions.Middleware(s.apiBackstop.Middleware(mux)))
+	s.http = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
 
@@ -283,7 +346,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(64 << 10)
-	c := newClient(s.hub, s.cfg.Text, s.cfg.Matcher, conn, s.log)
+	// A nil *matcher.Service stored in the PromptSink interface is non-nil as
+	// an interface value; convert explicitly so a gateway without a matcher
+	// keeps working.
+	var prompts PromptSink
+	if s.cfg.Matcher != nil {
+		prompts = s.cfg.Matcher
+	}
+	c := newClient(s.hub, s.cfg.Text, prompts, conn, s.log)
+	c.sessionID = session.IDFromRequest(r)
 	s.hub.addClient(c)
 	c.run(r.Context())
 }
@@ -292,16 +363,69 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // deltas; this endpoint is the only text transport.
 func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	defer cancel()
+	w.Header().Set("Cache-Control", "no-store")
 	if s.cfg.Text == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "text service unavailable"})
 		return
 	}
 	q := r.URL.Query()
-	if id := strings.TrimSpace(q.Get("story_id")); id != "" {
+	id := strings.TrimSpace(q.Get("story_id"))
+	a := strings.TrimSpace(q.Get("link_a"))
+	b := strings.TrimSpace(q.Get("link_b"))
+	if id == "" && (a == "" || b == "") {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "story_id or link_a+link_b is required"})
+		return
+	}
+	if len(id) > maxTextIDLen || len(a) > maxTextIDLen || len(b) > maxTextIDLen {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "story or link id is too long"})
+		return
+	}
+	key := s.restKey(r)
+	if !s.textLookup.Allow(key) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "too many text requests; retry shortly"})
+		return
+	}
+	// Existence is a free read. A 404 for an unknown story or link must not
+	// spend the paid-generation budget.
+	lookupCtx, lookupCancel := context.WithTimeout(r.Context(), 5*time.Second)
+	if id != "" {
+		_, ok := s.cfg.Text.Story(lookupCtx, id)
+		lookupCancel()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "story", "id": id, "available": false, "error": "unknown story"})
+			return
+		}
+	} else {
+		_, ok := s.cfg.Text.Link(lookupCtx, a, b)
+		lookupCancel()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "link", "a": a, "b": b, "available": false, "error": "unknown link"})
+			return
+		}
+	}
+	if !s.textLimit.Allow(key) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "text generation limit reached; retry shortly"})
+		return
+	}
+	if !s.beginGeneration() {
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "text generation is busy; retry shortly"})
+		return
+	}
+	defer s.endGeneration()
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	if id != "" {
 		text, ok := s.cfg.Text.GenerateStory(ctx, id)
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -311,20 +435,52 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(text)
 		return
 	}
-	a := strings.TrimSpace(q.Get("link_a"))
-	b := strings.TrimSpace(q.Get("link_b"))
-	if a != "" && b != "" {
-		text, ok := s.cfg.Text.GenerateLink(ctx, a, b)
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "link", "a": a, "b": b, "available": false, "error": "unknown link"})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(text)
+	text, ok := s.cfg.Text.GenerateLink(ctx, a, b)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"kind": "link", "a": a, "b": b, "available": false, "error": "unknown link"})
 		return
 	}
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "story_id or link_a+link_b is required"})
+	_ = json.NewEncoder(w).Encode(text)
+}
+
+// handleSession is the bootstrap endpoint the app calls before opening the
+// WebSocket. The middleware has already issued a cookie when needed; the
+// response only confirms that the browser now has a session.
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session.IDFromRequest(r) != ""})
+}
+
+// restKey keys per-route admission by the anonymous session, falling back to
+// the remote address for non-browser clients. The coarse IP backstop still
+// applies separately.
+func (s *Server) restKey(r *http.Request) string {
+	// A request that just minted a session has no stable identity yet; charge
+	// it to the address so omitting cookies does not reset every budget.
+	if id := session.IDFromRequest(r); id != "" && !session.Issued(r) {
+		return "session:" + id
+	}
+	return "ip:" + httpguard.ClientKey(r.RemoteAddr)
+}
+
+// resolveAlertOwner returns the owner session for an alert, or "" when the
+// alert is unknown or has no owner. A failed lookup fails closed; alert
+// deltas are private even at the cost of dropping a notification.
+func (s *Server) resolveAlertOwner(alertID string) string {
+	if alertID == "" || s.cfg.Alerts == nil {
+		return ""
+	}
+	if owner, ok := s.alertOwners.Load(alertID); ok {
+		return owner.(string)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	a, ok := s.cfg.Alerts.Get(ctx, alertID)
+	if !ok {
+		return ""
+	}
+	s.alertOwners.Store(alertID, a.Owner)
+	return a.Owner
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -345,7 +501,6 @@ type healthSource struct {
 // bar. It reads the same source_health records the fetchers write.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	out := map[string]any{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"gateway": map[string]any{

@@ -359,7 +359,6 @@ func sourcesJSON(sources []store.SourceInfo) []sourceJSON {
 
 func writeAPI(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }

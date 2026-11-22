@@ -4,18 +4,24 @@ import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
 import { afterShellPaint } from "./globe/load";
 import { createFocusHandler } from "./globe/focus-events";
 import { shouldIgnoreGlobeKeys, isTypingTarget } from "./keyboard";
-import { nextSelectionIndex, selectionKeyForStory, keepSelectionForStory } from "./globe/selection";
+import {
+  nextDistinctStoryIndex,
+  nextSelectionIndex,
+  selectionKeyForStory,
+  keepSelectionForStory,
+} from "./globe/selection";
 import { TtlLruCache, LatestRequest } from "./text-cache";
 import { BriefLoader, type BriefProvenance, type StoryText } from "./brief";
 import { LruCache } from "./worker/lru";
 import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
-import { connectionLabel } from "./live/connection";
+import { connectionLabel, connectionStatusCopy } from "./live/connection";
 import { mergeWireRow } from "./live/wire";
 import { matchesSourceFilter, sourceFilterIds } from "./live/source-names";
 import { nextTabStop } from "./ui/focus";
 import { channelLabel } from "./ui/labels";
 import { groupLinksByStrength } from "./ui/links";
+import { nextSearchIndex } from "./ui/search";
 import { sheetSwipeDirection } from "./ui/sheet-gesture";
 import {
   rollingMinuteBars,
@@ -480,6 +486,7 @@ export function App() {
   const [storyDetails, setStoryDetails] = createSignal<StoryDetails | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchOpen, setSearchOpen] = createSignal(false);
+  const [searchActive, setSearchActive] = createSignal(-1);
   const [layerLines, setLayerLines] = createSignal(true);
   const [layerTethers, setLayerTethers] = createSignal(true);
   const [layerLabels, setLayerLabels] = createSignal(true);
@@ -554,8 +561,11 @@ export function App() {
   let lastHashHref = "";
   let requestedSelection: string | null = null;
   let sheetTouchStartY = 0;
+  let suppressPanelAutoOpen = false;
+  let suppressSearchOpen = false;
   let alertsDialog!: HTMLDivElement;
   let alertsReturnFocus: HTMLElement | null = null;
+  let inertObserver: MutationObserver | null = null;
   let ntfyCopyTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
@@ -641,6 +651,68 @@ export function App() {
     if (!query) return globe().topStories.slice(0, 8);
     return liveGlobe?.searchStories(query) ?? [];
   });
+
+  /** Stories then places, in the order the listbox shows them. */
+  const searchOptions = createMemo(() => [
+    ...searchResults().map((result, index) => ({
+      kind: "story" as const,
+      id: `search-story-${index}`,
+      result,
+    })),
+    ...cmdPlaces().map((place, index) => ({
+      kind: "place" as const,
+      id: `search-place-${index}`,
+      place,
+    })),
+  ]);
+
+  createEffect(() => {
+    const count = searchOptions().length;
+    setSearchActive((index) => (index >= count ? (count === 0 ? -1 : count - 1) : index));
+  });
+
+  const moveSearchActive = (delta: number, focusOption = false): void => {
+    const options = searchOptions();
+    const next = nextSearchIndex(options.length, searchActive(), delta);
+    if (next === null) return;
+    setSearchActive(next);
+    const option = options[next];
+    if (focusOption && option) {
+      queueMicrotask(() => document.getElementById(option.id)?.focus());
+    }
+  };
+
+  const closeSearch = (): void => {
+    setSearchOpen(false);
+    setSearchActive(-1);
+  };
+
+  const onSearchListKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSearchActive(event.key === "ArrowDown" ? 1 : -1, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressSearchOpen = true;
+      closeSearch();
+      searchInput?.focus();
+    }
+  };
+
+  const activateSearchOption = (index: number): void => {
+    const option = searchOptions()[index];
+    if (!option) return;
+    if (option.kind === "story") {
+      liveGlobe?.focusStoryId(option.result.story.id);
+    } else {
+      liveGlobe?.flyTo([option.place.lon, option.place.lat], 10);
+    }
+    setSearchQuery("");
+    setCmdPlaces([]);
+    closeSearch();
+    searchInput?.blur();
+  };
 
   const displayRows = createMemo<DisplayRow[]>(() => {
     const rows = visibleWireRows();
@@ -1470,6 +1542,9 @@ export function App() {
             void loadStoryDetails(details.storyId);
             worker?.postMessage({ type: "focus", storyId: details.storyId });
             syncHash(details.storyId);
+            // Explicit focus actions open the mid-width drawer; ↑/↓ walks
+            // (moveSelection) suppress this so a closed drawer stays closed.
+            if (!suppressPanelAutoOpen) setSidePanelOpen(true);
           } else {
             requestedSelection = null;
             setSelectedArticle(null);
@@ -1658,7 +1733,28 @@ export function App() {
     // Keyboard walk keeps the selected row centred: estimated row heights are
     // unreliable for wrapped headlines, and centring is always fully visible.
     virtualizer.scrollToIndex(item.displayIndex, { align: "center" });
-    focusStory(item.storyId);
+    suppressPanelAutoOpen = true;
+    try {
+      focusStory(item.storyId);
+    } finally {
+      suppressPanelAutoOpen = false;
+    }
+  };
+
+  const moveStorySelection = (delta: number): void => {
+    const rows = articleRows();
+    const next = nextDistinctStoryIndex(rows, focus()?.storyId ?? null, selectedArticle(), delta);
+    if (next === null) return;
+    const item = rows[next]!;
+    requestedSelection = item.key;
+    setSelectedArticle(item.key);
+    virtualizer.scrollToIndex(item.displayIndex, { align: "center" });
+    suppressPanelAutoOpen = true;
+    try {
+      focusStory(item.storyId);
+    } finally {
+      suppressPanelAutoOpen = false;
+    }
   };
 
   const selectArticle = (item: WireItem): void => {
@@ -1716,6 +1812,7 @@ export function App() {
   };
 
   const liveLabel = createMemo(() => connectionLabel(connection()));
+  const connectionStatus = createMemo(() => connectionStatusCopy(connection()));
 
   /** Links grouped by strength, matching board M2's tiers. */
   const linkTiers = createMemo(() => groupLinksByStrength(focus()?.hud.links ?? []));
@@ -1735,37 +1832,42 @@ export function App() {
     ntfyCopyTimer = setTimeout(() => setNtfyCopied(null), 1600);
   };
 
-  // At mid widths the story panel is a drawer, so a new focus opens it.
-  let lastFocusedStory: string | null = null;
-  createEffect(() => {
-    const current = focus();
-    if (!current) {
-      lastFocusedStory = null;
-      return;
-    }
-    if (current.storyId !== lastFocusedStory) {
-      lastFocusedStory = current.storyId;
-      setSidePanelOpen(true);
-    }
-  });
-
   // A modal dialog owns the page: background controls are inert, not just
-  // visually behind the drawer. Runs before the focus-restore effect below.
+  // visually behind the drawer. Re-apply as children mount (toasts, mobile
+  // sheet) so nothing outside the dialog stays interactive. Runs before the
+  // focus-restore effect below.
+  const applyInert = (): void => {
+    for (const child of document.querySelectorAll<HTMLElement>(".app3 > *")) {
+      if (child.classList.contains("alerts-drawer")) continue;
+      child.setAttribute("inert", "");
+    }
+  };
   const clearInert = (): void => {
     for (const child of document.querySelectorAll<HTMLElement>(".app3 > *")) {
       child.removeAttribute("inert");
     }
   };
   createEffect(() => {
-    const open = alertsOpen();
-    const children = document.querySelectorAll<HTMLElement>(".app3 > *");
-    for (const child of children) {
-      if (child.classList.contains("alerts-drawer")) continue;
-      if (open) child.setAttribute("inert", "");
-      else child.removeAttribute("inert");
+    if (alertsOpen()) {
+      applyInert();
+      const root = document.querySelector(".app3");
+      if (!inertObserver && root && typeof MutationObserver !== "undefined") {
+        inertObserver = new MutationObserver(() => {
+          if (alertsOpen()) applyInert();
+        });
+        inertObserver.observe(root, { childList: true });
+      }
+    } else {
+      inertObserver?.disconnect();
+      inertObserver = null;
+      clearInert();
     }
   });
-  onCleanup(clearInert);
+  onCleanup(() => {
+    inertObserver?.disconnect();
+    inertObserver = null;
+    clearInert();
+  });
 
   // Modal focus: remember the opener, move focus in, restore it on close.
   createEffect(() => {
@@ -1812,7 +1914,7 @@ export function App() {
   };
 
   return (
-    <div class="app3">
+    <div class={`app3 ${sidePanelOpen() ? "drawer-open" : ""}`}>
       <header class="topbar">
         <div class="brand">
           <span class="mark" />
@@ -1829,35 +1931,56 @@ export function App() {
           <input
             ref={searchInput}
             type="text"
+            role="combobox"
             value={searchQuery()}
             placeholder="Search stories, places, people"
+            aria-autocomplete="list"
+            aria-expanded={searchOpen()}
+            aria-controls="search-listbox"
+            aria-activedescendant={
+              searchActive() >= 0 ? searchOptions()[searchActive()]?.id : undefined
+            }
             onFocus={() => {
               setSearchFocused(true);
+              if (suppressSearchOpen) {
+                suppressSearchOpen = false;
+                return;
+              }
               setSearchOpen(true);
+              setSearchActive(-1);
             }}
             onBlur={() => {
               setSearchFocused(false);
-              setTimeout(() => setSearchOpen(false), 150);
+              setTimeout(() => {
+                const active = document.activeElement;
+                if (active instanceof HTMLElement && active.closest(".search-results")) return;
+                closeSearch();
+              }, 150);
             }}
             onInput={(event) => {
               const query = event.currentTarget.value;
               setSearchQuery(query);
               setSearchOpen(true);
+              setSearchActive(-1);
               void searchPlaces(query);
             }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.stopPropagation();
-                setSearchOpen(false);
+                closeSearch();
                 searchInput.blur();
+              } else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSearchOpen(true);
+                moveSearchActive(1);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSearchOpen(true);
+                moveSearchActive(-1);
               } else if (event.key === "Enter") {
-                const first = searchResults()[0];
-                if (first) {
-                  liveGlobe?.focusStoryId(first.story.id);
-                  setSearchQuery("");
-                  setSearchOpen(false);
-                  searchInput.blur();
-                }
+                event.preventDefault();
+                if (searchActive() >= 0) activateSearchOption(searchActive());
+                else if (searchOptions().length > 0) activateSearchOption(0);
               }
             }}
             aria-label="Search stories, places and people"
@@ -1865,25 +1988,39 @@ export function App() {
           <span class="kbd">⌘K</span>
         </label>
         <Show when={searchOpen()}>
-          <div class="search-results glass" onMouseDown={(event) => event.preventDefault()}>
-            <span class="cap">
-              {searchQuery().trim() ? `${searchResults().length} stories` : "Top stories"}
+          <div
+            id="search-listbox"
+            class="search-results glass"
+            role="listbox"
+            aria-label="Search results"
+            onKeyDown={onSearchListKeyDown}
+            onFocusOut={(event) => {
+              const next = event.relatedTarget;
+              if (next instanceof Node && event.currentTarget.contains(next)) return;
+              closeSearch();
+            }}
+          >
+            <span class="cap" aria-hidden="true">
+              {searchQuery().trim() ? `${searchOptions().length} results` : "Top stories"}
             </span>
             <Show
               when={searchResults().length > 0}
-              fallback={<div class="search-none">No story matches “{searchQuery()}”.</div>}
+              fallback={
+                <div class="search-none" role="option" aria-disabled="true" aria-selected="false">
+                  No story matches “{searchQuery()}”.
+                </div>
+              }
             >
               <For each={searchResults()}>
-                {(result) => (
+                {(result, index) => (
                   <button
                     class="search-result"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      liveGlobe?.focusStoryId(result.story.id);
-                      setSearchQuery("");
-                      setSearchOpen(false);
-                      searchInput.blur();
-                    }}
+                    id={`search-story-${index()}`}
+                    role="option"
+                    aria-selected={searchActive() === index()}
+                    onFocus={() => setSearchActive(index())}
+                    onMouseEnter={() => setSearchActive(index())}
+                    onClick={() => activateSearchOption(index())}
                   >
                     <span class="dot" style={`--c:${hexColor(result.category)}`} />
                     <span class="h">
@@ -1898,27 +2035,30 @@ export function App() {
               </For>
             </Show>
             <Show when={cmdPlaces().length > 0}>
-              <span class="cap search-section">Places</span>
+              <span class="cap search-section" aria-hidden="true">
+                Places
+              </span>
               <For each={cmdPlaces()}>
-                {(place) => (
-                  <button
-                    class="search-result"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      liveGlobe?.flyTo([place.lon, place.lat], 10);
-                      setSearchQuery("");
-                      setCmdPlaces([]);
-                      setSearchOpen(false);
-                      searchInput.blur();
-                    }}
-                  >
-                    <span class="dot" style="--c:#5ef2ff" />
-                    <span class="h">
-                      <b>{place.name}</b>
-                      <small>{place.country || "Place"}</small>
-                    </span>
-                  </button>
-                )}
+                {(place, index) => {
+                  const optionIndex = (): number => searchResults().length + index();
+                  return (
+                    <button
+                      class="search-result"
+                      id={`search-place-${index()}`}
+                      role="option"
+                      aria-selected={searchActive() === optionIndex()}
+                      onFocus={() => setSearchActive(optionIndex())}
+                      onMouseEnter={() => setSearchActive(optionIndex())}
+                      onClick={() => activateSearchOption(optionIndex())}
+                    >
+                      <span class="dot" style="--c:#5ef2ff" />
+                      <span class="h">
+                        <b>{place.name}</b>
+                        <small>{place.country || "Place"}</small>
+                      </span>
+                    </button>
+                  );
+                }}
               </For>
             </Show>
           </div>
@@ -2279,14 +2419,8 @@ export function App() {
             when={displayRows().length > 0}
             fallback={
               <div class="wire-empty">
-                <span class="cap">
-                  {connection() === "online" ? "Listening" : "Gateway unavailable"}
-                </span>
-                <p>
-                  {connection() === "online"
-                    ? "Waiting for the first article. The wire fills as sources publish."
-                    : "The data worker is reconnecting. Existing rows stay in place."}
-                </p>
+                <span class="cap">{connectionStatus().title}</span>
+                <p>{connectionStatus().body}</p>
                 <span class="wire-empty-meta mono">
                   seq {lastSeq()} · {connection()}
                 </span>
@@ -2508,7 +2642,7 @@ export function App() {
         <div
           ref={mapContainer}
           class="map-host"
-          role="img"
+          role="region"
           aria-label="Live globe of located stories"
         />
         <div class="hud-corners" />
@@ -2717,12 +2851,13 @@ export function App() {
         <Show when={globe().storyCount === 0}>
           <div class="stage-empty glass">
             <span class="cap">
-              {connection() === "online" ? "Waiting for live data" : "Reconnecting to the gateway"}
+              {connection() === "online" ? "Waiting for live data" : connectionStatus().title}
             </span>
             <h3>Articles first. Stories next.</h3>
             <p>
-              The wire is live now. The globe fills when the classifier publishes its first located
-              stories.
+              {connection() === "online"
+                ? "The wire is live now. The globe fills when the classifier publishes its first located stories."
+                : "The globe fills when the gateway connects and the classifier publishes its first located stories."}
             </p>
             <span class="mono">
               {wireRows().length} wire rows · {storyCount()} stories
@@ -3154,7 +3289,7 @@ export function App() {
             onTouchEnd={(event) => {
               const endY = event.changedTouches[0]?.clientY ?? sheetTouchStartY;
               const direction = sheetSwipeDirection(sheetTouchStartY, endY);
-              if (direction !== 0) moveSelection(direction);
+              if (direction !== 0) moveStorySelection(direction);
             }}
           />
           <div class="mobile-story-head">

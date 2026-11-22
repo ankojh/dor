@@ -23,6 +23,33 @@ export function nextSelectionIndex(
   return Math.max(0, Math.min(rows.length - 1, current + delta));
 }
 
+/**
+ * Index of the next row belonging to a different story than `currentStoryId`.
+ *
+ * The mobile sheet steps stories, not rows: adjacent rows of the focused story
+ * are skipped in the swipe direction. When the focused story has no row yet,
+ * the walk starts at the newest (or oldest) end. Returns null at the edge.
+ */
+export function nextDistinctStoryIndex(
+  rows: readonly SelectableRow[],
+  currentStoryId: string | null,
+  currentKey: string | null,
+  delta: number,
+): number | null {
+  if (rows.length === 0 || delta === 0) return null;
+  const selected = currentKey === null ? -1 : rows.findIndex((row) => row.key === currentKey);
+  const focused =
+    currentStoryId === null ? -1 : rows.findIndex((row) => row.storyId === currentStoryId);
+  let index = selected >= 0 ? selected : focused;
+  if (index < 0) index = delta > 0 ? -1 : rows.length;
+  for (;;) {
+    index += delta > 0 ? 1 : -1;
+    if (index < 0 || index >= rows.length) return null;
+    const row = rows[index]!;
+    if (currentStoryId === null || row.storyId !== currentStoryId) return index;
+  }
+}
+
 /** Keep the row the user clicked; otherwise use the story's newest row. */
 export function selectionKeyForStory(
   rows: readonly SelectableRow[],

@@ -1973,8 +1973,12 @@ body {
   text-align: left;
   color: var(--text);
 }
-.search-result:hover {
-  background: rgba(94, 242, 255, 0.07);
+.search-result:hover,
+.search-result[aria-selected="true"] {
+  background: rgba(94, 242, 255, 0.09);
+}
+.search-result[aria-selected="true"] {
+  box-shadow: inset 0 0 0 1px rgba(94, 242, 255, 0.3);
 }
 .search-result .dot {
   width: 8px;
@@ -2594,7 +2598,8 @@ body {
   position: fixed;
   right: 12px;
   bottom: 12px;
-  z-index: 80;
+  /* Below the alerts dialog (z 70): a modal must not have live toasts over it. */
+  z-index: 65;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2849,38 +2854,36 @@ body {
   background: rgba(5, 9, 19, 0.98);
 }
 
-/* Mid widths get the story panel as a collapsible drawer instead of losing it. */
+/* Mid widths get the story panel as a collapsible grid column instead of
+   overlaying the stage, so no control or timeline dot sits under it. */
 @media (min-width: 781px) and (max-width: 1180px) {
   .panel-toggle {
     display: grid;
   }
+  .app3.drawer-open {
+    grid-template-columns: clamp(300px, 36vw, 380px) minmax(0, 1fr) clamp(280px, 34vw, 380px);
+  }
   .app3 > .side {
-    display: flex;
-    position: fixed;
-    top: 64px;
-    right: 12px;
-    bottom: 12px;
-    width: min(380px, calc(100vw - 32px));
-    z-index: 55;
+    display: none;
+    position: static;
+    grid-column: 3;
+    grid-row: 2 / 4;
+    width: auto;
+    min-height: 0;
     padding: 0 0 10px;
-    border: 1px solid var(--line-strong);
-    border-radius: 14px;
-    background: rgba(5, 9, 19, 0.97);
-    backdrop-filter: blur(18px);
-    box-shadow:
-      0 20px 60px rgba(0, 0, 0, 0.55),
-      0 0 0 1px rgba(94, 242, 255, 0.05) inset;
+    border: 0;
+    border-left: 1px solid var(--line);
+    border-radius: 0;
+    background: rgba(5, 9, 19, 0.94);
+    box-shadow: none;
+    backdrop-filter: none;
     overflow-y: auto;
     overscroll-behavior: contain;
-    visibility: hidden;
-    transform: translateX(calc(100% + 24px));
-    transition:
-      transform 0.2s ease,
-      visibility 0.2s ease;
-  }
-  .app3 > .side.side-open {
     visibility: visible;
     transform: none;
+  }
+  .app3.drawer-open > .side {
+    display: flex;
   }
   .app3 > .side .side-panel-bar {
     display: flex;
@@ -2899,11 +2902,13 @@ body {
   .app3 .arc-popover {
     z-index: 60;
   }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .app3 > .side {
-    transition: none;
+  /* Edge pills shrink with the narrower stage instead of taking it over. */
+  .app3 > .stage .edge-markers {
+    right: 12px;
+    max-width: 46%;
+  }
+  .app3 > .stage .edge-markers .rim {
+    max-width: 100%;
   }
 }
 

@@ -1298,6 +1298,126 @@ func TestFullCacheBiharBridgeCanUseSupportedRegionCoarsely(t *testing.T) {
 	}
 }
 
+func TestFullCacheDistritoFederalRequiresJurisdiction(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	venezuela, ok := g.ByID("admin:VE.25")
+	if !ok || !geo.ValidCoordinates(venezuela.Lat, venezuela.Lon) {
+		t.Fatalf("full cache must contain a valid VE.25 ADM1 point: %+v found=%v", venezuela, ok)
+	}
+	brasilia, ok := g.ByID("3469058")
+	if !ok || brasilia.CountryCode != "BR" || !geo.ValidCoordinates(brasilia.Lat, brasilia.Lon) {
+		t.Fatalf("full cache must contain Brasília as the BR canonical city: %+v found=%v", brasilia, ok)
+	}
+
+	for _, tc := range []struct{ name, title, lede string }{
+		{"bare title", "Distrito Federal announces a new security plan", ""},
+		{"portuguese context", "Governo do Distrito Federal anuncia novo plano de segurança", "O governador apresentou as medidas em Brasília."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{
+				Id: "distrito-federal-" + tc.name, Title: tc.title, Lede: tc.lede,
+			})
+			for _, loc := range placed.Locations {
+				if loc.PlaceId == venezuela.ID {
+					t.Fatalf("bare Distrito Federal without jurisdiction evidence must not plot as Venezuela's ADM1: %+v", placed.Locations)
+				}
+				candidate, ok := g.ByID(loc.PlaceId)
+				if !ok {
+					t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+					continue
+				}
+				if candidate.CountryCode == "VE" {
+					t.Fatalf("bare Distrito Federal without jurisdiction evidence must not plot in VE: %+v", loc)
+				}
+			}
+		})
+	}
+
+	for _, tc := range []struct{ name, title string }{
+		{"explicit country qualifier", "Distrito Federal, Venezuela announces a new security plan"},
+		{"possessive country qualifier", "Venezuela's Distrito Federal announces a new security plan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "distrito-federal-ve-" + tc.name, Title: tc.title})
+			var found *dorv1.Location
+			for _, loc := range placed.Locations {
+				if loc.PlaceId == venezuela.ID {
+					found = loc
+				}
+			}
+			if found == nil {
+				t.Fatalf("explicit Venezuelan jurisdiction should resolve Distrito Federal to admin:VE.25, got %+v", placed.Locations)
+			}
+			if found.Precision != dorv1.Precision_PRECISION_REGION {
+				t.Fatalf("explicit Venezuelan jurisdiction should keep admin:VE.25 at region precision: %+v", found)
+			}
+		})
+	}
+
+	t.Run("brazilian_jurisdiction", func(t *testing.T) {
+		brazil := p.place(context.Background(), &dorv1.Article{Id: "distrito-federal-brazil", Title: "Distrito Federal, Brazil announces a security plan"})
+		if len(brazil.Locations) == 0 {
+			t.Fatalf("explicit Brazilian jurisdiction should resolve to Brazil, got no locations")
+		}
+		foundBR := false
+		for _, loc := range brazil.Locations {
+			candidate, ok := g.ByID(loc.PlaceId)
+			if !ok {
+				t.Errorf("plotter returned unknown full-cache ID %q", loc.PlaceId)
+				continue
+			}
+			if candidate.CountryCode == "VE" {
+				t.Errorf("explicit Brazilian jurisdiction must never resolve to Venezuela: %+v", loc)
+			}
+			if candidate.CountryCode == "BR" {
+				foundBR = true
+			}
+		}
+		if !foundBR {
+			t.Fatalf("explicit Brazilian jurisdiction should resolve to a BR country or city, got %+v", brazil.Locations)
+		}
+	})
+
+	t.Run("repair_bare_declined", func(t *testing.T) {
+		bareRepair := g.RepairLocation(geo.StoredLocation{
+			PlaceID: venezuela.ID, Lat: float64(float32(venezuela.Lat)), Lon: float64(float32(venezuela.Lon)), Precision: geo.RegionResolution,
+		}, []geo.TextEvidence{{Title: "Distrito Federal announces a new security plan"}})
+		if bareRepair.Reason != "unsupported_match" || bareRepair.Replacement != nil || bareRepair.ReviewReason != "" {
+			t.Fatalf("bare Distrito Federal evidence must be declined without a replacement or review, got %+v", bareRepair)
+		}
+	})
+
+	t.Run("repair_brazilian_context", func(t *testing.T) {
+		brazilRepair := g.RepairLocation(geo.StoredLocation{
+			PlaceID: venezuela.ID, Lat: float64(float32(venezuela.Lat)), Lon: float64(float32(venezuela.Lon)), Precision: geo.RegionResolution,
+		}, []geo.TextEvidence{{
+			Title: "Jair Bolsonaro é hospitalizado com obstrução intestinal",
+			Lede:  "O ex-presidente foi internado em Brasília, no Distrito Federal.",
+		}})
+		if brazilRepair.Replacement == nil || brazilRepair.Replacement.ID == venezuela.ID {
+			t.Fatalf("Brazilian context must replace Venezuela's ADM1, got %+v", brazilRepair)
+		}
+		replacement, ok := g.ByID(brazilRepair.Replacement.ID)
+		if !ok || replacement.CountryCode != "BR" {
+			t.Fatalf("Brazilian context replacement must be a BR place, got %+v (known=%v)", brazilRepair.Replacement, ok)
+		}
+		if brazilRepair.Replacement.ID != brasilia.ID || brazilRepair.Precision != geo.CityResolution {
+			t.Fatalf("Brazilian context should replace admin:VE.25 with Brasília at city precision, got %+v (want %s)", brazilRepair, brasilia.ID)
+		}
+	})
+
+	t.Run("repair_venezuelan_evidence", func(t *testing.T) {
+		venezuelaRepair := g.RepairLocation(geo.StoredLocation{
+			PlaceID: venezuela.ID, Lat: float64(float32(venezuela.Lat)), Lon: float64(float32(venezuela.Lon)), Precision: geo.RegionResolution,
+		}, []geo.TextEvidence{{Title: "Distrito Federal, Venezuela announces a security plan"}})
+		if venezuelaRepair.Reason != "" && (venezuelaRepair.Replacement == nil || venezuelaRepair.Replacement.ID != venezuela.ID) {
+			t.Fatalf("explicit Venezuelan evidence must retain admin:VE.25 rather than delete it, got %+v", venezuelaRepair)
+		}
+	})
+}
+
 var fullCachePlotGazetteers = struct {
 	sync.Mutex
 	byDir map[string]*geo.Gazetteer

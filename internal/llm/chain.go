@@ -69,6 +69,21 @@ func (c *Chain) Names() []string {
 	return out
 }
 
+// Close closes every backend that holds resources, such as a CLI workdir.
+func (c *Chain) Close() error {
+	var errs []error
+	for _, b := range c.backends {
+		closer, ok := b.Completer.(io.Closer)
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", b.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Complete runs the job on the first backend that answers.
 func (c *Chain) Complete(ctx context.Context, job Job) (Result, error) {
 	var errs []error

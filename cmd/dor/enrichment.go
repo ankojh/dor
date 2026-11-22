@@ -176,15 +176,20 @@ func newEnricher(models dorconfig.Models, b llm.Budget, log *slog.Logger) llm.Co
 			}
 			c, err = llm.NewFromConfig(models, key, os.Getenv("DOR_CLAUDE_BASE_URL"), b)
 		case string(llm.CLIClaude):
+			haiku, opus := claudeCLIModels(models)
 			c, err = llm.NewCLI(llm.CLIConfig{
 				Kind:        llm.CLIClaude,
-				HaikuModel:  models.Claude.HaikuModel,
-				OpusModel:   models.Claude.OpusModel,
+				HaikuModel:  haiku,
+				OpusModel:   opus,
 				Effort:      models.Claude.Effort,
 				Timeout:     models.Claude.Timeout.Std(),
 				Concurrency: concurrency,
+				Budget:      b,
 				Logger:      log,
 			})
+			if err == nil {
+				log.Info("claude-cli models", "haiku", haiku, "opus", opus)
+			}
 		case string(llm.CLICodex):
 			c, err = llm.NewCLI(llm.CLIConfig{
 				Kind:        llm.CLICodex,
@@ -193,6 +198,7 @@ func newEnricher(models dorconfig.Models, b llm.Budget, log *slog.Logger) llm.Co
 				Effort:      models.Claude.Effort,
 				Timeout:     models.Claude.Timeout.Std(),
 				Concurrency: concurrency,
+				Budget:      b,
 				Logger:      log,
 			})
 		default:
@@ -215,6 +221,21 @@ func newEnricher(models dorconfig.Models, b llm.Budget, log *slog.Logger) llm.Co
 	chain := llm.NewChain(log, backends...)
 	log.Info("claude enricher enabled", "backends", strings.Join(chain.Names(), " > "), "haiku", models.Claude.HaikuModel)
 	return chain
+}
+
+// claudeCLIModels returns the models for the two tiers. Both default to the
+// Haiku model so Opus-tier jobs do not drain a Pro subscription. A blank env
+// value means unset, so a copied-and-left-empty line does not break startup.
+func claudeCLIModels(models dorconfig.Models) (haiku, opus string) {
+	haiku = firstEnv("DOR_CLAUDE_CLI_MODEL")
+	if haiku == "" {
+		haiku = models.Claude.HaikuModel
+	}
+	opus = firstEnv("DOR_CLAUDE_CLI_OPUS_MODEL")
+	if opus == "" {
+		opus = models.Claude.HaikuModel
+	}
+	return haiku, opus
 }
 
 func firstEnv(keys ...string) string {

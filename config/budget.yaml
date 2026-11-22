@@ -32,3 +32,12 @@ token_buckets:
   claude-opus:
     capacity: 200000
     refill_per_second: 2000
+  # Subscription CLI quota, not dollars: these throttle how often a CLI process
+  # is admitted (and are visible in /ops), while the daily USD cap still applies
+  # with a zero estimated cost.
+  claude-cli:
+    capacity: 400000
+    refill_per_second: 8000
+  codex-cli:
+    capacity: 400000
+    refill_per_second: 8000

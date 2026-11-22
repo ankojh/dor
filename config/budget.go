@@ -38,6 +38,8 @@ func DefaultBudget() Budget {
 			"jev":          {Capacity: 200_000, RefillPerSecond: 4_000},
 			"claude-haiku": {Capacity: 400_000, RefillPerSecond: 8_000},
 			"claude-opus":  {Capacity: 200_000, RefillPerSecond: 2_000},
+			"claude-cli":   {Capacity: 400_000, RefillPerSecond: 8_000},
+			"codex-cli":    {Capacity: 400_000, RefillPerSecond: 8_000},
 		},
 	}
 }

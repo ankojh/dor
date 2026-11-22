@@ -43,7 +43,7 @@ func TestCommittedConfigsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	if b.DailyUSD != 5 || b.ShedBriefAt != 0.8 || b.ShedWhyAt != 0.9 || b.ShedThematicAt != 0.95 || len(b.TokenBuckets) != 3 {
+	if b.DailyUSD != 5 || b.ShedBriefAt != 0.8 || b.ShedWhyAt != 0.9 || b.ShedThematicAt != 0.95 || len(b.TokenBuckets) != 5 {
 		t.Errorf("unexpected budget: %+v", b)
 	}
 }

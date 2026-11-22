@@ -140,3 +140,49 @@ func TestChainStopsOnCancelledContext(t *testing.T) {
 		t.Errorf("err=%v b.calls=%d fails=%d", err, b.calls, c.fails[0])
 	}
 }
+
+// fakeCloser is a Completer that also holds a resource, like a CLI workdir.
+type fakeCloser struct {
+	calls int
+	err   error
+}
+
+func (f *fakeCloser) Complete(context.Context, Job) (Result, error) { return Result{}, nil }
+
+func (f *fakeCloser) Close() error {
+	f.calls++
+	return f.err
+}
+
+func TestChainCloseClosesResourceHolders(t *testing.T) {
+	boom := errors.New("workdir busy")
+	a, b := &fakeCloser{}, &fakeCloser{err: boom}
+	plain := &stubCompleter{text: "plain"}
+	c := NewChain(nil,
+		Backend{"claude-cli", a},
+		Backend{"api", plain}, // no Close method: ignored
+		Backend{"codex-cli", b},
+	)
+	err := c.Close()
+	if a.calls != 1 || b.calls != 1 {
+		t.Errorf("close calls = %d/%d, want 1/1", a.calls, b.calls)
+	}
+	if err == nil || !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+	if !strings.Contains(err.Error(), "codex-cli") {
+		t.Errorf("err = %v, want the backend name", err)
+	}
+	if strings.Contains(err.Error(), "api:") {
+		t.Errorf("err = %v, a backend without Close must not be reported", err)
+	}
+
+	// Without failures Close reports nil, and a repeated Close is harmless.
+	ok := NewChain(nil, Backend{"claude-cli", &fakeCloser{}})
+	if err := ok.Close(); err != nil {
+		t.Errorf("Close = %v, want nil", err)
+	}
+	if err := ok.Close(); err != nil {
+		t.Errorf("second Close = %v, want nil", err)
+	}
+}

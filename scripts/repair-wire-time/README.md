@@ -120,14 +120,13 @@ and `--plan-out` exports a deterministic plan. `--apply` without
   writes the corrected snapshot and activates the monotonic floor before
   admitting the fleet.
 
-Expected participants that are stopped must be named with
-`--excluded-producer`/`--excluded-gateway` and covered by a structured
-`ExclusionProof` (`--exclusion-authority`, `--exclusion-evidence`,
-`--exclusion-generation`); its digest binds the exact expected/excluded sets.
-A missing, paused-but-serving, incompatible or unregistered participant fails
-closed. Free-text routing assertions are not accepted. The non-expiring
-control/floor/policy records survive repeated runs, and a completed run answers
-only the same request identity.
+Expected participants that are stopped cannot be excluded by the structured proof
+alone. `--excluded-producer`/`--excluded-gateway` require a deployment-specific
+machine-verifying `ExclusionAuthority` adapter; none is wired in the embedded
+target, so excluded participants fail closed here. Absent/unregistered or
+incompatible participants block Apply and require upgrade/ack. The proof remains
+audit data. The non-expiring control/floor/policy records survive repeated runs,
+and a completed run answers only the same request identity.
 
 
 

@@ -26,6 +26,7 @@ type Coordinator struct {
 	kv        jetstream.KeyValue
 	leases    jetstream.KeyValue
 	producers jetstream.KeyValue
+	authority ExclusionAuthority
 	store     *publication.Store
 	now       func() time.Time
 }
@@ -77,6 +78,8 @@ func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
 		control.IngressClosed = true
 		control.DownstreamFenced = false
 		control.WriterClosed = false
+		control.DeliveryFenced = false
+		control.DeliveryConsumers = nil
 		if err := ResetJournal(ctx, c.kv); err != nil {
 			return err
 		}
@@ -138,6 +141,159 @@ func (c *Coordinator) AwaitProducerWriterClosed(ctx context.Context, expected, e
 		return nil, errors.New("maintenance: producer lease bucket unavailable")
 	}
 	return AwaitProducerWriterClosed(ctx, c.producers, expected, excluded, timeout)
+}
+
+// PauseConsumers fences new handler/delivery admission for every expected
+// durable consumer. In-flight handlers remain unacknowledged until they finish;
+// no message is reset, purged or acknowledged by maintenance.
+func (c *Coordinator) PauseConsumers(ctx context.Context, expected []string) error {
+	if len(expected) == 0 {
+		return errors.New("maintenance: expected consumer inventory is required")
+	}
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if control.DeliveryFenced && len(control.DeliveryConsumers) > 0 && !sameStringSet(control.DeliveryConsumers, expected) {
+		return errors.New("maintenance: consumer inventory changed during the fenced run")
+	}
+	until := c.now().Add(24 * time.Hour)
+	for _, id := range expected {
+		streamName, name, err := splitConsumerID(id)
+		if err != nil {
+			return err
+		}
+		stream, err := c.bus.StreamNamed(ctx, streamName)
+		if err != nil {
+			return err
+		}
+		if _, err := stream.PauseConsumer(ctx, name, until); err != nil {
+			return fmt.Errorf("maintenance: pause consumer %s: %w", id, err)
+		}
+	}
+	control, _, err = ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	control.DeliveryFenced = true
+	control.DeliveryConsumers = append([]string(nil), expected...)
+	control.UpdatedAt = c.now().UnixNano()
+	return UpdateControl(ctx, c.kv, control)
+}
+
+// ResumeConsumers opens delivery after the corrected policy/floor are durable
+// and immediately before fleet admission.
+func (c *Coordinator) ResumeConsumers(ctx context.Context, expected []string) error {
+	for _, id := range expected {
+		streamName, name, err := splitConsumerID(id)
+		if err != nil {
+			return err
+		}
+		stream, err := c.bus.StreamNamed(ctx, streamName)
+		if err != nil {
+			return err
+		}
+		if _, err := stream.ResumeConsumer(ctx, name); err != nil {
+			return fmt.Errorf("maintenance: resume consumer %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func splitConsumerID(id string) (string, string, error) {
+	streamName, name, ok := strings.Cut(id, "/")
+	if !ok || streamName == "" || name == "" {
+		return "", "", fmt.Errorf("maintenance: consumer inventory entry %q must be STREAM/name", id)
+	}
+	return streamName, name, nil
+}
+
+// AwaitConsumerQuiescence waits for every expected consumer to be server-side
+// paused with no pending or in-flight handler acknowledgements.
+func (c *Coordinator) AwaitConsumerQuiescence(ctx context.Context, expected []string, timeout time.Duration) error {
+	if len(expected) == 0 {
+		return errors.New("maintenance: expected consumer inventory is required")
+	}
+	deadline := c.now().Add(timeout)
+	for {
+		blocked := []string{}
+		for _, id := range expected {
+			streamName, name, err := splitConsumerID(id)
+			if err != nil {
+				return err
+			}
+			stream, err := c.bus.StreamNamed(ctx, streamName)
+			if err != nil {
+				blocked = append(blocked, id+" missing")
+				continue
+			}
+			consumer, err := stream.Consumer(ctx, name)
+			if err != nil {
+				blocked = append(blocked, id+" missing")
+				continue
+			}
+			info, err := consumer.Info(ctx)
+			if err != nil {
+				blocked = append(blocked, id+" unreadable")
+				continue
+			}
+			if !info.Paused || info.NumPending > 0 || info.NumAckPending > 0 {
+				blocked = append(blocked, fmt.Sprintf("%s paused=%t pending=%d ack=%d", id, info.Paused, info.NumPending, info.NumAckPending))
+			}
+		}
+		if len(blocked) == 0 {
+			return nil
+		}
+		if c.now().After(deadline) {
+			return fmt.Errorf("maintenance: consumer delivery not quiescent: %v", blocked)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// RecheckAfterDeliveryFence re-samples consumers, joins, DB writer and producer
+// leases after handler admission is closed.
+func (c *Coordinator) RecheckAfterDeliveryFence(ctx context.Context, req *ApplyRequest, timeout time.Duration) error {
+	if err := c.AwaitConsumerQuiescence(ctx, req.ExpectedConsumers, timeout); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	var previous *DrainReport
+	for {
+		producers, err := c.AwaitProducerAdmission(ctx, req.ExpectedProducers, req.ExcludedProducers, 10*time.Second)
+		if err != nil {
+			return err
+		}
+		opts := req.Drain
+		opts.Producers = producers
+		opts.ExpectedProducers = req.ExpectedProducers
+		opts.ExpectedConsumers = req.ExpectedConsumers
+		opts.Previous = previous
+		report, err := VerifyQuiesce(ctx, c.bus, opts)
+		if err != nil {
+			return err
+		}
+		if report.Stable {
+			control, _, cerr := ReadControl(ctx, c.kv)
+			if cerr != nil {
+				return cerr
+			}
+			return Advance(ctx, c.kv, control.RunID, PhaseDeliveryFenced, map[string]string{"consumers": fmt.Sprint(len(req.ExpectedConsumers))}, "handler delivery fenced and rechecked", c.now())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("maintenance: post-handler-fence sample not stable: %v", report.Reasons)
+		}
+		previous = report
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // CloseDownstream fences every downstream writer after the finite backlog
@@ -760,8 +916,8 @@ func (c *Coordinator) requireJournalPhases(ctx context.Context, runID string, ph
 
 // AdmitFleet re-admits only floor-aware gateways after the corrected snapshot
 // and baseline are durable.
-func (c *Coordinator) AdmitFleet(ctx context.Context, runID string) error {
-	if err := c.requireJournalPhases(ctx, runID, PhaseDBRepaired, PhaseHotReconciled, PhasePolicyPersisted, PhaseForwardCommitted, PhaseSnapshot, PhaseFloorActivated); err != nil {
+func (c *Coordinator) AdmitFleet(ctx context.Context, runID string, expectedConsumers []string) error {
+	if err := c.requireJournalPhases(ctx, runID, PhaseDBRepaired, PhaseHotReconciled, PhasePolicyPersisted, PhaseForwardCommitted, PhaseSnapshot, PhaseFloorActivated, PhaseDeliveryFenced); err != nil {
 		return err
 	}
 	floor, _, err := ReadFloor(ctx, c.kv)
@@ -778,6 +934,14 @@ func (c *Coordinator) AdmitFleet(ctx context.Context, runID string) error {
 	if control.RunID != "" && control.RunID != runID {
 		return fmt.Errorf("maintenance: control belongs to run %s", control.RunID)
 	}
+	if len(control.DeliveryConsumers) > 0 && !sameStringSet(control.DeliveryConsumers, expectedConsumers) {
+		return errors.New("maintenance: consumer inventory changed during the fenced run")
+	}
+	if err := c.ResumeConsumers(ctx, expectedConsumers); err != nil {
+		return err
+	}
+	control.DeliveryFenced = false
+	control.DeliveryConsumers = nil
 	control.FenceActive = false
 	control.Required = true
 	control.IngressClosed = false
@@ -888,6 +1052,17 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
+	if len(req.Exclusion.Excluded) > 0 || len(req.Exclusion.ExcludedProducers) > 0 {
+		if c.authority == nil {
+			err := errors.New("maintenance: excluded participants require a wired machine-verifying exclusion authority")
+			c.RecordFailure(ctx, err)
+			return result, err
+		}
+		if err := c.authority.Verify(ctx, req.Exclusion); err != nil {
+			c.RecordFailure(ctx, err)
+			return result, err
+		}
+	}
 	timeout := req.DrainTimeout
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
@@ -901,6 +1076,14 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		return result, err
 	}
 	if err := c.Drain(ctx, &req, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.PauseConsumers(ctx, req.ExpectedConsumers); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.RecheckAfterDeliveryFence(ctx, &req, timeout); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
@@ -1004,7 +1187,11 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		return result, err
 	}
 	result.Floor = floor
-	if err := c.AdmitFleet(ctx, plan.RunID); err != nil {
+	if err := c.AwaitConsumerQuiescence(ctx, req.ExpectedConsumers, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.AdmitFleet(ctx, plan.RunID, req.ExpectedConsumers); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
 	}

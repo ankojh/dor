@@ -55,14 +55,15 @@ type Runtime struct {
 	writerProbe   func() WriterCounters
 	writerBlocked func(bool)
 
-	mu       sync.Mutex
-	last     Control
-	barrier  bus.IngestBarrier
-	writer   WriterCounters
-	healthy  bool
-	lastErr  string
-	lastAt   int64
-	policyAt time.Time
+	mu           sync.Mutex
+	last         Control
+	barrier      bus.IngestBarrier
+	writer       WriterCounters
+	writerClosed bool
+	healthy      bool
+	lastErr      string
+	lastAt       int64
+	policyAt     time.Time
 }
 
 // RuntimeState is the admin/health view of one participant.
@@ -100,11 +101,13 @@ func NewRuntime(ctx context.Context, b *bus.Bus, id string, log *slog.Logger) (*
 		log = slog.Default()
 	}
 	control, _, cerr := ReadControl(ctx, controlKV)
+	writerClosed := true
 	if cerr != nil {
 		b.PauseIngress()
 		b.PauseDownstream()
 		SetProcessBlocked(true)
 	} else {
+		writerClosed = control.WriterShut()
 		if control.IngressShut() {
 			b.PauseIngress()
 		}
@@ -115,8 +118,13 @@ func NewRuntime(ctx context.Context, b *bus.Bus, id string, log *slog.Logger) (*
 	}
 	if policy, perr := LoadPolicy(ctx, controlKV); perr == nil {
 		SetCurrentPolicy(policy)
+	} else {
+		b.PauseIngress()
+		b.PauseDownstream()
+		SetProcessBlocked(true)
+		writerClosed = true
 	}
-	return &Runtime{ID: id, Bus: b, control: controlKV, leases: leases, log: log}, nil
+	return &Runtime{ID: id, Bus: b, control: controlKV, leases: leases, log: log, writerClosed: writerClosed}, nil
 }
 
 // SetWriter wires the in-process DB writer barrier and admission fence.
@@ -124,7 +132,11 @@ func (r *Runtime) SetWriter(probe func() WriterCounters, blocked func(bool)) {
 	r.mu.Lock()
 	r.writerProbe = probe
 	r.writerBlocked = blocked
+	closed := r.writerClosed
 	r.mu.Unlock()
+	if blocked != nil {
+		blocked(closed)
+	}
 }
 
 // Start watches the control record until ctx is cancelled. It pauses producers
@@ -158,6 +170,14 @@ func (r *Runtime) sample(ctx context.Context) {
 		writerClosed = control.WriterShut()
 		phase = control.Phase
 		epoch = control.FleetEpoch
+	}
+	if policyErr != nil {
+		// A policy read failure is an actual write fence, not just a lease
+		// symptom: stop hot/wire/DB ingress until the durable policy is readable.
+		ingressClosed = true
+		downstreamClosed = true
+		writerClosed = true
+		healthy = false
 	}
 	if ingressClosed {
 		r.Bus.PauseIngress()
@@ -199,6 +219,7 @@ func (r *Runtime) sample(ctx context.Context) {
 	r.last = Control{Phase: phase, FleetEpoch: epoch, FenceActive: ingressClosed || downstreamClosed}
 	r.barrier = barrier
 	r.writer = writer
+	r.writerClosed = writerClosed
 	r.healthy = healthy
 	r.lastErr = errText
 	r.lastAt = time.Now().UnixNano()
@@ -228,7 +249,7 @@ func (r *Runtime) sample(ctx context.Context) {
 
 func (r *Runtime) refreshPolicy(ctx context.Context) error {
 	r.mu.Lock()
-	due := time.Since(r.policyAt) >= 2*time.Second
+	due := time.Since(r.policyAt) >= 500*time.Millisecond
 	r.mu.Unlock()
 	if !due {
 		return nil

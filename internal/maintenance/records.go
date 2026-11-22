@@ -71,6 +71,7 @@ var ErrFloorRegression = errors.New("maintenance: floor regression")
 const (
 	PhaseIdle             = "idle"
 	PhaseDraining         = "draining"
+	PhaseDeliveryFenced   = "delivery_fenced"
 	PhaseFenced           = "fenced"
 	PhasePlanned          = "planned"
 	PhaseDBRepaired       = "db_repaired"
@@ -86,6 +87,7 @@ var phaseRank = map[string]int{
 	"":                    -1,
 	PhaseIdle:             0,
 	PhaseDraining:         1,
+	PhaseDeliveryFenced:   2,
 	PhaseFenced:           2,
 	PhasePlanned:          3,
 	PhaseDBRepaired:       4,
@@ -101,20 +103,22 @@ var phaseRank = map[string]int{
 // serving exclusion; Phase journaling is diagnostic/resumable progress. A
 // nonempty Phase other than idle/serving blocks new gateway admission.
 type Control struct {
-	Version          int    `json:"version"`
-	Phase            string `json:"phase"`
-	Required         bool   `json:"required"`
-	FenceActive      bool   `json:"fence_active"`
-	IngressClosed    bool   `json:"ingress_closed"`
-	DownstreamFenced bool   `json:"downstream_fenced"`
-	WriterClosed     bool   `json:"writer_closed"`
-	RunID            string `json:"run_id,omitempty"`
-	PlanHash         string `json:"plan_hash,omitempty"`
-	FleetEpoch       uint64 `json:"fleet_epoch"`
-	GlobalSeq        uint64 `json:"global_seq"`
-	RawSeq           uint64 `json:"raw_seq"`
-	UpdatedAt        int64  `json:"updated_at"`
-	LastError        string `json:"last_error,omitempty"`
+	Version           int      `json:"version"`
+	Phase             string   `json:"phase"`
+	Required          bool     `json:"required"`
+	FenceActive       bool     `json:"fence_active"`
+	IngressClosed     bool     `json:"ingress_closed"`
+	DownstreamFenced  bool     `json:"downstream_fenced"`
+	WriterClosed      bool     `json:"writer_closed"`
+	DeliveryFenced    bool     `json:"delivery_fenced"`
+	DeliveryConsumers []string `json:"delivery_consumers,omitempty"`
+	RunID             string   `json:"run_id,omitempty"`
+	PlanHash          string   `json:"plan_hash,omitempty"`
+	FleetEpoch        uint64   `json:"fleet_epoch"`
+	GlobalSeq         uint64   `json:"global_seq"`
+	RawSeq            uint64   `json:"raw_seq"`
+	UpdatedAt         int64    `json:"updated_at"`
+	LastError         string   `json:"last_error,omitempty"`
 	// Explicit external routing/process exclusion evidence. The digest binds
 	// the authority, evidence id, generation and exact expected/excluded sets.
 	ExclusionAuthority  string `json:"exclusion_authority,omitempty"`
@@ -445,8 +449,22 @@ func ExclusionDigest(authority, evidenceID string, generation uint64, expected, 
 	return hashBytes(data)
 }
 
+// ExclusionAuthority is the machine-verifying adapter for external routing or
+// process exclusions. It is intentionally not implemented by the embedded
+// target: without a wired adapter, any excluded participant fails closed.
+type ExclusionAuthority interface {
+	Verify(ctx context.Context, proof ExclusionProof) error
+}
+
+// SetExclusionAuthority wires the deployment-specific verifier. A nil adapter
+// means no external participant may be excluded.
+func (c *Coordinator) SetExclusionAuthority(authority ExclusionAuthority) {
+	c.authority = authority
+}
+
 // ValidateExclusionProof checks that the proof is complete and its digest
-// matches the exact expected/excluded inventory.
+// matches the exact expected/excluded inventory. The digest is audit identity,
+// not authority; Apply separately requires a wired verifier for any exclusion.
 func ValidateExclusionProof(p ExclusionProof) error {
 	if p.Version != ControlVersion || strings.TrimSpace(p.Authority) == "" || strings.TrimSpace(p.EvidenceID) == "" {
 		return errors.New("maintenance: exclusion proof requires authority and evidence id")
@@ -824,8 +842,18 @@ func kvPayloadLimit(jetstream.KeyValue) int { return 1 << 20 }
 func LoadPolicy(ctx context.Context, kv jetstream.KeyValue) (*WireTimePolicy, error) {
 	var p WireTimePolicy
 	_, ok, err := readRecord(ctx, kv, KeyPolicy, &p)
-	if err != nil || !ok {
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		activation, _, aerr := ReadActivation(ctx, kv)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if activation != nil {
+			return nil, errors.New("maintenance: policy record missing after activation")
+		}
+		return nil, nil
 	}
 	if err = p.Validate(); err != nil {
 		return nil, err
@@ -904,7 +932,7 @@ func Advance(ctx context.Context, kv jetstream.KeyValue, runID, phase string, va
 			j.RunID = runID
 		}
 		last := j.Last()
-		if last == phase {
+		if last == phase || j.Has(phase) {
 			return nil
 		}
 		if phaseRank[phase] < phaseRank[last] {

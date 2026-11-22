@@ -235,9 +235,9 @@ Give the matcher and notifier processes the same `DOR_DATABASE_URL` as the
 provisioning owner. The alert store then reloads saved alerts and records hits
 in Postgres; without it the processes still run, but alert definitions live
 only in the 48-hour live-state KV, so they can disappear on a cold start. The
-delivery queue itself uses its dedicated non-expiring bucket. `notifier` also needs
-the same `DOR_NTFY_URL` and VAPID/push-encryption variables as the gateway if
-external notifications are configured. Missing channels are logged and the
+delivery queue itself uses its dedicated non-expiring bucket. `notifier` also
+needs the same `DOR_NTFY_URL` and VAPID/push-encryption variables as the gateway
+if external notifications are configured. Missing channels are logged and the
 delivery stays pending rather than being acknowledged as sent.
 
 The gateway process loads the GeoNames gazetteer for `/api/places` itself. A

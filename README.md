@@ -15,7 +15,7 @@ open http://127.0.0.1:8080/ops   # Supervisor, agents, budgets, sources and acti
 
 `/healthz` returns 200 only when the NATS client is connected and every agent
 selected in this process reports running; otherwise it returns 503 and the body
-names each agent's state. The embedded-NATS all-in-one below should reach 200
+names each agent's state. The embedded-NATS all-in-one above should reach 200
 on a healthy machine.
 
 `make run AGENTS=classify,plot` runs a subset of the agents.

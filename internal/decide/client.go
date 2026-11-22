@@ -123,8 +123,9 @@ func NewClient(cfg ClientConfig, b Budget) (*Client, error) {
 }
 
 // NewClientFromModels builds a client from config/models.yaml values. baseURL
-// and key override the file.
-func NewClientFromModels(m config.Models, baseURL, apiKey string, b Budget) (*Client, error) {
+// and key override the file. log receives one jev.decide line per call; nil
+// discards it.
+func NewClientFromModels(m config.Models, baseURL, apiKey string, b Budget, log *slog.Logger) (*Client, error) {
 	if baseURL == "" {
 		baseURL = m.Jev.BaseURL
 	}
@@ -138,12 +139,14 @@ func NewClientFromModels(m config.Models, baseURL, apiKey string, b Budget) (*Cl
 		MinBackoff: m.Jev.MinBackoff.Std(),
 		MaxBackoff: m.Jev.MaxBackoff.Std(),
 		Price:      m.Jev.Price,
+		Logger:     log,
 	}, b)
 }
 
 // NewTypeSafeClientFromModels builds a client for TypeSafe's own host from
-// the jev.typesafe block. baseURL overrides the file.
-func NewTypeSafeClientFromModels(m config.Models, baseURL, apiKey string, b Budget) (*Client, error) {
+// the jev.typesafe block. baseURL overrides the file; log is as for
+// NewClientFromModels.
+func NewTypeSafeClientFromModels(m config.Models, baseURL, apiKey string, b Budget, log *slog.Logger) (*Client, error) {
 	ts := m.Jev.TypeSafe
 	if baseURL == "" {
 		baseURL = ts.BaseURL
@@ -159,6 +162,7 @@ func NewTypeSafeClientFromModels(m config.Models, baseURL, apiKey string, b Budg
 		MaxBackoff:    m.Jev.MaxBackoff.Std(),
 		Price:         ts.Price,
 		CostFromPrice: true,
+		Logger:        log,
 	}, b)
 }
 

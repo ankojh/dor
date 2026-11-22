@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -184,6 +185,16 @@ func (m *Manager) Check(ctx context.Context, req Request) (Verdict, error) {
 		Day:    day,
 		Tokens: req.EstimatedInputTokens + req.EstimatedOutputTokens,
 		USD:    req.EstimatedUSD,
+	}
+
+	// Fast path: a bucket that clearly cannot cover the call is denied from a
+	// read, with no write to either store. Under a backlog most calls are
+	// token-denied, and the full path below would write the shared daily
+	// document twice for each of them (reserve, then refund), which is what
+	// made concurrent callers exhaust their CAS retries. A stale read can only
+	// deny early; every admission is still decided by the CAS path.
+	if m.tokensShort(ctx, req.API, res.Tokens, now) {
+		return Verdict{Reason: "token-bucket"}, nil
 	}
 
 	var verdict Verdict
@@ -513,6 +524,26 @@ func (m *Manager) Sheds(priority Priority, ratio float64) bool {
 	}
 }
 
+// tokensShort reports whether the stored bucket for api cannot cover need
+// tokens at now. A missing or unreadable bucket is not short: the CAS path
+// creates and checks it.
+func (m *Manager) tokensShort(ctx context.Context, api string, need int64, now time.Time) bool {
+	raw, err := m.tokens.Get(ctx, "tokens."+api)
+	if err != nil || raw == nil {
+		return false
+	}
+	var b bucket
+	if json.Unmarshal(raw, &b) != nil {
+		return false
+	}
+	spec := m.bucketFor(api)
+	available := b.Tokens
+	if elapsed := now.Sub(b.UpdatedAt).Seconds(); elapsed > 0 {
+		available = clamp(available+elapsed*spec.RefillPerSecond, 0, spec.Capacity)
+	}
+	return available < float64(need)
+}
+
 func (m *Manager) bucketFor(api string) config.TokenBucket {
 	if b, ok := m.cfg.TokenBuckets[api]; ok {
 		return b
@@ -714,9 +745,17 @@ func (s *KVStore) Update(ctx context.Context, key string, fn func(old []byte, ex
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(s.RetryDelay):
+			case <-time.After(retryBackoff(s.RetryDelay, attempt)):
 			}
 		}
 	}
 	return fmt.Errorf("budget: kv update %s: no progress after %d attempts: %w", key, retries, lastErr)
+}
+
+// retryBackoff spreads CAS retries: the delay doubles per attempt up to 32x
+// base, with full jitter in [d/2, d). A fixed delay kept colliding writers in
+// lockstep, so they kept losing to each other.
+func retryBackoff(base time.Duration, attempt int) time.Duration {
+	d := base << min(attempt, 5)
+	return d/2 + time.Duration(mrand.Int64N(int64(d/2)+1))
 }

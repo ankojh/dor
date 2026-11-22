@@ -23,9 +23,12 @@ shed_thematic_at: 0.95
 # counts only committed removals (CAS retries never overcount).
 pending_ttl: 15m
 token_buckets:
+  # jev calls are ~600-1500 tokens. The burst covers the startup backlog
+  # (about 2,000 calls) instead of denying most of it; the refill allows about
+  # 10 calls/s after that. daily_usd stays the binding cost limit.
   jev:
-    capacity: 200000
-    refill_per_second: 4000
+    capacity: 1500000
+    refill_per_second: 8000
   claude-haiku:
     capacity: 400000
     refill_per_second: 8000

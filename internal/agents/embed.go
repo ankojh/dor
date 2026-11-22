@@ -165,7 +165,7 @@ func NewEmbedder(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (Age
 }
 
 type embedder struct {
-	base Agent
+	base *Base
 	deps Deps
 	log  *slog.Logger
 	in   chan *dorv1.Article
@@ -188,6 +188,15 @@ func (e *embedder) Consume(ctx context.Context) error {
 func (e *embedder) Publish(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) error {
 	return e.base.Publish(ctx, subject, data, opts...)
 }
+
+// Running, LastError and TerminalCount make the agent a HealthReporter, so
+// /healthz reports it instead of "unknown".
+func (e *embedder) Running() bool {
+	return e.started.Load() && !e.stopped.Load() && e.base.Running()
+}
+
+func (e *embedder) LastError() error     { return e.base.LastError() }
+func (e *embedder) TerminalCount() int64 { return e.base.TerminalCount() }
 
 func (e *embedder) Start(ctx context.Context) error {
 	if !e.started.CompareAndSwap(false, true) {

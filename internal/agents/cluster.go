@@ -118,7 +118,7 @@ func NewClusterer(b *bus.Bus, metrics *Metrics, log *slog.Logger, deps Deps) (Ag
 }
 
 type clusterer struct {
-	base Agent
+	base *Base
 	bus  *bus.Bus
 	log  *slog.Logger
 	deps Deps
@@ -146,6 +146,15 @@ func (c *clusterer) Consume(ctx context.Context) error {
 func (c *clusterer) Publish(ctx context.Context, subject string, data []byte, opts ...bus.PublishOption) error {
 	return c.base.Publish(ctx, subject, data, opts...)
 }
+
+// Running, LastError and TerminalCount make the agent a HealthReporter, so
+// /healthz reports it instead of "unknown".
+func (c *clusterer) Running() bool {
+	return c.started.Load() && !c.stopped.Load() && c.base.Running()
+}
+
+func (c *clusterer) LastError() error     { return c.base.LastError() }
+func (c *clusterer) TerminalCount() int64 { return c.base.TerminalCount() }
 
 func (c *clusterer) Start(ctx context.Context) error {
 	if !c.started.CompareAndSwap(false, true) {

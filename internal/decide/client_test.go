@@ -448,7 +448,7 @@ func TestMissingAPIKey(t *testing.T) {
 		}
 	}
 	// NewClientFromModels propagates it.
-	if _, err := NewClientFromModels(config.DefaultModels(), "", "", &fakeBudget{}); !errors.Is(err, ErrNoAPIKey) {
+	if _, err := NewClientFromModels(config.DefaultModels(), "", "", &fakeBudget{}, nil); !errors.Is(err, ErrNoAPIKey) {
 		t.Errorf("from models: %v", err)
 	}
 }
@@ -509,7 +509,7 @@ func TestNewClientFromModels(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gotPath = r.URL.Path; _, _ = io.WriteString(w, okBody) }))
 	defer srv.Close()
 	m := config.DefaultModels()
-	c, err := NewClientFromModels(m, srv.URL, "key", &fakeBudget{})
+	c, err := NewClientFromModels(m, srv.URL, "key", &fakeBudget{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +520,7 @@ func TestNewClientFromModels(t *testing.T) {
 		t.Errorf("err=%v path=%q", err, gotPath)
 	}
 	// The default base URL comes from models.yaml when none is given.
-	c2, err := NewClientFromModels(m, "", "key", &fakeBudget{})
+	c2, err := NewClientFromModels(m, "", "key", &fakeBudget{}, nil)
 	if err != nil || c2.cfg.BaseURL != "https://openrouter.ai" {
 		t.Errorf("base url = %q err=%v", c2.cfg.BaseURL, err)
 	}
@@ -544,7 +544,7 @@ func TestNewTypeSafeClientFromModels(t *testing.T) {
 	defer srv.Close()
 	m := config.DefaultModels()
 	fb := &fakeBudget{}
-	c, err := NewTypeSafeClientFromModels(m, srv.URL, "ts-key", fb)
+	c, err := NewTypeSafeClientFromModels(m, srv.URL, "ts-key", fb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func TestNewTypeSafeClientFromModels(t *testing.T) {
 	if len(fb.records) != 1 || fb.records[0].Usage.CostUSD != resp.Usage.CostUSD {
 		t.Errorf("records = %+v", fb.records)
 	}
-	c2, err := NewTypeSafeClientFromModels(m, "", "ts-key", fb)
+	c2, err := NewTypeSafeClientFromModels(m, "", "ts-key", fb, nil)
 	if err != nil || c2.cfg.BaseURL != "https://api.typesafe.ai" {
 		t.Errorf("base url = %q err=%v", c2.cfg.BaseURL, err)
 	}

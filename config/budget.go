@@ -35,7 +35,7 @@ func DefaultBudget() Budget {
 		ShedThematicAt: 0.95,
 		PendingTTL:     Duration(15 * time.Minute),
 		TokenBuckets: map[string]TokenBucket{
-			"jev":          {Capacity: 200_000, RefillPerSecond: 4_000},
+			"jev":          {Capacity: 1_500_000, RefillPerSecond: 8_000},
 			"claude-haiku": {Capacity: 400_000, RefillPerSecond: 8_000},
 			"claude-opus":  {Capacity: 200_000, RefillPerSecond: 2_000},
 			"claude-cli":   {Capacity: 400_000, RefillPerSecond: 8_000},

@@ -58,7 +58,7 @@ func buildEnrichmentDeps(ctx context.Context, cfg config, b *bus.Bus, log *slog.
 	}
 	manager := newBudgetManager(ctx, b, budgetCfg, log)
 
-	if client, model, err := newJevClient(models, manager); err != nil {
+	if client, model, err := newJevClient(models, manager, log); err != nil {
 		log.Warn("jev client unavailable", "err", err)
 	} else if client != nil {
 		deps.Decider = client
@@ -134,13 +134,13 @@ func seedSources(ctx context.Context, st *store.Store, path string, log *slog.Lo
 // newJevClient picks the jev host from the key that is set. DOR_JEV_API_KEY
 // and OPENROUTER_API_KEY go to OpenRouter (or DOR_JEV_BASE_URL); a
 // TYPESAFE_API_KEY on its own goes to TypeSafe's host. No key is (nil, nil).
-func newJevClient(models dorconfig.Models, b decide.Budget) (*decide.Client, string, error) {
+func newJevClient(models dorconfig.Models, b decide.Budget, log *slog.Logger) (*decide.Client, string, error) {
 	if key := firstEnv("DOR_JEV_API_KEY", "OPENROUTER_API_KEY"); key != "" {
-		client, err := decide.NewClientFromModels(models, os.Getenv("DOR_JEV_BASE_URL"), key, b)
+		client, err := decide.NewClientFromModels(models, os.Getenv("DOR_JEV_BASE_URL"), key, b, log)
 		return client, models.Jev.Model, err
 	}
 	if key := firstEnv("TYPESAFE_API_KEY"); key != "" {
-		client, err := decide.NewTypeSafeClientFromModels(models, firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL"), key, b)
+		client, err := decide.NewTypeSafeClientFromModels(models, firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL"), key, b, log)
 		return client, models.Jev.TypeSafe.Model, err
 	}
 	return nil, "", nil

@@ -259,6 +259,27 @@ func TestLoadBudgetAcceptsBoundaries(t *testing.T) {
 	}
 }
 
+// The committed budget.yaml must carry the same jev bucket as DefaultBudget:
+// the larger burst covers the startup backlog and the refill allows about
+// 10 calls/s after that.
+func TestCommittedBudgetMatchesDefaultJevBucket(t *testing.T) {
+	b, err := LoadBudget("budget.yaml")
+	if err != nil {
+		t.Fatalf("load budget.yaml: %v", err)
+	}
+	got, ok := b.TokenBuckets["jev"]
+	if !ok {
+		t.Fatal("budget.yaml has no jev token bucket")
+	}
+	want := DefaultBudget().TokenBuckets["jev"]
+	if got != want {
+		t.Errorf("jev bucket = %+v, want %+v", got, want)
+	}
+	if got.Capacity != 1_500_000 || got.RefillPerSecond != 8_000 {
+		t.Errorf("jev bucket = %+v, want capacity 1500000 refill 8000", got)
+	}
+}
+
 func TestDurationRoundTrip(t *testing.T) {
 	d := Duration(90 * time.Second)
 	v, err := d.MarshalYAML()

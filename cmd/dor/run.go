@@ -27,6 +27,7 @@ import (
 	"github.com/ankojh/dor/internal/gateway"
 	"github.com/ankojh/dor/internal/geo"
 	"github.com/ankojh/dor/internal/httpguard"
+	"github.com/ankojh/dor/internal/maintenance"
 	"github.com/ankojh/dor/internal/matcher"
 	"github.com/ankojh/dor/internal/ops"
 	"github.com/ankojh/dor/internal/push"
@@ -62,6 +63,7 @@ type config struct {
 	dbMaxConns int
 
 	gatewayAddr    string
+	gatewayID      string
 	gatewayOrigins string
 
 	supervisor           bool
@@ -122,6 +124,7 @@ func runCommand(args []string) error {
 		dbMaxConns: envIntOr("DOR_DB_MAX_CONNECTIONS", 10),
 
 		gatewayAddr:    envOr("DOR_GATEWAY_ADDR", gateway.DefaultAddr),
+		gatewayID:      envOr("DOR_GATEWAY_ID", ""),
 		gatewayOrigins: envOr("DOR_GATEWAY_ORIGINS", "localhost:*,127.0.0.1:*"),
 
 		supervisor:           envBoolOr("DOR_SUPERVISOR", true),
@@ -312,6 +315,13 @@ func runCommand(args []string) error {
 					logger.Warn("postgres writer unavailable; durable writes disabled", "err", werr)
 					st.Close()
 				} else {
+					// Do not start accepting writes while a durable
+					// maintenance fence is already active.
+					if gateKV, gerr := b.KV(ctx, bus.KVBucketPublisher); gerr == nil {
+						if control, _, cerr := maintenance.ReadControl(ctx, gateKV); cerr == nil && control.Blocked() {
+							w.SetMaintenanceBlocked(true)
+						}
+					}
 					w.Start()
 					dbStore = st
 					dbWriter = w
@@ -331,6 +341,42 @@ func runCommand(args []string) error {
 			dbStore.Close()
 		}()
 	}
+
+	// The runtime participant must exist before agents start. It pauses raw
+	// producers and blocks new writer admissions as soon as the durable
+	// maintenance fence closes, and advertises the exact drain state.
+	runtimeID := envOr("DOR_RUNTIME_ID", "")
+	if runtimeID == "" {
+		host, _ := os.Hostname()
+		runtimeID = fmt.Sprintf("%s-%d", host, os.Getpid())
+	}
+	maintenanceRuntime, err := maintenance.NewRuntime(ctx, b, runtimeID, logger)
+	if err != nil {
+		return fmt.Errorf("maintenance runtime: %w", err)
+	}
+	if dbWriter != nil {
+		maintenanceRuntime.SetWriter(func() maintenance.WriterCounters {
+			barrier := dbWriter.MaintenanceBarrier()
+			return maintenance.WriterCounters{
+				Verified:       true,
+				Enqueued:       dbWriter.Stats().Enqueued,
+				Pending:        barrier.Queue,
+				PendingStories: barrier.StoryQueue,
+				AuxQueue:       barrier.AuxQueue,
+				Unsettled:      barrier.Unsettled,
+				PendingEnrich:  barrier.PendingEnrichments,
+				PendingAssign:  barrier.PendingAssignments,
+				Flushing:       barrier.Flushing,
+				Blocked:        barrier.Blocked,
+				DroppedQueue:   barrier.DroppedQueue,
+				DroppedBatch:   barrier.DroppedBatch,
+				DroppedStories: barrier.DroppedStories,
+				Errors:         barrier.Errors,
+			}
+		}, dbWriter.SetMaintenanceBlocked)
+	}
+	go maintenanceRuntime.Start(ctx)
+	logger.Info("maintenance runtime ready", "runtime_id", runtimeID)
 
 	// dbWriter is a *store.Writer: assigning it directly to an interface when
 	// it is nil would produce a non-nil interface holding a nil pointer, and
@@ -455,6 +501,7 @@ func runCommand(args []string) error {
 	if cfg.gatewayAddr != "" && runsGateway(cfg.agents) {
 		gwCfg := gateway.Config{
 			Addr:    cfg.gatewayAddr,
+			ID:      cfg.gatewayID,
 			Origins: splitList(cfg.gatewayOrigins),
 			Bus:     b,
 			Logger:  logger,
@@ -479,7 +526,7 @@ func runCommand(args []string) error {
 		if err := gw.Start(ctx); err != nil {
 			return err
 		}
-		logger.Info("gateway listening", "addr", gw.Addr(), "origins", cfg.gatewayOrigins)
+		logger.Info("gateway listening", "addr", gw.Addr(), "gateway_id", cfg.gatewayID, "origins", cfg.gatewayOrigins)
 	}
 
 	var admin *http.Server
@@ -492,7 +539,7 @@ func runCommand(args []string) error {
 		origins := httpguard.NewAllowlist(originPatterns).WithHosts(httpguard.HostFromAddr(cfg.adminAddr))
 		admin = &http.Server{
 			Addr:              cfg.adminAddr,
-			Handler:           origins.Middleware(adminHandler(b, runner, metrics, opsHTTP)),
+			Handler:           origins.Middleware(adminHandler(b, runner, metrics, maintenanceRuntime, opsHTTP)),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {
@@ -561,12 +608,22 @@ func runCommand(args []string) error {
 	return nil
 }
 
-func adminHandler(b *bus.Bus, runner *agents.Runner, metrics *agents.Metrics, opsHTTP ...*ops.HTTP) http.Handler {
+func adminHandler(b *bus.Bus, runner *agents.Runner, metrics *agents.Metrics, runtime *maintenance.Runtime, opsHTTP ...*ops.HTTP) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 	if len(opsHTTP) > 0 && opsHTTP[0] != nil {
 		opsHTTP[0].Mount(mux)
 	}
+	mux.HandleFunc("GET /internal/maintenance/state", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if runtime == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": "maintenance runtime unavailable"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(runtime.State())
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		busOK := b.Connected()
 		agentsOK, statuses := runner.Healthy()

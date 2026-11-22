@@ -83,6 +83,10 @@ const (
 	// bounded in a non-expiring deployment.
 	KVBucketGatewayLease = "gateway_lease"
 	KVGatewayLeaseTTL    = 15 * time.Second
+	// KVBucketProducerLease carries short-lived fetcher/writer runtime
+	// heartbeats used by maintenance to prove producers are paused and drained.
+	KVBucketProducerLease = "producer_lease"
+	KVProducerLeaseTTL    = 15 * time.Second
 
 	KVLiveStateSnapshotKey = "snapshot"
 	KVPublisherSeqKey      = "publisher.seq"
@@ -154,6 +158,12 @@ type Bus struct {
 	closing    atomic.Bool
 	closedCh   chan struct{}
 	closedOnce sync.Once
+
+	// ingestPaused stops new article.raw publishes at the shared transport
+	// boundary. ingestInflight counts one publish call at a time so a
+	// maintenance drain can prove no producer write is still in flight.
+	ingestPaused   atomic.Bool
+	ingestInflight atomic.Int64
 }
 
 // Connect starts the embedded server when opts.URL is empty, connects a NATS
@@ -407,6 +417,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketSourceHealth, KVSourceHealthTTL, 0},
 		{KVBucketEvalPending, KVEvalPendingTTL, 0},
 		{KVBucketGatewayLease, KVGatewayLeaseTTL, 0},
+		{KVBucketProducerLease, KVProducerLeaseTTL, 0},
 		{KVBucketSession, KVBucketSessionTTL, 0},
 	}
 }
@@ -690,7 +701,10 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	b.kvMu.Unlock()
 	if ok {
 		if bucket == KVBucketJoins {
-			return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+			return &maintenanceKV{KeyValue: &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, bus: b}, nil
+		}
+		if maintenanceGuardedBucket(bucket) {
+			return &maintenanceKV{KeyValue: kv, bus: b}, nil
 		}
 		return kv, nil
 	}
@@ -705,9 +719,75 @@ func (b *Bus) KV(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 		// The joins bucket must never use the library's PurgeDeletes: it
 		// snapshots markers and then purges each subject unconditionally,
 		// which can erase a join recreated after the snapshot.
-		return &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, nil
+		return &maintenanceKV{KeyValue: &safeJoinsKV{KeyValue: kv, bus: b, bucket: bucket}, bus: b}, nil
+	}
+	if maintenanceGuardedBucket(bucket) {
+		return &maintenanceKV{KeyValue: kv, bus: b}, nil
 	}
 	return kv, nil
+}
+
+// maintenanceGuardedBucket reports whether writes to a bucket belong to a
+// pipeline writer that must stop during maintenance.
+func maintenanceGuardedBucket(bucket string) bool {
+	return bucket == KVBucketLiveState || bucket == KVBucketJoins
+}
+
+// maintenanceKV rejects write operations while the pipeline producer fence is
+// closed. Reads stay available for health, diagnostics and the maintenance
+// adapter (which has its own unpaused Bus).
+type maintenanceKV struct {
+	jetstream.KeyValue
+	bus *Bus
+}
+
+func (k *maintenanceKV) PutString(ctx context.Context, key string, value string) (uint64, error) {
+	if k.bus.ingestPaused.Load() {
+		return 0, ErrIngestPaused
+	}
+	return k.KeyValue.PutString(ctx, key, value)
+}
+
+func (k *maintenanceKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	if k.bus.ingestPaused.Load() {
+		return 0, ErrIngestPaused
+	}
+	return k.KeyValue.Create(ctx, key, value, opts...)
+}
+
+func (k *maintenanceKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if k.bus.ingestPaused.Load() {
+		return 0, ErrIngestPaused
+	}
+	return k.KeyValue.Put(ctx, key, value)
+}
+
+func (k *maintenanceKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if k.bus.ingestPaused.Load() {
+		return 0, ErrIngestPaused
+	}
+	return k.KeyValue.Update(ctx, key, value, revision)
+}
+
+func (k *maintenanceKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	if k.bus.ingestPaused.Load() {
+		return ErrIngestPaused
+	}
+	return k.KeyValue.Delete(ctx, key, opts...)
+}
+
+func (k *maintenanceKV) Purge(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	if k.bus.ingestPaused.Load() {
+		return ErrIngestPaused
+	}
+	return k.KeyValue.Purge(ctx, key, opts...)
+}
+
+func (k *maintenanceKV) PurgeDeletes(ctx context.Context, opts ...jetstream.KVPurgeOpt) error {
+	if k.bus.ingestPaused.Load() {
+		return ErrIngestPaused
+	}
+	return k.KeyValue.PurgeDeletes(ctx, opts...)
 }
 
 // safeJoinsKV replaces the destructive PurgeDeletes implementation with a
@@ -818,10 +898,67 @@ func WithHeaders(h nats.Header) PublishOption {
 	}
 }
 
+// ErrIngestPaused is returned when a maintenance run has paused the shared
+// producer boundary. Callers should retry after the fence is released.
+var ErrIngestPaused = errors.New("bus: ingestion paused for maintenance")
+
+// PauseIngest stops new pipeline publishes (raw, enrichment, story, match,
+// alert). DELTA output and maintenance-only subjects remain available.
+func (b *Bus) PauseIngest() { b.ingestPaused.Store(true) }
+
+// ResumeIngest releases the producer boundary after maintenance admission.
+func (b *Bus) ResumeIngest() { b.ingestPaused.Store(false) }
+
+// IngestPaused reports the current producer pause state.
+func (b *Bus) IngestPaused() bool { return b.ingestPaused.Load() }
+
+// IngestBarrier reports the raw producer state and retained INGEST bounds.
+type IngestBarrier struct {
+	Paused   bool   `json:"paused"`
+	Inflight int64  `json:"inflight"`
+	First    uint64 `json:"first"`
+	Last     uint64 `json:"last"`
+}
+
+// IngestBarrier samples the producer fence and the INGEST stream tail.
+func (b *Bus) IngestBarrier(ctx context.Context) (IngestBarrier, error) {
+	out := IngestBarrier{Paused: b.ingestPaused.Load(), Inflight: b.ingestInflight.Load()}
+	stream, err := b.StreamNamed(ctx, StreamIngest)
+	if err != nil {
+		return out, err
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.First, out.Last = info.State.FirstSeq, info.State.LastSeq
+	return out, nil
+}
+
+// maintenancePausedSubject reports whether a publish belongs to a pipeline
+// stage that maintenance freezes. DELTA is the forward repair output and is
+// deliberately not paused.
+func maintenancePausedSubject(subject string) bool {
+	switch StreamForSubject(subject) {
+	case StreamIngest, StreamEnrich, StreamStory, StreamAlert, StreamMatch:
+		return true
+	default:
+		return false
+	}
+}
+
 // Publish writes one message. It always sets Nats-Msg-Id; when the caller does
 // not supply one a unique id is generated. Callers that can be retried must
 // supply a stable id namespaced by stage (for example "clean:<articleID>").
 func (b *Bus) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOption) (*jetstream.PubAck, error) {
+	pipeline := maintenancePausedSubject(subject)
+	if pipeline {
+		if b.ingestPaused.Load() {
+			return nil, ErrIngestPaused
+		}
+		b.ingestInflight.Add(1)
+		defer b.ingestInflight.Add(-1)
+	}
 	po := PublishOptions{}
 	for _, opt := range opts {
 		opt(&po)

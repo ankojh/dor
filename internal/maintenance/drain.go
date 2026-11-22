@@ -36,9 +36,16 @@ type ConsumerPosition struct {
 // receives it from the in-process writer; a nil source fails the barrier closed
 // instead of assuming an empty asynchronous mirror.
 type WriterCounters struct {
+	Verified       bool  `json:"verified"`
 	Enqueued       int64 `json:"enqueued"`
 	Pending        int   `json:"pending"`
 	PendingStories int   `json:"pending_stories"`
+	AuxQueue       int   `json:"aux_queue"`
+	Unsettled      int64 `json:"unsettled"`
+	PendingEnrich  int64 `json:"pending_enrichments"`
+	PendingAssign  int   `json:"pending_assignments"`
+	Flushing       int64 `json:"flushing"`
+	Blocked        bool  `json:"blocked"`
 	DroppedQueue   int64 `json:"dropped_queue"`
 	DroppedBatch   int64 `json:"dropped_batch"`
 	DroppedStories int64 `json:"dropped_stories"`
@@ -48,25 +55,31 @@ type WriterCounters struct {
 // DrainReport is a machine-readable quiesce sample. Stable is only true for a
 // second identical sample taken after the first, with every barrier satisfied.
 type DrainReport struct {
-	At               int64                     `json:"at"`
-	Streams          map[string]StreamPosition `json:"streams"`
-	Consumers        []ConsumerPosition        `json:"consumers"`
-	JoinsPending     int                       `json:"joins_pending"`
-	PublisherOutbox  bool                      `json:"publisher_outbox"`
-	PublisherOwner   string                    `json:"publisher_owner,omitempty"`
-	PublisherLeaseMS int64                     `json:"publisher_lease_ms,omitempty"`
-	DeltaTail        uint64                    `json:"delta_tail"`
-	Writer           *WriterCounters           `json:"writer,omitempty"`
-	WriterVerified   bool                      `json:"writer_verified"`
-	Stable           bool                      `json:"stable"`
-	Reasons          []string                  `json:"reasons,omitempty"`
+	At                int64                     `json:"at"`
+	Streams           map[string]StreamPosition `json:"streams"`
+	Consumers         []ConsumerPosition        `json:"consumers"`
+	Producers         []ProducerLease           `json:"producers,omitempty"`
+	ExpectedProducers []string                  `json:"expected_producers,omitempty"`
+	ExpectedConsumers []string                  `json:"expected_consumers,omitempty"`
+	JoinsPending      int                       `json:"joins_pending"`
+	PublisherOutbox   bool                      `json:"publisher_outbox"`
+	PublisherOwner    string                    `json:"publisher_owner,omitempty"`
+	PublisherLeaseMS  int64                     `json:"publisher_lease_ms,omitempty"`
+	DeltaTail         uint64                    `json:"delta_tail"`
+	Writer            *WriterCounters           `json:"writer,omitempty"`
+	WriterVerified    bool                      `json:"writer_verified"`
+	Stable            bool                      `json:"stable"`
+	Reasons           []string                  `json:"reasons,omitempty"`
 }
 
 // DrainOptions configures VerifyQuiesce.
 type DrainOptions struct {
-	Previous *DrainReport
-	Writer   func() WriterCounters
-	Now      func() time.Time
+	Previous          *DrainReport
+	Writer            func() WriterCounters
+	Producers         []ProducerLease
+	ExpectedProducers []string
+	ExpectedConsumers []string
+	Now               func() time.Time
 }
 
 // VerifyQuiesce samples every barrier required by the accepted cutover
@@ -155,6 +168,9 @@ func VerifyQuiesce(ctx context.Context, b *bus.Bus, opts DrainOptions) (*DrainRe
 		report.Writer = &counters
 		report.WriterVerified = true
 	}
+	report.Producers = append(report.Producers, opts.Producers...)
+	report.ExpectedProducers = append(report.ExpectedProducers, opts.ExpectedProducers...)
+	report.ExpectedConsumers = append(report.ExpectedConsumers, opts.ExpectedConsumers...)
 
 	report.Reasons = quiesceReasons(report)
 	if prev := opts.Previous; prev != nil {
@@ -195,14 +211,56 @@ func quiesceReasons(report *DrainReport) []string {
 	if report.JoinsPending > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d durable joins pending", report.JoinsPending))
 	}
-	if report.PublisherOutbox {
-		reasons = append(reasons, "publisher outbox is not empty")
+	if len(report.ExpectedConsumers) == 0 {
+		reasons = append(reasons, "expected consumer inventory is required")
+	} else {
+		present := map[string]bool{}
+		for _, c := range report.Consumers {
+			present[c.Stream+"/"+c.Name] = true
+		}
+		for _, id := range report.ExpectedConsumers {
+			if !present[id] {
+				reasons = append(reasons, "expected consumer "+id+" is missing")
+			}
+		}
 	}
-	if !report.WriterVerified {
+	if len(report.ExpectedProducers) == 0 {
+		reasons = append(reasons, "expected producer inventory is required")
+	} else {
+		byID := map[string]ProducerLease{}
+		for _, lease := range report.Producers {
+			byID[lease.ID] = lease
+		}
+		for _, id := range report.ExpectedProducers {
+			lease, ok := byID[id]
+			if !ok {
+				reasons = append(reasons, "producer "+id+" has no live lease")
+				continue
+			}
+			if !lease.Paused || lease.IngestInflight > 0 {
+				reasons = append(reasons, "producer "+id+" is not paused with zero in-flight")
+			}
+			if !lease.Writer.Verified {
+				reasons = append(reasons, "producer "+id+" has no verified writer barrier")
+			} else if writerWork(lease.Writer) > 0 {
+				reasons = append(reasons, "producer "+id+" writer work is not settled")
+			}
+		}
+	}
+	if len(report.Producers) == 0 && !report.WriterVerified {
 		reasons = append(reasons, "DB writer barrier is unavailable")
 	} else if report.Writer != nil {
-		if report.Writer.Pending > 0 || report.Writer.PendingStories > 0 {
-			reasons = append(reasons, "DB writer queue is not empty")
+		if !report.Writer.Verified {
+			reasons = append(reasons, "DB writer barrier is unavailable")
+		}
+		if report.Writer.Pending > 0 || report.Writer.PendingStories > 0 || report.Writer.AuxQueue > 0 || report.Writer.Unsettled > 0 {
+			reasons = append(reasons, "DB writer queue/in-flight work is not empty")
+		}
+		if report.Writer.PendingEnrich > 0 || report.Writer.PendingAssign > 0 {
+			reasons = append(reasons, "DB writer retry work is not empty")
+		}
+		if report.Writer.Flushing > 0 {
+			reasons = append(reasons, "DB writer is currently flushing")
 		}
 		if report.Writer.DroppedQueue > 0 || report.Writer.DroppedBatch > 0 || report.Writer.DroppedStories > 0 || report.Writer.Errors > 0 {
 			reasons = append(reasons, "DB writer reported drops or errors")
@@ -244,6 +302,17 @@ func compareQuiesce(current, previous *DrainReport) {
 	for key := range prevConsumers {
 		if !currentConsumers[key] {
 			current.Reasons = append(current.Reasons, "consumer "+key+" disappeared during the stability window")
+		}
+	}
+	prevProducers := map[string]ProducerLease{}
+	for _, lease := range previous.Producers {
+		prevProducers[lease.ID] = lease
+	}
+	for _, lease := range current.Producers {
+		if before, ok := prevProducers[lease.ID]; ok {
+			if before.IngestLast != lease.IngestLast || before.Paused != lease.Paused || before.IngestInflight != lease.IngestInflight {
+				current.Reasons = append(current.Reasons, "producer "+lease.ID+" state moved during the stability window")
+			}
 		}
 	}
 	if previous.Writer != nil && current.Writer != nil {

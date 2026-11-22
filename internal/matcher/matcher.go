@@ -616,6 +616,10 @@ func (s *Service) backfillOnce(ctx context.Context) {
 			return
 		}
 		at := a.PublishedAt
+		if at < 0 {
+			// Maintenance suppression tombstone in the hot article copy.
+			return
+		}
 		if at == 0 {
 			at = e.Created().Unix()
 		}

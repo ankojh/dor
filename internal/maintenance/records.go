@@ -38,11 +38,12 @@ import (
 // publication root/chunk lifecycle and therefore survive checkpoint rewrites
 // and compaction.
 const (
-	KeyControl = "maintenance/control"
-	KeyFloor   = "maintenance/floor"
-	KeyPolicy  = "maintenance/wire_time_policy"
-	KeyJournal = "maintenance/journal"
-	KeyPlan    = "maintenance/plan"
+	KeyControl   = "maintenance/control"
+	KeyFloor     = "maintenance/floor"
+	KeyPolicy    = "maintenance/wire_time_policy"
+	KeyJournal   = "maintenance/journal"
+	KeyPlan      = "maintenance/plan"
+	KeyDBOutcome = "maintenance/db_outcome"
 	// KeyActivated is the non-expiring proof that a baseline was once
 	// activated. It keeps a deleted control/floor pair from looking like a
 	// fresh, floor-less deployment.
@@ -72,6 +73,7 @@ const (
 	PhaseFenced           = "fenced"
 	PhasePlanned          = "planned"
 	PhaseDBRepaired       = "db_repaired"
+	PhaseHotReconciled    = "hot_reconciled"
 	PhasePolicyPersisted  = "policy_persisted"
 	PhaseForwardCommitted = "forward_committed"
 	PhaseSnapshot         = "snapshot_committed"
@@ -87,10 +89,11 @@ var phaseRank = map[string]int{
 	PhasePlanned:          3,
 	PhaseDBRepaired:       4,
 	PhasePolicyPersisted:  5,
-	PhaseForwardCommitted: 6,
-	PhaseSnapshot:         7,
-	PhaseFloorActivated:   8,
-	PhaseServing:          9,
+	PhaseHotReconciled:    6,
+	PhaseForwardCommitted: 7,
+	PhaseSnapshot:         8,
+	PhaseFloorActivated:   9,
+	PhaseServing:          10,
 }
 
 // Control is the durable fleet fence and phase record. FenceActive is the
@@ -108,6 +111,9 @@ type Control struct {
 	RawSeq      uint64 `json:"raw_seq"`
 	UpdatedAt   int64  `json:"updated_at"`
 	LastError   string `json:"last_error,omitempty"`
+	// ExclusionEvidence is the operator's explicit proof that any expected
+	// participant not present in-band is excluded from routing/processes.
+	ExclusionEvidence string `json:"exclusion_evidence,omitempty"`
 }
 
 // Blocked reports whether the control record forbids serving.
@@ -141,6 +147,8 @@ type Floor struct {
 	RepairID           string `json:"repair_id,omitempty"`
 	RunID              string `json:"run_id,omitempty"`
 	PolicyHash         string `json:"policy_hash,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
+	WireTombstone      bool   `json:"wire_tombstone"`
 	ActivatedAt        int64  `json:"activated_at"`
 }
 
@@ -148,7 +156,7 @@ type Floor struct {
 // is only the pre-maintenance bootstrap state and never satisfies an active
 // control record.
 func (f Floor) Valid() bool {
-	return f.Version == ControlVersion && f.Initialized && f.MinimumResumeSeq > 0
+	return f.Version == ControlVersion && f.Initialized && f.MinimumResumeSeq > 0 && f.WireTombstone
 }
 
 // Gate is the consistent pair read by a gateway. Initialized distinguishes a
@@ -200,9 +208,6 @@ func ReadFloor(ctx context.Context, kv jetstream.KeyValue) (Floor, uint64, error
 	}
 	if f.Version != ControlVersion {
 		return Floor{}, 0, fmt.Errorf("maintenance: unsupported floor version %d", f.Version)
-	}
-	if f.Initialized && !f.Valid() {
-		return Floor{}, 0, errors.New("maintenance: invalid initialized floor")
 	}
 	return f, entry.Revision(), nil
 }
@@ -409,23 +414,38 @@ func (j *Journal) Has(phase string) bool {
 // SHA-256 of the canonical plan with RunID and CreatedAt cleared, so identical
 // evidence and revisions yield the same identity.
 type Plan struct {
-	Version          int           `json:"version"`
-	RunID            string        `json:"run_id"`
-	CreatedAt        int64         `json:"created_at"`
-	Database         string        `json:"database"`
-	AuditAsOf        int64         `json:"audit_as_of"`
-	ConfirmOriginals bool          `json:"confirm_originals"`
-	RootRevision     uint64        `json:"root_revision"`
-	RootOrdinal      uint64        `json:"root_ordinal"`
-	RootSeq          uint64        `json:"root_seq"`
-	RootRaw          uint64        `json:"root_raw"`
-	SnapshotRevision uint64        `json:"snapshot_revision"`
-	IngestFirst      uint64        `json:"ingest_first"`
-	IngestLast       uint64        `json:"ingest_last"`
-	DeltaTail        uint64        `json:"delta_tail"`
-	Articles         []PlanArticle `json:"articles"`
-	PolicyHash       string        `json:"policy_hash"`
-	AuditHash        string        `json:"audit_hash"`
+	Version          int                 `json:"version"`
+	RunID            string              `json:"run_id"`
+	RequestID        string              `json:"request_id"`
+	CreatedAt        int64               `json:"created_at"`
+	Database         string              `json:"database"`
+	AuditAsOf        int64               `json:"audit_as_of"`
+	ConfirmOriginals bool                `json:"confirm_originals"`
+	BasePolicyHash   string              `json:"base_policy_hash,omitempty"`
+	RootRevision     uint64              `json:"root_revision"`
+	RootOrdinal      uint64              `json:"root_ordinal"`
+	RootSeq          uint64              `json:"root_seq"`
+	RootRaw          uint64              `json:"root_raw"`
+	SnapshotRevision uint64              `json:"snapshot_revision"`
+	IngestFirst      uint64              `json:"ingest_first"`
+	IngestLast       uint64              `json:"ingest_last"`
+	DeltaTail        uint64              `json:"delta_tail"`
+	Articles         []PlanArticle       `json:"articles"`
+	HotArticles      []HotArticleBinding `json:"hot_articles"`
+	PolicyHash       string              `json:"policy_hash"`
+	AuditHash        string              `json:"audit_hash"`
+}
+
+// HotArticleBinding binds the live_state article key that carries the clean
+// Article.PublishedAt used by matcher backfill and story details.
+type HotArticleBinding struct {
+	ArticleID  string `json:"article_id"`
+	Key        string `json:"key"`
+	Present    bool   `json:"present"`
+	Revision   uint64 `json:"revision,omitempty"`
+	BeforeHash string `json:"before_hash"`
+	TargetAt   int64  `json:"target_at"`
+	Mode       string `json:"mode"`
 }
 
 // PlanArticle binds one audited article to the state observed under the fence.
@@ -438,6 +458,7 @@ type PlanArticle struct {
 	OverrideAt          int64  `json:"override_at,omitempty"`
 	RawEvidenceHash     string `json:"raw_evidence_hash,omitempty"`
 	Reason              string `json:"reason"`
+	Carried             bool   `json:"carried,omitempty"`
 	Present             bool   `json:"present"`
 	BeforeHash          string `json:"before_hash"`
 }
@@ -453,6 +474,8 @@ func (p *Plan) Hash() string {
 	clone.PolicyHash = ""
 	clone.Articles = append([]PlanArticle(nil), p.Articles...)
 	sort.Slice(clone.Articles, func(i, j int) bool { return clone.Articles[i].ArticleID < clone.Articles[j].ArticleID })
+	clone.HotArticles = append([]HotArticleBinding(nil), p.HotArticles...)
+	sort.Slice(clone.HotArticles, func(i, j int) bool { return clone.HotArticles[i].ArticleID < clone.HotArticles[j].ArticleID })
 	data, _ := json.Marshal(clone)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -494,7 +517,93 @@ func (p *Plan) Verify() error {
 			return fmt.Errorf("maintenance: unknown plan mode %q", a.Mode)
 		}
 	}
+	hot := map[string]bool{}
+	for _, h := range p.HotArticles {
+		if h.ArticleID == "" || hot[h.ArticleID] {
+			return errors.New("maintenance: duplicate or empty hot article binding")
+		}
+		if h.Mode != ModeOverride && h.Mode != ModeSuppress {
+			return fmt.Errorf("maintenance: unknown hot article mode %q", h.Mode)
+		}
+		hot[h.ArticleID] = true
+	}
 	return nil
+}
+
+// DBRowOutcome is the durable readback for one audited DB article.
+type DBRowOutcome struct {
+	ArticleID       string `json:"article_id"`
+	BeforePublished int64  `json:"before_published"`
+	BeforeCreated   int64  `json:"before_created"`
+	AfterPublished  int64  `json:"after_published"`
+	Suppressed      bool   `json:"suppressed"`
+}
+
+// HashDBRows is the deterministic DB result identity.
+func HashDBRows(database string, rows []DBRowOutcome) string {
+	copy := append([]DBRowOutcome(nil), rows...)
+	sort.Slice(copy, func(i, j int) bool { return copy[i].ArticleID < copy[j].ArticleID })
+	data, _ := CanonicalJSON(struct {
+		Database string         `json:"database"`
+		Rows     []DBRowOutcome `json:"rows"`
+	}{Database: database, Rows: copy})
+	return hashBytes(data)
+}
+
+// DBRepairResult is the transaction result the operator adapter must return.
+// ContentHash is SHA-256 over the sorted outcomes and the database name.
+type DBRepairResult struct {
+	Database    string         `json:"database"`
+	CommittedAt int64          `json:"committed_at"`
+	Rows        []DBRowOutcome `json:"rows"`
+	ContentHash string         `json:"content_hash"`
+}
+
+// DBOutcome is the durable cross-store record that makes a DB commit and the
+// maintenance journal crash-consistent.
+type DBOutcome struct {
+	Version     int            `json:"version"`
+	RunID       string         `json:"run_id"`
+	PlanHash    string         `json:"plan_hash"`
+	Database    string         `json:"database"`
+	AuditAsOf   int64          `json:"audit_as_of"`
+	State       string         `json:"state"` // started or committed
+	CommittedAt int64          `json:"committed_at,omitempty"`
+	Rows        []DBRowOutcome `json:"rows,omitempty"`
+	ContentHash string         `json:"content_hash,omitempty"`
+}
+
+const (
+	DBStateStarted   = "started"
+	DBStateCommitted = "committed"
+)
+
+// ReadDBOutcome loads the active DB outcome. Missing is (nil, 0, nil).
+func ReadDBOutcome(ctx context.Context, kv jetstream.KeyValue) (*DBOutcome, uint64, error) {
+	var out DBOutcome
+	rev, ok, err := readRecord(ctx, kv, KeyDBOutcome, &out)
+	if err != nil || !ok {
+		return nil, 0, err
+	}
+	if out.Version != ControlVersion {
+		return nil, 0, errors.New("maintenance: unsupported DB outcome version")
+	}
+	return &out, rev, nil
+}
+
+// PutDBOutcome CASes the DB outcome.
+func PutDBOutcome(ctx context.Context, kv jetstream.KeyValue, out *DBOutcome) error {
+	out.Version = ControlVersion
+	var current DBOutcome
+	rev, ok, err := readRecord(ctx, kv, KeyDBOutcome, &current)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		rev = 0
+	}
+	_, err = writeRecord(ctx, kv, KeyDBOutcome, out, rev)
+	return err
 }
 
 // Policy derives the durable policy from a verified plan.

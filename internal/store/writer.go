@@ -45,6 +45,57 @@ type WriterStats struct {
 	PendingStories  int
 }
 
+// MaintenanceBarrier is the writer's complete drain state. Unsettled counts
+// records accepted into a queue or local batch that have not finished a flush
+// attempt; PendingEnrichments and PendingAssignments cover durable retry work;
+// Flushing is non-zero while any database batch is executing.
+type MaintenanceBarrier struct {
+	Queue              int   `json:"queue"`
+	StoryQueue         int   `json:"story_queue"`
+	AuxQueue           int   `json:"aux_queue"`
+	Unsettled          int64 `json:"unsettled"`
+	PendingEnrichments int64 `json:"pending_enrichments"`
+	PendingAssignments int   `json:"pending_assignments"`
+	Flushing           int64 `json:"flushing"`
+	Blocked            bool  `json:"blocked"`
+	DroppedQueue       int64 `json:"dropped_queue"`
+	DroppedBatch       int64 `json:"dropped_batch"`
+	DroppedStories     int64 `json:"dropped_stories"`
+	Errors             int64 `json:"errors"`
+}
+
+// SetMaintenanceBlocked is the runtime writer-admission fence. When set, no new
+// record is accepted, but already queued work continues to drain.
+func (w *Writer) SetMaintenanceBlocked(blocked bool) {
+	if w != nil {
+		w.maintenanceBlocked.Store(blocked)
+	}
+}
+
+// MaintenanceBarrier returns a snapshot of queued, in-flight and retry work.
+func (w *Writer) MaintenanceBarrier() MaintenanceBarrier {
+	if w == nil {
+		return MaintenanceBarrier{}
+	}
+	w.assignMu.Lock()
+	assignments := len(w.pendingAssign)
+	w.assignMu.Unlock()
+	return MaintenanceBarrier{
+		Queue:              len(w.queue),
+		StoryQueue:         len(w.storyQueue),
+		AuxQueue:           len(w.auxQueue),
+		Unsettled:          w.unsettled.Load(),
+		PendingEnrichments: w.pendingEnrich.Load(),
+		PendingAssignments: assignments,
+		Flushing:           w.flushing.Load(),
+		Blocked:            w.maintenanceBlocked.Load(),
+		DroppedQueue:       w.droppedQueue.Load(),
+		DroppedBatch:       w.droppedBatch.Load(),
+		DroppedStories:     w.droppedStories.Load(),
+		Errors:             w.errors.Load(),
+	}
+}
+
 // Writer is the non-blocking path from agents to Postgres. Enqueue only sends
 // on a bounded channel; it never touches the database. A full queue drops the
 // record and increments DroppedQueue.
@@ -98,15 +149,19 @@ type Writer struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 
-	started         atomic.Bool
-	enqueued        atomic.Int64
-	droppedQueue    atomic.Int64
-	droppedBatch    atomic.Int64
-	batches         atomic.Int64
-	errors          atomic.Int64
-	enqueuedStories atomic.Int64
-	droppedStories  atomic.Int64
-	storyBatches    atomic.Int64
+	started            atomic.Bool
+	enqueued           atomic.Int64
+	droppedQueue       atomic.Int64
+	droppedBatch       atomic.Int64
+	batches            atomic.Int64
+	errors             atomic.Int64
+	enqueuedStories    atomic.Int64
+	droppedStories     atomic.Int64
+	storyBatches       atomic.Int64
+	unsettled          atomic.Int64
+	pendingEnrich      atomic.Int64
+	flushing           atomic.Int64
+	maintenanceBlocked atomic.Bool
 }
 
 // NewWriter builds a writer over an open store.
@@ -162,12 +217,13 @@ func (w *Writer) Enqueue(rec ArticleRecord) bool {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed {
+	if w.closed || w.maintenanceBlocked.Load() {
 		return false
 	}
 	select {
 	case w.queue <- rec:
 		w.enqueued.Add(1)
+		w.unsettled.Add(1)
 		return true
 	default:
 		w.droppedQueue.Add(1)
@@ -182,12 +238,13 @@ func (w *Writer) EnqueueStory(rec StoryRecord) bool {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed {
+	if w.closed || w.maintenanceBlocked.Load() {
 		return false
 	}
 	select {
 	case w.storyQueue <- rec:
 		w.enqueuedStories.Add(1)
+		w.unsettled.Add(1)
 		return true
 	default:
 		w.droppedStories.Add(1)
@@ -223,11 +280,12 @@ func (w *Writer) enqueueAux(m auxMutation) bool {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if w.closed {
+	if w.closed || w.maintenanceBlocked.Load() {
 		return false
 	}
 	select {
 	case w.auxQueue <- m:
+		w.unsettled.Add(1)
 		return true
 	default:
 		w.droppedQueue.Add(1)
@@ -296,13 +354,18 @@ func (w *Writer) loop() {
 	var pending []pendingEnrichment
 	flush := func() {
 		if len(buffer) > 0 {
+			n := len(buffer)
 			w.flush(buffer)
 			buffer = buffer[:0]
+			w.unsettled.Add(-int64(n))
 		}
 		if len(stories) > 0 {
+			n := len(stories)
 			w.flushStories(stories)
 			stories = stories[:0]
+			w.unsettled.Add(-int64(n))
 		}
+		auxCount := len(links) + len(storyTexts) + len(linkTexts) + len(enrichments)
 		if len(links) > 0 {
 			w.flushLinks(links)
 			links = nil
@@ -319,6 +382,10 @@ func (w *Writer) loop() {
 			pending = append(pending, w.flushEnrichments(enrichments)...)
 			enrichments = nil
 		}
+		if auxCount > 0 {
+			w.unsettled.Add(-int64(auxCount))
+		}
+		w.pendingEnrich.Store(int64(len(pending)))
 	}
 	articlesOpen, storiesOpen, auxOpen := true, true, true
 	articles := w.queue
@@ -371,6 +438,7 @@ func (w *Writer) loop() {
 			flush()
 			w.retryPending(false)
 			pending = w.retryEnrichments(pending)
+			w.pendingEnrich.Store(int64(len(pending)))
 		}
 	}
 	flush()
@@ -378,6 +446,8 @@ func (w *Writer) loop() {
 }
 
 func (w *Writer) flushLinks(batch []LinkRecord) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
 		err := w.store.UpsertLinks(ctx, batch)
@@ -395,6 +465,8 @@ func (w *Writer) flushLinks(batch []LinkRecord) {
 }
 
 func (w *Writer) flushStoryTexts(batch []StoryTextRecord) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
 		err := w.store.UpsertStoryTexts(ctx, batch)
@@ -412,6 +484,8 @@ func (w *Writer) flushStoryTexts(batch []StoryTextRecord) {
 }
 
 func (w *Writer) flushLinkTexts(batch []LinkTextRecord) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
 		err := w.store.UpsertLinkTexts(ctx, batch)
@@ -435,6 +509,8 @@ const maxEnrichmentAttempts = 20
 // batches; a missing article row is not an error and is handed back for a
 // later tick.
 func (w *Writer) flushEnrichments(batch []ArticleEnrichmentRecord) []pendingEnrichment {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	var lastErr error
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
@@ -520,6 +596,8 @@ func (w *Writer) retryEnrichments(pending []pendingEnrichment) []pendingEnrichme
 const maxPendingEnrichments = 8192
 
 func (w *Writer) flushStories(batch []StoryRecord) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
 		missing, err := w.store.UpsertStories(ctx, batch)
@@ -572,6 +650,8 @@ func (w *Writer) trackAssignments(batch []StoryRecord, missing map[string]string
 // transient database failure recovers without waiting for the article to be
 // delivered again.
 func (w *Writer) retryPending(force bool) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	now := time.Now()
 	w.assignMu.Lock()
 	if len(w.pendingAssign) == 0 {
@@ -627,6 +707,8 @@ func (w *Writer) backoffAssignment(id string, a pendingAssignment, now time.Time
 }
 
 func (w *Writer) flush(batch []ArticleRecord) {
+	w.flushing.Add(1)
+	defer w.flushing.Add(-1)
 	for attempt := 0; attempt <= w.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), w.opts.WriteTimeout)
 		err := w.store.UpsertArticles(ctx, batch)

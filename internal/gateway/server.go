@@ -107,6 +107,7 @@ func (p PushConfig) Available() (bool, string) {
 // Config configures one gateway process.
 type Config struct {
 	Addr    string
+	ID      string
 	Origins []string
 	Bus     *bus.Bus
 	Logger  *slog.Logger
@@ -188,7 +189,7 @@ func New(cfg Config) (*Server, error) {
 		pushLimit:   httpguard.NewLimiter(10, 3),
 		apiBackstop: httpguard.NewLimiter(600, 120),
 		generation:  make(chan struct{}, maxGenerationConcurrency),
-		gatewayID:   nuid.Next(),
+		gatewayID:   firstNonEmpty(cfg.ID, nuid.Next()),
 	}
 	s.hub = newHub(cfg.Bus, s.log)
 	s.hub.alertOwner = s.resolveAlertOwner
@@ -342,7 +343,10 @@ func (s *Server) Stop(ctx context.Context) error {
 			s.cc.Stop()
 		}
 		s.hub.closeAll()
-		s.deleteLease()
+		// Leave a short-lived serving=false lease so a concurrent maintenance
+		// exclusion has explicit proof this process stopped; the bucket TTL
+		// retires it afterward.
+		s.publishLease(maintenance.Control{}, false, maintenance.Floor{})
 	})
 	return err
 }
@@ -481,11 +485,12 @@ func (s *Server) publishLease(control maintenance.Control, serving bool, floor m
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_ = maintenance.WriteGatewayLease(ctx, s.leaseKV, maintenance.GatewayLease{
-		ID:      s.gatewayID,
-		Epoch:   control.FleetEpoch,
-		Serving: serving,
-		FloorT:  floor.MinimumResumeSeq,
-		FloorD:  floor.BootstrapStreamSeq,
+		ID:            s.gatewayID,
+		Epoch:         control.FleetEpoch,
+		Serving:       serving,
+		WireTombstone: true,
+		FloorT:        floor.MinimumResumeSeq,
+		FloorD:        floor.BootstrapStreamSeq,
 	})
 }
 
@@ -496,6 +501,13 @@ func (s *Server) deleteLease() {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_ = maintenance.DeleteGatewayLease(ctx, s.leaseKV, s.gatewayID)
+}
+
+func firstNonEmpty(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }
 
 // startDeltaConsumer starts at the raw position after the installed floor. The

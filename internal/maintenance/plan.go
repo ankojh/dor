@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/bus"
+	"github.com/ankojh/dor/internal/live"
 	"github.com/ankojh/dor/internal/pb/dorv1"
 	"github.com/ankojh/dor/internal/publication"
 )
@@ -65,7 +66,7 @@ func BuildPlan(ctx context.Context, b *bus.Bus, database string, asOf time.Time,
 	if err != nil {
 		return nil, err
 	}
-	deltaTail, _, err := streamBounds(ctx, b, bus.StreamDelta)
+	_, deltaTail, err := streamBounds(ctx, b, bus.StreamDelta)
 	if err != nil {
 		return nil, err
 	}
@@ -84,17 +85,27 @@ func BuildPlan(ctx context.Context, b *bus.Bus, database string, asOf time.Time,
 		IngestLast:       ingestLast,
 		DeltaTail:        deltaTail,
 	}
-	auditCopy := append([]AuditArticle(nil), audit...)
-	sort.Slice(auditCopy, func(i, j int) bool { return auditCopy[i].ID < auditCopy[j].ID })
-	for i := range auditCopy {
-		auditCopy[i].FetchTimes = uniqueFetchTimes(auditCopy[i].FetchTimes)
-	}
+	auditCopy := normalizedAudit(audit)
 	auditJSON, err := CanonicalJSON(auditCopy)
 	if err != nil {
 		return nil, err
 	}
 	plan.AuditHash = hashBytes(auditJSON)
+	plan.RequestID = RequestIdentity(database, asOf, auditCopy, confirmOriginals)
 
+	policy, err := LoadPolicy(ctx, kv)
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		policy = &WireTimePolicy{Version: ControlVersion, Entries: map[string]WireTimeEntry{}}
+	}
+	plan.BasePolicyHash = policy.Hash()
+	entries := make(map[string]WireTimeEntry, len(policy.Entries)+len(auditCopy))
+	for id, entry := range policy.Entries {
+		entries[id] = entry
+	}
+	auditByID := make(map[string]AuditArticle, len(auditCopy))
 	seen := map[string]bool{}
 	for _, a := range auditCopy {
 		if a.ID == "" {
@@ -104,32 +115,71 @@ func BuildPlan(ctx context.Context, b *bus.Bus, database string, asOf time.Time,
 			return nil, fmt.Errorf("maintenance: duplicate audit article %s", a.ID)
 		}
 		seen[a.ID] = true
-		row := state.Rows[a.ID]
-		item := PlanArticle{
+		auditByID[a.ID] = a
+		fetch := uniqueFetchTimes(a.FetchTimes)
+		entry := WireTimeEntry{
 			ArticleID:           a.ID,
-			StoryID:             a.StoryID,
 			ObservedPublishedAt: a.Published,
 			CreatedAt:           a.Created,
-			BeforeHash:          rowHash(row),
-			Present:             row != nil,
+			AuditedAt:           asOf.UnixNano(),
+			RawEvidenceHash:     hashFetchTimes(fetch),
 		}
-		fetch := uniqueFetchTimes(a.FetchTimes)
-		item.RawEvidenceHash = hashFetchTimes(fetch)
 		// created_at == published_at is copied publication metadata, not an
 		// independent clock. Only exactly one positively identified original
 		// fetch time, explicitly confirmed by the operator, may override.
 		if confirmOriginals && len(fetch) == 1 && fetch[0] > 0 && fetch[0] < a.Published {
-			item.Mode = ModeOverride
-			item.OverrideAt = fetch[0]
-			item.Reason = "confirmed original raw fetch time"
+			entry.Mode = ModeOverride
+			entry.OverrideAt = fetch[0]
+			entry.Reason = "confirmed original raw fetch time"
 		} else {
-			item.Mode = ModeSuppress
-			item.Reason = "unknown or conflicting original fetch evidence; suppress retained presentation"
+			entry.Mode = ModeSuppress
+			entry.Reason = "unknown or conflicting original fetch evidence; suppress retained presentation"
 			if len(fetch) > 1 {
-				item.Reason = "conflicting raw fetch times; suppress retained presentation"
+				entry.Reason = "conflicting raw fetch times; suppress retained presentation"
 			}
 		}
+		entries[a.ID] = entry
+	}
+	ids := make([]string, 0, len(entries))
+	for id := range entries {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		entry := entries[id]
+		row := state.Rows[id]
+		item := PlanArticle{
+			ArticleID:           id,
+			ObservedPublishedAt: entry.ObservedPublishedAt,
+			CreatedAt:           entry.CreatedAt,
+			Mode:                entry.Mode,
+			OverrideAt:          entry.OverrideAt,
+			Reason:              entry.Reason,
+			RawEvidenceHash:     entry.RawEvidenceHash,
+			BeforeHash:          rowHash(row),
+			Present:             row != nil,
+		}
+		if a, ok := auditByID[id]; ok {
+			item.StoryID = a.StoryID
+		} else {
+			item.Carried = true
+		}
 		plan.Articles = append(plan.Articles, item)
+		binding := HotArticleBinding{ArticleID: id, Key: live.ArticleKey(id), Mode: entry.Mode, TargetAt: publication.WireSuppressedAt}
+		if entry.Mode == ModeOverride {
+			binding.TargetAt = entry.OverrideAt
+		}
+		keyEntry, kerr := liveKV.Get(ctx, binding.Key)
+		if kerr == nil {
+			binding.Present = true
+			binding.Revision = keyEntry.Revision()
+			binding.BeforeHash = "sha256:" + hashBytes(keyEntry.Value())
+		} else if errors.Is(kerr, jetstream.ErrKeyNotFound) {
+			binding.BeforeHash = "absent"
+		} else {
+			return nil, kerr
+		}
+		plan.HotArticles = append(plan.HotArticles, binding)
 	}
 	plan.PolicyHash = plan.Policy().Hash()
 	plan.RunID = plan.Hash()
@@ -137,6 +187,29 @@ func BuildPlan(ctx context.Context, b *bus.Bus, database string, asOf time.Time,
 		return nil, err
 	}
 	return plan, nil
+}
+
+// RequestIdentity is independent of evolving retained policy and root state. It
+// lets a completed run answer only the same requested audit, never a different
+// requested repair.
+func RequestIdentity(database string, asOf time.Time, audit []AuditArticle, confirm bool) string {
+	payload := struct {
+		Database string         `json:"database"`
+		AsOf     int64          `json:"as_of"`
+		Confirm  bool           `json:"confirm_originals"`
+		Audit    []AuditArticle `json:"audit"`
+	}{Database: database, AsOf: asOf.UnixNano(), Confirm: confirm, Audit: normalizedAudit(audit)}
+	data, _ := CanonicalJSON(payload)
+	return hashBytes(data)
+}
+
+func normalizedAudit(audit []AuditArticle) []AuditArticle {
+	out := append([]AuditArticle(nil), audit...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	for i := range out {
+		out[i].FetchTimes = uniqueFetchTimes(out[i].FetchTimes)
+	}
+	return out
 }
 
 // BindPlanToCurrentRoot verifies that the plan still matches the live root and

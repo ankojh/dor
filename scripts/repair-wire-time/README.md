@@ -72,6 +72,54 @@ already-authorized copy-only DB callback and the in-process writer barrier.
 Nothing in this repository automatically invokes it; live application still
 requires a separate approval, a real quiesce, and an isolated rehearsal.
 
+## Copy-only maintenance adapter
+
+The audit command can run the complete protocol against an explicitly named
+non-`dor` copy:
+
+```sh
+DOR_RUNTIME_ID=prod-1 DOR_GATEWAY_ID=gw-1 go run ./cmd/dor run ...
+go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
+  --nats "$COPY_NATS_URL" --apply --maintenance-apply \
+  --allow-db COPY_DATABASE_NAME --confirm-candidates \
+  --expected-producer prod-1 --expected-gateway gw-1 \
+  --expected-consumer ENRICH/publisher-enrich \
+  --expected-consumer STORY/publisher-story \
+  --routing-evidence "routing generation 42 closed; process supervisor stopped old replicas" \
+  --drain-timeout 5m
+```
+
+Without `--maintenance-apply` (and without `--apply`) the command is read-only
+and `--plan-out` exports a deterministic plan. `--apply` without
+`--maintenance-apply` is the prior DB-only copy operation. The adapter:
+
+- verifies `current_database()` equals `--allow-db` and refuses `dor`;
+- pauses raw/enrichment/story/match/alert publishes and DB writer admissions in
+  every runtime that advertises `--expected-producer`, and requires each
+  producer/writer queue, in-flight flush and retry set to be empty;
+- requires every expected gateway to advertise a fresh
+  `serving=false`/wire-tombstone-compatible lease;
+- requires every expected durable consumer to be present and its pending and
+  ack-pending count to be zero, with no pending durable joins;
+- drains until two consecutive samples are stable, then settles an uncertain
+  publisher outbox unchanged;
+- binds the deterministic plan to the actual publisher root/live-snapshot
+  revisions, current wire before hashes and `live_state/article.<id>`
+  revisions/hashes;
+- records a durable DB outcome (`started`/`committed`) and verifies the
+  transaction by readback, so a DB commit and journal interruption resume
+  without replaying an ambiguous outcome;
+- reconciles hot article timestamps, persists the merged per-article policy,
+  publishes forward-only wire corrections/tombstones, writes the corrected
+  snapshot and activates the monotonic floor before admitting the fleet.
+
+Expected participants that are stopped must be named with
+`--excluded-producer`/`--excluded-gateway` and backed by the explicit routing
+evidence string; a missing, paused-but-serving, incompatible or unregistered
+participant fails closed. The non-expiring control/floor/policy records survive
+repeated runs, and a completed run answers only the same request identity.
+
+
 
 ## Release blocker: hot-state cutover remains approval-gated
 

@@ -234,6 +234,9 @@ func (c *publisherCore) makeRecord(state *publication.State, data []byte, revisi
 }
 
 func (c *publisherCore) flush(ctx context.Context) error {
+	if maintenance.ProcessBlocked() {
+		return Retry(publication.ErrFenced)
+	}
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
 	if !c.restored || c.storage == nil {

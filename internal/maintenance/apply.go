@@ -22,11 +22,12 @@ const maintenanceLease = 1200 * time.Millisecond
 // Coordinator serialises the cross-store maintenance phases under the existing
 // publisher owner lease. It never resets source streams or consumer positions.
 type Coordinator struct {
-	bus    *bus.Bus
-	kv     jetstream.KeyValue
-	leases jetstream.KeyValue
-	store  *publication.Store
-	now    func() time.Time
+	bus       *bus.Bus
+	kv        jetstream.KeyValue
+	leases    jetstream.KeyValue
+	producers jetstream.KeyValue
+	store     *publication.Store
+	now       func() time.Time
 }
 
 // NewCoordinator binds the non-expiring publisher bucket and the short-lived
@@ -43,7 +44,11 @@ func NewCoordinator(ctx context.Context, b *bus.Bus) (*Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{bus: b, kv: kv, leases: leases, now: time.Now}, nil
+	producers, err := b.KV(ctx, bus.KVBucketProducerLease)
+	if err != nil {
+		return nil, err
+	}
+	return &Coordinator{bus: b, kv: kv, leases: leases, producers: producers, now: time.Now}, nil
 }
 
 // BeginGate closes gateway ingress before any drain. It is idempotent and
@@ -84,11 +89,31 @@ func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
 }
 
 // AwaitFleetExclusion waits for floor-aware gateways to acknowledge the fence.
-func (c *Coordinator) AwaitFleetExclusion(ctx context.Context, timeout time.Duration) error {
+func (c *Coordinator) AwaitFleetExclusion(ctx context.Context, expected, excluded []string, evidence string, timeout time.Duration) error {
 	if c.leases == nil {
 		return errors.New("maintenance: gateway lease bucket unavailable")
 	}
-	return AwaitGatewayExclusion(ctx, c.leases, timeout)
+	if strings.TrimSpace(evidence) == "" {
+		return errors.New("maintenance: explicit routing/process exclusion evidence is required")
+	}
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	control.ExclusionEvidence = evidence
+	control.UpdatedAt = c.now().UnixNano()
+	if err := UpdateControl(ctx, c.kv, control); err != nil {
+		return err
+	}
+	return AwaitGatewayExclusion(ctx, c.leases, expected, excluded, timeout)
+}
+
+// AwaitProducerBarrier waits for the in-process producer/writer runtimes.
+func (c *Coordinator) AwaitProducerBarrier(ctx context.Context, expected, excluded []string, timeout time.Duration) ([]ProducerLease, error) {
+	if c.producers == nil {
+		return nil, errors.New("maintenance: producer lease bucket unavailable")
+	}
+	return AwaitProducerFence(ctx, c.producers, expected, excluded, timeout)
 }
 
 // FenceForRun binds the durable control and journal to one deterministic plan
@@ -365,6 +390,102 @@ func repairStarted(plan *Plan, policy *WireTimePolicy, state *publication.State)
 	return false
 }
 
+// RepairHotArticles reconciles the live_state article.<id> PublishedAt fields
+// that matcher backfill and story details read. The publisher policy remains
+// authoritative for wire presentation; this closes the separate hot-state
+// timestamp path under the same barrier.
+func (c *Coordinator) RepairHotArticles(ctx context.Context, plan *Plan) (changed, skipped int, err error) {
+	liveKV, err := c.bus.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !hotRepairStarted(plan, liveKV, ctx) {
+		if err := checkHotBindings(ctx, liveKV, plan); err != nil {
+			return 0, 0, err
+		}
+	}
+	for _, binding := range plan.HotArticles {
+		entry, gerr := liveKV.Get(ctx, binding.Key)
+		if errors.Is(gerr, jetstream.ErrKeyNotFound) {
+			if !binding.Present {
+				skipped++
+				continue
+			}
+			// Expired/absent hot entities stay absent; never resurrect them.
+			skipped++
+			continue
+		}
+		if gerr != nil {
+			return changed, skipped, gerr
+		}
+		var article dorv1.Article
+		if uerr := proto.Unmarshal(entry.Value(), &article); uerr != nil {
+			return changed, skipped, fmt.Errorf("maintenance: hot article %s: %w", binding.ArticleID, uerr)
+		}
+		if article.PublishedAt == binding.TargetAt {
+			skipped++
+			continue
+		}
+		if entry.Revision() != binding.Revision || "sha256:"+hashBytes(entry.Value()) != binding.BeforeHash {
+			return changed, skipped, fmt.Errorf("maintenance: hot article %s changed outside the plan", binding.ArticleID)
+		}
+		article.PublishedAt = binding.TargetAt
+		data, merr := proto.MarshalOptions{Deterministic: true}.Marshal(&article)
+		if merr != nil {
+			return changed, skipped, merr
+		}
+		if _, uerr := liveKV.Update(ctx, binding.Key, data, entry.Revision()); uerr != nil {
+			return changed, skipped, uerr
+		}
+		changed++
+	}
+	if err := Advance(ctx, c.kv, plan.RunID, PhaseHotReconciled, map[string]string{"changed": fmt.Sprint(changed), "skipped": fmt.Sprint(skipped)}, "hot article timestamps reconciled", c.now()); err != nil {
+		return changed, skipped, err
+	}
+	return changed, skipped, nil
+}
+
+func hotRepairStarted(plan *Plan, liveKV jetstream.KeyValue, ctx context.Context) bool {
+	for _, binding := range plan.HotArticles {
+		entry, err := liveKV.Get(ctx, binding.Key)
+		if err != nil {
+			continue
+		}
+		if entry.Revision() != binding.Revision && "sha256:"+hashBytes(entry.Value()) != binding.BeforeHash {
+			var article dorv1.Article
+			if proto.Unmarshal(entry.Value(), &article) == nil && article.PublishedAt == binding.TargetAt {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkHotBindings(ctx context.Context, liveKV jetstream.KeyValue, plan *Plan) error {
+	for _, binding := range plan.HotArticles {
+		entry, err := liveKV.Get(ctx, binding.Key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if binding.Present {
+				return fmt.Errorf("maintenance: hot article %s disappeared after planning", binding.ArticleID)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !binding.Present {
+			return fmt.Errorf("maintenance: hot article %s appeared after planning", binding.ArticleID)
+		}
+		if entry.Revision() != binding.Revision || "sha256:"+hashBytes(entry.Value()) != binding.BeforeHash {
+			var article dorv1.Article
+			if proto.Unmarshal(entry.Value(), &article) != nil || article.PublishedAt != binding.TargetAt {
+				return fmt.Errorf("maintenance: hot article %s changed after planning", binding.ArticleID)
+			}
+		}
+	}
+	return nil
+}
+
 // WriteSnapshot materializes the corrected committed state as the public
 // snapshot. Cache lag is not evidence; this rebuilds from authority.
 func (c *Coordinator) WriteSnapshot(ctx context.Context, plan *Plan) (uint64, error) {
@@ -456,6 +577,8 @@ func (c *Coordinator) ActivateFloor(ctx context.Context, plan *Plan, policyHash 
 		RepairID:           plan.RunID,
 		RunID:              plan.RunID,
 		PolicyHash:         policyHash,
+		RequestID:          plan.RequestID,
+		WireTombstone:      true,
 		ActivatedAt:        c.now().UnixNano(),
 	}
 	if err := UpdateFloor(ctx, c.kv, floor); err != nil {
@@ -494,9 +617,90 @@ func (c *Coordinator) ActivateFloor(ctx context.Context, plan *Plan, policyHash 
 	return floor, nil
 }
 
+// runDBPhase makes the DB transaction and the journal crash-consistent. A
+// committed outcome is authoritative; a started outcome is replayed through
+// the idempotent copy-only callback and read back by it.
+func (c *Coordinator) runDBPhase(ctx context.Context, plan *Plan, repair DBRepairFunc) error {
+	if repair == nil {
+		return errors.New("maintenance: DB repair callback is required")
+	}
+	outcome, _, err := ReadDBOutcome(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if outcome != nil {
+		if outcome.RunID != plan.RunID {
+			if outcome.State != DBStateCommitted {
+				return errors.New("maintenance: an unfinished DB outcome belongs to a different run")
+			}
+			// A completed previous run's readback is not authority for this
+			// request; replace it with this run's started/committed outcome.
+		} else if outcome.PlanHash != plan.Hash() {
+			return errors.New("maintenance: DB outcome belongs to a different plan")
+		} else if outcome.State == DBStateCommitted {
+			if err := Advance(ctx, c.kv, plan.RunID, PhaseDBRepaired, map[string]string{"content_hash": outcome.ContentHash}, "DB commit read back from durable outcome", c.now()); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	started := &DBOutcome{Version: ControlVersion, RunID: plan.RunID, PlanHash: plan.Hash(), Database: plan.Database, AuditAsOf: plan.AuditAsOf, State: DBStateStarted}
+	if err := PutDBOutcome(ctx, c.kv, started); err != nil {
+		return err
+	}
+	result, err := repair(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return errors.New("maintenance: DB repair returned no readback")
+	}
+	if !strings.EqualFold(result.Database, plan.Database) {
+		return fmt.Errorf("maintenance: DB readback database %q does not match plan %q", result.Database, plan.Database)
+	}
+	if result.ContentHash != HashDBRows(result.Database, result.Rows) {
+		return errors.New("maintenance: DB readback content hash mismatch")
+	}
+	committed := &DBOutcome{
+		Version:     ControlVersion,
+		RunID:       plan.RunID,
+		PlanHash:    plan.Hash(),
+		Database:    result.Database,
+		AuditAsOf:   plan.AuditAsOf,
+		State:       DBStateCommitted,
+		CommittedAt: result.CommittedAt,
+		Rows:        append([]DBRowOutcome(nil), result.Rows...),
+		ContentHash: result.ContentHash,
+	}
+	if err := PutDBOutcome(ctx, c.kv, committed); err != nil {
+		return err
+	}
+	return Advance(ctx, c.kv, plan.RunID, PhaseDBRepaired, map[string]string{"content_hash": committed.ContentHash}, "DB copy repair committed and read back", c.now())
+}
+
+// requireJournalPhases makes admission depend on every cross-store phase.
+func (c *Coordinator) requireJournalPhases(ctx context.Context, runID string, phases ...string) error {
+	journal, _, ok, err := ReadJournal(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if !ok || journal.RunID != runID {
+		return errors.New("maintenance: journal does not belong to this run")
+	}
+	for _, phase := range phases {
+		if !journal.Has(phase) {
+			return fmt.Errorf("maintenance: admission blocked; missing phase %s", phase)
+		}
+	}
+	return nil
+}
+
 // AdmitFleet re-admits only floor-aware gateways after the corrected snapshot
 // and baseline are durable.
 func (c *Coordinator) AdmitFleet(ctx context.Context, runID string) error {
+	if err := c.requireJournalPhases(ctx, runID, PhaseDBRepaired, PhaseHotReconciled, PhasePolicyPersisted, PhaseForwardCommitted, PhaseSnapshot, PhaseFloorActivated); err != nil {
+		return err
+	}
 	floor, _, err := ReadFloor(ctx, c.kv)
 	if err != nil {
 		return err
@@ -539,19 +743,27 @@ func (c *Coordinator) RecordFailure(ctx context.Context, cause error) {
 }
 
 // DBRepairFunc performs the copy-only DB transaction owned by the repair
-// script. It may be nil, in which case the DB phase is skipped.
-type DBRepairFunc func(context.Context, *Plan) error
+// script. It is mandatory for admission.
+type DBRepairFunc func(context.Context, *Plan) (*DBRepairResult, error)
 
 // ApplyRequest is one maintenance run. Apply performs no live DB/NATS action by
 // itself: the caller supplies the already-authorized DB callback and the writer
 // barrier source.
 type ApplyRequest struct {
-	Database         string
-	AsOf             time.Time
-	Audit            []AuditArticle
-	ConfirmOriginals bool
-	DBRepair         DBRepairFunc
-	Drain            DrainOptions
+	Database          string
+	AsOf              time.Time
+	Audit             []AuditArticle
+	ConfirmOriginals  bool
+	DBRepair          DBRepairFunc
+	AuditFunc         func(context.Context) (time.Time, []AuditArticle, error)
+	Drain             DrainOptions
+	ExpectedProducers []string
+	ExcludedProducers []string
+	ExpectedGateways  []string
+	ExcludedGateways  []string
+	ExpectedConsumers []string
+	RoutingEvidence   string
+	DrainTimeout      time.Duration
 }
 
 // ApplyResult is the durable outcome of one run.
@@ -563,6 +775,8 @@ type ApplyResult struct {
 	PolicyHash  string         `json:"policy_hash"`
 	Floor       Floor          `json:"floor"`
 	Forward     *ForwardReport `json:"forward"`
+	HotChanged  int            `json:"hot_changed"`
+	HotSkipped  int            `json:"hot_skipped"`
 	AlreadyDone bool           `json:"already_done"`
 }
 
@@ -573,27 +787,60 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 	if strings.EqualFold(strings.TrimSpace(req.Database), "dor") {
 		return result, errors.New("maintenance: refusing the live dor database")
 	}
-	if journal, _, ok, err := ReadJournal(ctx, c.kv); err == nil && ok && journal.Has(PhaseServing) {
-		if gate, err := ReadGate(ctx, c.kv); err == nil && gate.Serving() && gate.Floor.Valid() && gate.Control.RunID == journal.RunID {
-			result.PlanRunID = journal.RunID
-			result.TargetSeq = gate.Floor.MinimumResumeSeq
-			result.RawSeq = gate.Floor.BootstrapStreamSeq
-			result.PolicyHash = gate.Floor.PolicyHash
-			result.Floor = gate.Floor
-			result.AlreadyDone = true
-			return result, nil
+	requestID := RequestIdentity(req.Database, req.AsOf, req.Audit, req.ConfirmOriginals)
+	resumePlan := false
+	if req.AuditFunc == nil {
+		if journal, _, ok, err := ReadJournal(ctx, c.kv); err == nil && ok && journal.Has(PhaseServing) {
+			if gate, err := ReadGate(ctx, c.kv); err == nil && gate.Serving() && gate.Floor.Valid() && gate.Control.RunID == journal.RunID && gate.Floor.RequestID == requestID {
+				result.PlanRunID = journal.RunID
+				result.TargetSeq = gate.Floor.MinimumResumeSeq
+				result.RawSeq = gate.Floor.BootstrapStreamSeq
+				result.PolicyHash = gate.Floor.PolicyHash
+				result.Floor = gate.Floor
+				result.AlreadyDone = true
+				return result, nil
+			}
 		}
 	}
 	if err := c.BeginGate(ctx, "begin timestamp maintenance"); err != nil {
 		return result, err
 	}
-	if err := c.AwaitFleetExclusion(ctx, 10*time.Second); err != nil {
+	// A fenced run with a persisted plan is a crash resume: its deterministic
+	// request identity is authoritative even if the retry performed a fresh DB
+	// audit with a later statement timestamp.
+	if persisted, ok := c.activePlanRequestID(ctx); ok {
+		requestID = persisted
+		resumePlan = true
+	}
+	if strings.TrimSpace(req.RoutingEvidence) == "" {
+		err := errors.New("maintenance: routing/process exclusion evidence is required")
 		c.RecordFailure(ctx, err)
 		return result, err
 	}
-	if err := c.resumeOrDrain(ctx, &req); err != nil {
+	timeout := req.DrainTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	if err := c.AwaitFleetExclusion(ctx, req.ExpectedGateways, req.ExcludedGateways, req.RoutingEvidence, timeout); err != nil {
 		c.RecordFailure(ctx, err)
 		return result, err
+	}
+	if _, err := c.AwaitProducerBarrier(ctx, req.ExpectedProducers, req.ExcludedProducers, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if err := c.Drain(ctx, &req, timeout); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	if req.AuditFunc != nil && !resumePlan {
+		asOf, audit, err := req.AuditFunc(ctx)
+		if err != nil {
+			c.RecordFailure(ctx, err)
+			return result, err
+		}
+		req.AsOf, req.Audit = asOf, audit
+		requestID = RequestIdentity(req.Database, req.AsOf, req.Audit, req.ConfirmOriginals)
 	}
 	if c.store == nil {
 		if err := c.ClaimPublisher(ctx); err != nil {
@@ -631,15 +878,13 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 			return result, err
 		}
 	}
-	if req.DBRepair != nil && (journal == nil || !journal.Has(PhaseDBRepaired)) {
-		if err := req.DBRepair(ctx, plan); err != nil {
-			c.RecordFailure(ctx, err)
-			return result, err
-		}
-		if err := Advance(ctx, c.kv, plan.RunID, PhaseDBRepaired, nil, "DB copy repair committed", c.now()); err != nil {
-			c.RecordFailure(ctx, err)
-			return result, err
-		}
+	if plan.RequestID != requestID {
+		c.RecordFailure(ctx, errors.New("maintenance: plan request identity mismatch"))
+		return result, errors.New("maintenance: plan request identity mismatch")
+	}
+	if err := c.runDBPhase(ctx, plan, req.DBRepair); err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
 	}
 	policy, err := c.PersistPolicy(ctx, plan)
 	if err != nil {
@@ -647,6 +892,12 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 		return result, err
 	}
 	result.PolicyHash = plan.PolicyHash
+	hotChanged, hotSkipped, err := c.RepairHotArticles(ctx, plan)
+	if err != nil {
+		c.RecordFailure(ctx, err)
+		return result, err
+	}
+	result.HotChanged, result.HotSkipped = hotChanged, hotSkipped
 	forward, err := c.RepairRetained(ctx, plan, policy)
 	if err != nil {
 		c.RecordFailure(ctx, err)
@@ -673,7 +924,7 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 	return result, nil
 }
 
-func (c *Coordinator) resumeOrDrain(ctx context.Context, req *ApplyRequest) error {
+func (c *Coordinator) Drain(ctx context.Context, req *ApplyRequest, timeout time.Duration) error {
 	journal, _, ok, err := ReadJournal(ctx, c.kv)
 	if err != nil {
 		return err
@@ -681,20 +932,71 @@ func (c *Coordinator) resumeOrDrain(ctx context.Context, req *ApplyRequest) erro
 	if ok && journal.Has(PhaseFenced) {
 		return nil
 	}
-	first, err := VerifyQuiesce(ctx, c.bus, req.Drain)
-	if err != nil {
-		return err
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
 	}
-	opts := req.Drain
-	opts.Previous = first
-	second, err := VerifyQuiesce(ctx, c.bus, opts)
-	if err != nil {
-		return err
+	deadline := time.Now().Add(timeout)
+	var previous *DrainReport
+	for {
+		producers, perr := c.AwaitProducerBarrier(ctx, req.ExpectedProducers, req.ExcludedProducers, 10*time.Second)
+		if perr != nil {
+			return perr
+		}
+		opts := req.Drain
+		opts.Previous = previous
+		opts.Producers = producers
+		excluded := map[string]bool{}
+		for _, id := range req.ExcludedProducers {
+			excluded[id] = true
+		}
+		expected := make([]string, 0, len(req.ExpectedProducers))
+		for _, id := range req.ExpectedProducers {
+			if !excluded[id] {
+				expected = append(expected, id)
+			}
+		}
+		opts.ExpectedProducers = expected
+		opts.ExpectedConsumers = append([]string(nil), req.ExpectedConsumers...)
+		report, qerr := VerifyQuiesce(ctx, c.bus, opts)
+		if qerr != nil {
+			return qerr
+		}
+		if report.Stable {
+			return Advance(ctx, c.kv, "", PhaseDraining, map[string]string{
+				"delta_tail":  fmt.Sprint(report.DeltaTail),
+				"ingest_last": fmt.Sprint(report.Streams[bus.StreamIngest].Last),
+				"producers":   fmt.Sprint(len(producers)),
+			}, "finite backlog drained", c.now())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("maintenance: drain did not settle: %v", report.Reasons)
+		}
+		previous = report
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
-	if !second.Stable {
-		return fmt.Errorf("maintenance: drain barrier is not stable: %v", second.Reasons)
+}
+
+// activePlanRequestID returns the persisted plan's request identity when a
+// fenced run is resuming. A blocked control with a planned journal is never
+// re-planned from a later audit.
+func (c *Coordinator) activePlanRequestID(ctx context.Context) (string, bool) {
+	control, _, err := ReadControl(ctx, c.kv)
+	if err != nil || !control.Blocked() || control.RunID == "" {
+		return "", false
 	}
-	return Advance(ctx, c.kv, "", PhaseDraining, map[string]string{"delta_tail": fmt.Sprint(second.DeltaTail)}, "finite backlog drained", c.now())
+	journal, _, ok, err := ReadJournal(ctx, c.kv)
+	if err != nil || !ok || !journal.Has(PhasePlanned) {
+		return "", false
+	}
+	plan, err := LoadPlan(ctx, c.kv)
+	if err != nil || plan.RunID != control.RunID {
+		return "", false
+	}
+	return plan.RequestID, true
 }
 
 func (c *Coordinator) loadOrPlan(ctx context.Context, req *ApplyRequest) (*Plan, *Journal, error) {

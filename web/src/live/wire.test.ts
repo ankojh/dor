@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WireRow } from "../gen/dor/v1/dor_pb";
-import type { WireProvenanceFields } from "./wire-display";
+import { wireMetadataProvenance, type WireProvenanceFields } from "./wire-display";
 import { mergeWireRow } from "./wire";
 
 type Row = WireRow & WireProvenanceFields;
@@ -77,6 +77,8 @@ describe("mergeWireRow provenance", () => {
       categoryConfidence: 0.62,
     });
     const later = makeRow({
+      // Partial article.clean rows carry no story id, so the OR rule applies.
+      storyId: "",
       degraded: false,
       placeDegraded: false,
       categoryBackend: "",
@@ -90,6 +92,32 @@ describe("mergeWireRow provenance", () => {
     expect(merged.categoryBackend).toBe("rule");
     expect(merged.placeBackend).toBe("hints");
     expect(merged.categoryConfidence).toBe(0.62);
+  });
+
+  it("lets a complete story row clear stale provenance as a whole", () => {
+    const earlier = makeRow({
+      degraded: true,
+      placeDegraded: true,
+      categoryBackend: "rule",
+      placeBackend: "gazetteer",
+      categoryConfidence: 0.62,
+    });
+    const later = makeRow({
+      storyId: "story-1",
+      degraded: false,
+      categoryBackend: "llm",
+      categoryConfidence: 0.92,
+      placeDegraded: false,
+      placeBackend: "llm",
+    });
+
+    const merged = mergeWireRow(earlier, later) as Row;
+    expect(merged.degraded).toBe(false);
+    expect(merged.placeDegraded).toBe(false);
+    expect(merged.categoryBackend).toBe("llm");
+    expect(merged.placeBackend).toBe("llm");
+    expect(merged.categoryConfidence).toBe(0.92);
+    expect(wireMetadataProvenance(merged).approx).toBe(false);
   });
 
   it("preserves storyId, place, category, at, join and promptScores exactly as before", () => {

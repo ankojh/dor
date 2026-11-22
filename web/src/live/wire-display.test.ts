@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WireRow } from "../gen/dor/v1/dor_pb";
-import { displaySourceName } from "./source-names";
+import { displaySourceName, matchesSourceFilter, sourceFilterIds } from "./source-names";
 import {
   RATE_WINDOW_MS,
   rollingMinuteBars,
@@ -59,8 +59,8 @@ function makeRow(overrides: RowOverrides = {}): WireRow {
   } as unknown as WireRow;
 }
 
-function makeItem(row: WireRow, receivedAt = NOW, key?: string): WireItemLike {
-  return { row, key: key ?? row.articleId, receivedAt };
+function makeItem(row: WireRow, receivedAt = NOW, key?: string, hydrated = false): WireItemLike {
+  return { row, key: key ?? row.articleId, receivedAt, hydrated };
 }
 
 /** Seeded Fisher-Yates so fixture arrival order is reproducible. */
@@ -146,12 +146,11 @@ describe("sortWireItems with the deterministic 124-row fixture", () => {
 describe("rollingMinuteRate under a steady stream", () => {
   it("holds near 15/min for every sample second after the first minute", () => {
     const start = Date.UTC(2026, 10, 22, 0, 0, 0);
-    const end = start + 5 * 60_000;
     const items: WireItemLike[] = [];
     for (let k = 1; k <= 75; k++) {
-      const at = (start + k * 4_000) / 1000; // one article every 4 s
+      const receivedAt = start + k * 4_000; // one article every 4 s
       const articleId = `steady-${k}`;
-      items.push(makeItem(makeRow({ articleId, at }), end, articleId));
+      items.push(makeItem(makeRow({ articleId }), receivedAt, articleId));
     }
 
     for (let sample = 61; sample <= 300; sample++) {
@@ -160,15 +159,12 @@ describe("rollingMinuteRate under a steady stream", () => {
     }
   });
 
-  it("renders five buckets whose tallest bar is 100", () => {
-    const start = Date.UTC(2026, 10, 22, 0, 0, 0);
-    const end = start + 5 * 60_000;
-    const items: WireItemLike[] = [];
-    for (let k = 1; k <= 75; k++) {
-      const at = (start + k * 4_000) / 1000;
+  it("renders five buckets across the minute whose tallest bar is 100", () => {
+    const end = Date.UTC(2026, 10, 22, 0, 5, 0);
+    const items: WireItemLike[] = Array.from({ length: 30 }, (_, k) => {
       const articleId = `bars-${k}`;
-      items.push(makeItem(makeRow({ articleId, at }), end, articleId));
-    }
+      return makeItem(makeRow({ articleId }), end - k * 2_000, articleId);
+    });
 
     const bars = rollingMinuteBars(items, end);
     expect(bars).toHaveLength(5);
@@ -176,44 +172,78 @@ describe("rollingMinuteRate under a steady stream", () => {
   });
 });
 
+describe("rollingMinuteRate tracks arrival, not publish time", () => {
+  it("holds ~30/min when a 30/min feed arrives with a 60–600 s publish lag", () => {
+    const start = Date.UTC(2026, 10, 22, 0, 0, 0);
+    let state = 123456789;
+    const nextLagSeconds = () => {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return 60 + (state % 541); // 60..600 s
+    };
+
+    const items: WireItemLike[] = [];
+    for (let k = 0; k < 600; k++) {
+      const receivedAt = start + k * 2_000; // 30 arrivals/min for 20 min
+      const articleId = `lagged-${k}`;
+      const at = receivedAt / 1000 - nextLagSeconds();
+      items.push(makeItem(makeRow({ articleId, at }), receivedAt, articleId));
+    }
+
+    for (let sample = 120; sample <= 1200; sample += 15) {
+      const rate = rollingMinuteRate(items, start + sample * 1000);
+      expect(rate).toBeGreaterThanOrEqual(21);
+      expect(rate).toBeLessThanOrEqual(39);
+    }
+
+    // At the first sample every publish time is already >=60 s old, so a
+    // publish-based count is near zero while arrivals show a full minute.
+    const nowMs = start + 120_000;
+    const arrived = items.filter((item) => item.receivedAt <= nowMs);
+    const publishCount = arrived.filter((item) => {
+      const at = wirePublishMs(item.row, item.receivedAt);
+      return at >= nowMs - RATE_WINDOW_MS && at <= nowMs;
+    }).length;
+    expect(rollingMinuteRate(items, nowMs)).toBeGreaterThanOrEqual(21);
+    expect(publishCount).toBeLessThan(5);
+  });
+});
+
 describe("rollingMinuteRate cold start", () => {
-  it("counts only the last minute of a 4 h backlog, never the whole snapshot", () => {
+  it("ignores the 500-row snapshot and counts only live arrivals", () => {
     const fourHoursMs = 4 * 60 * 60 * 1000;
     const stepMs = fourHoursMs / 500; // one article every 28.8 s
-    const items: WireItemLike[] = Array.from({ length: 500 }, (_, i) => {
+    const backlog: WireItemLike[] = Array.from({ length: 500 }, (_, i) => {
       const publishedMs = NOW - i * stepMs;
       const articleId = `backlog-${i}`;
-      return makeItem(makeRow({ articleId, at: publishedMs / 1000 }), NOW, articleId);
+      return makeItem(makeRow({ articleId, at: publishedMs / 1000 }), NOW, articleId, true);
     });
 
-    const cutoff = NOW - RATE_WINDOW_MS;
-    const expected = items.filter((item) => {
-      const at = wirePublishMs(item.row, item.receivedAt);
-      return at >= cutoff && at <= NOW;
-    }).length;
+    // Snapshot history is hydrated: it is not an arrival, so it never spikes
+    // the rate on load or reconnect.
+    expect(rollingMinuteRate(backlog, NOW)).toBe(0);
 
-    const rate = rollingMinuteRate(items, NOW);
-    expect(rate).toBe(expected);
-    expect(rate).toBe(3);
-    expect(rate).toBeLessThan(500);
-    expect(rate).toBeLessThan(10);
+    const live: WireItemLike[] = Array.from({ length: 30 }, (_, k) => {
+      const articleId = `live-${k}`;
+      return makeItem(makeRow({ articleId }), NOW - k * 2_000, articleId);
+    });
+    expect(rollingMinuteRate([...backlog, ...live], NOW)).toBe(30);
+    expect(rollingMinuteRate([...backlog, ...live], NOW)).toBeLessThan(500);
   });
 });
 
 describe("future timestamps", () => {
-  it("counts each row at most once in the window and never shows a future clock", () => {
+  it("ignores hydrated snapshot rows while still clamping their clock", () => {
     const future = [0, 1, 2, 3].map((i) => {
       const articleId = `future-${i}`;
       return makeItem(
         makeRow({ articleId, at: BigInt(NOW_SEC + 8 * 3600 - i * 30) }),
         NOW,
         articleId,
+        true,
       );
     });
 
-    const rate = rollingMinuteRate(future, NOW);
-    expect(rate).toBe(4);
-    expect(rate).toBeLessThanOrEqual(future.length);
+    expect(rollingMinuteRate(future, NOW)).toBe(0);
 
     const receivedClock = new Date(NOW).toISOString().slice(11, 19);
     for (const item of future) {
@@ -221,6 +251,22 @@ describe("future timestamps", () => {
       expect(wireTime(item.row, item.receivedAt)).toBe(receivedClock);
       expect(wireTime(item.row, item.receivedAt) <= receivedClock).toBe(true);
     }
+  });
+});
+
+describe("wirePublishMs server clamp fallback", () => {
+  it("leaves an already-clamped publish time untouched", () => {
+    const receivedAt = Date.UTC(2026, 10, 22, 14, 5, 0);
+    const at = Math.floor(Date.UTC(2026, 10, 22, 14, 0, 0) / 1000);
+    expect(wirePublishMs(makeRow({ at }), receivedAt)).toBe(Date.UTC(2026, 10, 22, 14, 0, 0));
+    expect(wireTime(makeRow({ at }), receivedAt)).toBe("14:00:00");
+  });
+
+  it("clamps a future source clock to the arrival time as a backstop", () => {
+    const receivedAt = Date.UTC(2026, 10, 22, 14, 5, 0);
+    const at = Math.floor(Date.UTC(2026, 10, 22, 14, 50, 0) / 1000);
+    expect(wirePublishMs(makeRow({ at }), receivedAt)).toBe(receivedAt);
+    expect(wireTime(makeRow({ at }), receivedAt)).toBe("14:05:00");
   });
 });
 
@@ -321,8 +367,8 @@ describe("wireMetadataProvenance", () => {
     expect(meta.place).toBe(false);
   });
 
-  it("flags a degraded category and mentions it in the title", () => {
-    const meta = wireMetadataProvenance(withProvenance({ degraded: true }));
+  it("flags a rule-classified category and mentions it in the title", () => {
+    const meta = wireMetadataProvenance(withProvenance({ categoryBackend: "rule" }));
     expect(meta.approx).toBe(true);
     expect(meta.category).toBe(true);
     expect(meta.title.toLowerCase()).toContain("category");
@@ -343,9 +389,38 @@ describe("wireMetadataProvenance", () => {
     expect(meta.title.toLowerCase()).toContain("place");
   });
 
-  it("mentions the fallback path", () => {
-    const meta = wireMetadataProvenance(withProvenance({ fallback: true }));
-    expect(meta.title.toLowerCase()).toContain("fallback");
+  it("does not read the combined degraded flag as a category marker (C-7)", () => {
+    const meta = wireMetadataProvenance(
+      withProvenance({
+        degraded: true,
+        categoryBackend: "jev",
+        categoryConfidence: 0.85,
+        placeDegraded: true,
+      }),
+    );
+    expect(meta.category).toBe(false);
+    expect(meta.place).toBe(true);
+    expect(meta.approx).toBe(true);
+    expect(meta.title.toLowerCase()).toContain("place");
+    expect(meta.title.toLowerCase()).not.toContain("category");
+  });
+
+  it("treats degraded alone as unknown, not as an approximate category", () => {
+    const meta = wireMetadataProvenance(withProvenance({ degraded: true }));
+    expect(meta.approx).toBe(false);
+    expect(meta.category).toBe(false);
+  });
+
+  it("only mentions fallback alongside a real approx marker", () => {
+    const alone = wireMetadataProvenance(withProvenance({ fallback: true }));
+    expect(alone.approx).toBe(false);
+    expect(alone.title.toLowerCase()).not.toContain("fallback");
+
+    const withPlace = wireMetadataProvenance(
+      withProvenance({ placeDegraded: true, fallback: true }),
+    );
+    expect(withPlace.approx).toBe(true);
+    expect(withPlace.title.toLowerCase()).toContain("fallback");
   });
 });
 
@@ -371,5 +446,33 @@ describe("displaySourceName", () => {
       expect(name).not.toContain("-");
       expect(name).not.toContain("_");
     }
+  });
+});
+
+describe("source filter resolution", () => {
+  it("resolves a publication name to its source id slug", () => {
+    expect(sourceFilterIds("Economic Times")).toEqual(["economictimes"]);
+  });
+
+  it("expands a shared display name to every matching id", () => {
+    const ids = sourceFilterIds("DW");
+    expect(ids).toHaveLength(5);
+    expect(ids).toEqual(
+      expect.arrayContaining(["dw-all", "dw-world", "dw-business", "dw-europe", "dw-germany"]),
+    );
+  });
+
+  it("keeps an exact slug as a single id", () => {
+    expect(sourceFilterIds("dw-world")).toEqual(["dw-world"]);
+  });
+
+  it("passes an unknown term through as typed", () => {
+    expect(sourceFilterIds("reuters")).toEqual(["reuters"]);
+  });
+
+  it("matches by slug or publication name", () => {
+    expect(matchesSourceFilter("economictimes", ["Economic Times"])).toBe(true);
+    expect(matchesSourceFilter("economictimes", ["economictimes"])).toBe(true);
+    expect(matchesSourceFilter("economictimes", ["BBC News"])).toBe(false);
   });
 });

@@ -1437,7 +1437,7 @@ body {
   min-height: 54px;
   max-height: 54px;
   display: grid;
-  grid-template-columns: 58px 8px minmax(0, 1fr) auto;
+  grid-template-columns: 58px 8px minmax(0, 1fr) fit-content(34%);
   gap: 9px;
   align-items: center;
   padding: 7px 14px;
@@ -1508,6 +1508,7 @@ body {
 }
 .wr-body .pl {
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 4px;

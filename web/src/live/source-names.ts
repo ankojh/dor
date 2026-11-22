@@ -324,3 +324,33 @@ export function displaySourceName(source: string): string {
     .join(" ");
   return name || "Wire";
 }
+
+// Reverse index for the source filter: a reader types the publication name the
+// wire shows, and the server filter still receives source id slugs.
+const SOURCE_IDS_BY_NAME = new Map<string, string[]>();
+for (const [id, name] of Object.entries(SOURCE_NAMES)) {
+  const key = name.toLowerCase();
+  const ids = SOURCE_IDS_BY_NAME.get(key);
+  if (ids) ids.push(id);
+  else SOURCE_IDS_BY_NAME.set(key, [id]);
+}
+const SOURCE_ID_SET = new Set(Object.keys(SOURCE_NAMES));
+
+/** Resolve a filter term (slug or publication name) to source id slugs. */
+export function sourceFilterIds(term: string): string[] {
+  const value = term.trim().toLowerCase();
+  if (!value) return [];
+  if (SOURCE_ID_SET.has(value)) return [value];
+  const ids = SOURCE_IDS_BY_NAME.get(value);
+  return ids && ids.length > 0 ? [...ids] : [term.trim()];
+}
+
+/** True when a source id matches any filter term by slug or publication name. */
+export function matchesSourceFilter(sourceId: string, terms: readonly string[]): boolean {
+  const id = sourceId.trim().toLowerCase();
+  const name = displaySourceName(sourceId).toLowerCase();
+  return terms.some((term) => {
+    const value = term.trim().toLowerCase();
+    return value !== "" && (value === id || value === name);
+  });
+}

@@ -150,6 +150,16 @@ func (n *normalizer) normalize(raw *dorv1.RawArticle) (*dorv1.Article, store.Art
 	if published <= 0 {
 		published = now.Unix()
 	}
+	// A source that reports local time as UTC (22:52 at 14:58 UTC) must not
+	// enter the pipeline in the future: clamp at ingest so the store, wire,
+	// story panel and worker LAG all agree. FetchedAt is the producer's clock.
+	limit := now.Unix()
+	if raw.FetchedAt > 0 && raw.FetchedAt < limit {
+		limit = raw.FetchedAt
+	}
+	if published > limit {
+		published = limit
+	}
 	publishedAt := time.Unix(published, 0).UTC()
 	lang := resolveLanguage(raw.Lang, title, lede)
 	id := articleIDFor(canonical, raw.Hints)

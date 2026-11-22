@@ -12,6 +12,7 @@ import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
 import { connectionLabel } from "./live/connection";
 import { mergeWireRow } from "./live/wire";
+import { matchesSourceFilter, sourceFilterIds } from "./live/source-names";
 import { nextTabStop } from "./ui/focus";
 import { channelLabel } from "./ui/labels";
 import { groupLinksByStrength } from "./ui/links";
@@ -77,6 +78,7 @@ type WireItem = {
   row: WireRow;
   key: string;
   receivedAt: number;
+  hydrated: boolean;
 };
 
 type DisplayRow =
@@ -588,8 +590,7 @@ export function App() {
       rows = rows.filter((item) => wanted.has(item.row.category));
     }
     if (active.sources.length > 0) {
-      const wanted = new Set(active.sources.map((source) => source.toLowerCase()));
-      rows = rows.filter((item) => wanted.has(item.row.source.toLowerCase()));
+      rows = rows.filter((item) => matchesSourceFilter(item.row.source, active.sources));
     }
     if (active.lang.length > 0) {
       const wanted = new Set(active.lang.map((lang) => lang.toLowerCase()));
@@ -807,7 +808,7 @@ export function App() {
     () => (focus()?.story.locations ?? []).filter((place) => place.role === 2).length,
   );
 
-  const enqueueWire = (rows: WireRow[]): void => {
+  const enqueueWire = (rows: WireRow[], hydrated = false): void => {
     let added = 0;
     const updates: Array<{ key: string; row: WireRow }> = [];
     for (const row of rows) {
@@ -819,6 +820,9 @@ export function App() {
           row: mergeWireRow(previous.row, row),
           key,
           receivedAt: Date.now(),
+          // A live update to a row first seen in the snapshot does not turn
+          // history into an arrival; keep it out of the rolling rate.
+          hydrated: previous.hydrated,
         };
         continue;
       }
@@ -827,7 +831,7 @@ export function App() {
         continue;
       }
       seen.add(key);
-      pendingWire.push({ row, key, receivedAt: Date.now() });
+      pendingWire.push({ row, key, receivedAt: Date.now(), hydrated });
       if (pendingWire.length > 1000) {
         const removed = pendingWire.shift();
         if (removed) seen.delete(removed.key);
@@ -904,10 +908,17 @@ export function App() {
     }
   });
 
+  const workerFilters = (values: WireFilters): WireFilters => ({
+    ...values,
+    // The gateway filters on source ids. A reader may have typed the
+    // publication name shown on the wire, so resolve names to every id.
+    sources: [...new Set(values.sources.flatMap(sourceFilterIds))],
+  });
+
   const updateFilters = (patch: Partial<WireFilters>): void => {
     const next = { ...filters(), ...patch };
     setFilters(next);
-    worker?.postMessage({ type: "filters", filters: next });
+    worker?.postMessage({ type: "filters", filters: workerFilters(next) });
   };
 
   const updatePrompts = (next: string[]): void => {
@@ -1366,7 +1377,7 @@ export function App() {
         setLastSeq(message.seq);
         setStoryContexts(message.summaries);
         liveGlobe?.setInit(message);
-        if (message.recentWire.length) enqueueWire(message.recentWire);
+        if (message.recentWire.length) enqueueWire(message.recentWire, true);
         break;
       case "patch":
         workerBounds = message.bounds;
@@ -1506,7 +1517,7 @@ export function App() {
       // Seed filters/prompts before start so the first socket greeting
       // carries them ahead of Hello and the resume snapshot is projected
       // with the app's real prompt set.
-      worker.postMessage({ type: "filters", filters: filters() });
+      worker.postMessage({ type: "filters", filters: workerFilters(filters()) });
       worker.postMessage({ type: "prompts", prompts: prompts() });
       worker.postMessage({
         type: "start",
@@ -2043,7 +2054,7 @@ export function App() {
                 <span>Sources</span>
                 <input
                   value={filters().sources.join(", ")}
-                  placeholder="bbc-world, reuters"
+                  placeholder="Economic Times, BBC News"
                   onInput={(event) =>
                     updateFilters({
                       sources: event.currentTarget.value
@@ -2363,7 +2374,7 @@ export function App() {
                           const join = wireJoin(row, story);
                           const tooltip = [
                             row.title,
-                            place.title !== place.text ? place.title : "",
+                            place.title,
                             provenance.approx ? provenance.title : "",
                           ]
                             .filter(Boolean)

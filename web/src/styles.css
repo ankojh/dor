@@ -49,6 +49,55 @@ button {
 p {
   margin: 0;
 }
+/* Keyboard focus is always visible; pointer focus stays quiet. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.wr-body:focus-visible,
+.wburst:focus-visible,
+.thread:focus-visible,
+.search-result:focus-visible,
+.lk:focus-visible,
+.mobile-link:focus-visible,
+.source-article:focus-visible,
+.backtest-row:focus-visible,
+.alert-hits button:focus-visible {
+  outline-offset: -2px;
+}
+.search:focus-within,
+.prompt:focus-within,
+.filter-field input:focus-visible {
+  border-color: rgba(94, 242, 255, 0.6);
+  box-shadow: 0 0 0 2px rgba(94, 242, 255, 0.18);
+}
+.prompt input:focus-visible,
+.search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .mono {
   font-family: var(--mono);
 }
@@ -1675,6 +1724,10 @@ body {
   .app3 > .topbar .search {
     flex-basis: 220px;
   }
+  /* Keep the topbar state readable before the health text crowds it. */
+  .app3 > .topbar .right .health {
+    display: none;
+  }
 }
 @media (max-width: 780px) {
   .app3 {
@@ -1792,23 +1845,67 @@ body {
   .mobile-story {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     position: fixed;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 30;
-    padding: 14px 16px;
-    max-height: 42vh;
-    overflow-y: auto;
+    padding: 0 0 env(safe-area-inset-bottom, 0);
+    max-height: min(52vh, 460px);
+    border-radius: 18px 18px 0 0;
+    border-bottom: 0;
+    overflow: hidden;
+    box-shadow: 0 -14px 44px rgba(0, 0, 0, 0.55);
+  }
+  /* The handle owns the story swipe; the body below scrolls normally. */
+  .mobile-story-grab {
+    flex: none;
+    width: 100%;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    background: none;
+    touch-action: none;
+    cursor: grab;
+  }
+  .mobile-story-grab::before {
+    content: "";
+    width: 38px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(160, 200, 255, 0.4);
+  }
+  .mobile-story-grab:active {
+    cursor: grabbing;
   }
   .mobile-story-head {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+    padding: 0 16px 6px;
   }
   .mobile-story-head .text-btn {
+    font-size: 12px;
+  }
+  .mobile-story-close {
     font-size: 18px;
+    line-height: 1;
+  }
+  .mobile-story-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 2px 16px 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
   }
   .mobile-story h2 {
     margin: 0;
@@ -1833,6 +1930,26 @@ body {
     color: var(--text-2);
     font-size: 12.5px;
     line-height: 1.5;
+  }
+  .mobile-story .mobile-links {
+    border-top: 1px solid var(--line);
+    padding-top: 6px;
+  }
+  .mobile-story .mobile-link {
+    min-height: 34px;
+    align-items: center;
+    border-top: 1px solid rgba(120, 200, 255, 0.07);
+    padding: 4px 0;
+  }
+  .mobile-story-swipe {
+    flex: none;
+    padding: 7px 16px 10px;
+    border-top: 1px solid var(--line);
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
   }
 }
 
@@ -1935,7 +2052,7 @@ body {
   pointer-events: none;
   font-size: 8.5px;
   letter-spacing: 0.04em;
-  color: rgba(125, 146, 178, 0.72);
+  color: var(--text-3);
 }
 .layers .sw2 {
   padding: 0;
@@ -2152,6 +2269,28 @@ body {
   font-size: 10.5px;
   color: var(--accent);
   font-weight: 500;
+}
+.mobile-link-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+.mobile-link-k {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  text-transform: uppercase;
+}
+.mobile-link-t {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .source-article {
   display: grid;
@@ -2696,4 +2835,172 @@ body {
 .approx {
   color: #ffc25c;
   letter-spacing: 0.08em;
+}
+
+/* ===== F5·3 responsive panel, touch hints and dialog polish ===== */
+.live.offline,
+.live.connecting,
+.live.reconnecting {
+  color: var(--text-3);
+}
+.panel-toggle,
+.side-panel-bar {
+  display: none;
+}
+.side-panel-bar {
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(5, 9, 19, 0.98);
+}
+
+/* Mid widths get the story panel as a collapsible drawer instead of losing it. */
+@media (min-width: 781px) and (max-width: 1180px) {
+  .panel-toggle {
+    display: grid;
+  }
+  .app3 > .side {
+    display: flex;
+    position: fixed;
+    top: 64px;
+    right: 12px;
+    bottom: 12px;
+    width: min(380px, calc(100vw - 32px));
+    z-index: 55;
+    padding: 0 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: rgba(5, 9, 19, 0.97);
+    backdrop-filter: blur(18px);
+    box-shadow:
+      0 20px 60px rgba(0, 0, 0, 0.55),
+      0 0 0 1px rgba(94, 242, 255, 0.05) inset;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    visibility: hidden;
+    transform: translateX(calc(100% + 24px));
+    transition:
+      transform 0.2s ease,
+      visibility 0.2s ease;
+  }
+  .app3 > .side.side-open {
+    visibility: visible;
+    transform: none;
+  }
+  .app3 > .side .side-panel-bar {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .app3 > .side .side-threads,
+  .app3 > .side .side-links {
+    flex: none;
+    overflow: visible;
+  }
+  .app3 > .side .side-stats {
+    margin-top: 8px;
+  }
+  .app3 .arc-popover {
+    z-index: 60;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app3 > .side {
+    transition: none;
+  }
+}
+
+/* Touch devices should not advertise hover and keyboard shortcuts. */
+@media (hover: none), (pointer: coarse) {
+  .desktop-only,
+  .wfoot .desktop-only,
+  .kbd {
+    display: none;
+  }
+}
+
+/* A11y: dimmed rows stay readable; opacity .45 failed WCAG contrast. */
+.wr.dim {
+  opacity: 1;
+}
+.wr.dim .wr-body {
+  background: rgba(255, 255, 255, 0.012);
+}
+.wr.dim .wr-body .title {
+  color: var(--text-2);
+}
+.wr.dim .wr-body time,
+.wr.dim .wr-body .ws,
+.wr.dim .wr-body .join {
+  color: #8a9bb5;
+}
+/* Selected rows sit on the brightest wire background; lift their meta text. */
+.wr.sel .wr-body time,
+.wr.sel .wr-body .ws,
+.wr.sel .wr-body .pl,
+.wr.sel .wr-body .join {
+  color: #b9cbe4;
+}
+
+/* Alerts drawer: dialog chrome, ntfy subscription details. */
+.alerts-desc {
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.alerts-drawer:focus-visible {
+  outline-offset: -4px;
+}
+.ntfy-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--line);
+}
+.ntfy-block p {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.ntfy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(94, 242, 255, 0.03);
+}
+.ntfy-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+.ntfy-row .chip {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.ntfy-row small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-3);
+}
+.alert-channel {
+  text-transform: none;
 }

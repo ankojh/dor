@@ -1046,6 +1046,11 @@ func (c *relationCore) judge(ctx context.Context, id string) {
 // and commits the result through a durable pair record. A result whose inputs
 // changed before the commit is discarded; a failed output stays unpublished
 // and is retried from the record.
+//
+// Remaining crash window: a process that dies after the decider answers but
+// before the pair record commits loses that answer and re-judges the pair after
+// restart. The model may answer differently; the result is never half-written
+// or published without a durable record.
 func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) error {
 	aid, bid := live.SortPair(a.story.Id, b.story.Id)
 	if aid == bid {

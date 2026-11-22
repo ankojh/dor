@@ -1408,6 +1408,13 @@ func (c *clusterer) load(ctx context.Context) error {
 			}
 			c.overlayEditorTitle(ctx, live, st)
 			c.stories[s.Id] = st
+			if data, err := proto.Marshal(st.Story); err == nil {
+				_, _ = live.Put(ctx, "story."+s.Id, data)
+			}
+			meta := storyMeta{ID: s.Id, ArticleIDs: st.ArticleIDs, SourceIDs: st.SourceIDs, Embedding: st.Embedding, Entities: st.Entities, FirstSeen: st.FirstSeen, UpdatedAt: st.UpdatedAt}
+			if data, err := json.Marshal(meta); err == nil {
+				_, _ = live.Put(ctx, "storymeta."+s.Id, data)
+			}
 			delete(commitKeys, s.Id)
 			// Upgrade legacy state to the authoritative checkpoint format.
 			if _, err := c.writeCheckpoint(ctx, live, st); err != nil {

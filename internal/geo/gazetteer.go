@@ -165,6 +165,12 @@ func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool)
 					g.addAlias(form, p)
 				}
 			}
+			// Index the short form of a multiword "... City" name independently
+			// of GeoNames' bounded alternate-name list. Dateline matching still
+			// validates the candidate's jurisdiction and population.
+			if short, ok := strings.CutSuffix(p.Normalized, " city"); ok && len(strings.Fields(short)) >= 2 {
+				g.addAlias(short, p)
+			}
 		}
 	}
 	for code, c := range countries {

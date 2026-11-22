@@ -254,13 +254,13 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 			keepKey := row.Table + "|" + row.Owner + "|" + row.PlaceID
 			if allowKeep[keepKey] {
 				r.Reviews = append(r.Reviews, review)
-				continue
+			} else {
+				// Keep decisions suppress removal only; a kept point can still
+				// require a precision downgrade or coordinate refresh.
+				r.ReviewRemovals = append(r.ReviewRemovals, review)
+				c.ReviewRemovals++
+				d = geo.RepairDecision{Reason: "review_required"}
 			}
-			// Default policy: a review candidate is a proposed removal. Keeping a
-			// row requires an explicit, reviewed allowlist entry.
-			r.ReviewRemovals = append(r.ReviewRemovals, review)
-			c.ReviewRemovals++
-			d = geo.RepairDecision{Reason: "review_required"}
 		}
 		if d.Reason == "" {
 			continue
@@ -321,6 +321,15 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 			present[k] = map[string]bool{}
 		}
 		if present[k][p.ID] {
+			owner, weight := "story_id", "weight"
+			if c.row.Table == "article_locations" {
+				owner, weight = "article_id", "conf"
+			}
+			// Preserve the strongest vote when replacements collide in the
+			// same role. Different roles still collapse as before.
+			if _, err := tx.Exec(ctx, `UPDATE public.`+c.row.Table+` SET `+weight+`=GREATEST(`+weight+`,$1) WHERE `+owner+`=$2 AND place_id=$3 AND role=$4`, c.row.Weight, c.row.Owner, p.ID, c.row.Role); err != nil {
+				return report{}, err
+			}
 			continue
 		}
 		if err := applyLocation(ctx, tx, c.row, c.decision); err != nil {

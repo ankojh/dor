@@ -265,6 +265,20 @@ func (p *plotter) deterministic(article *dorv1.Article, candidates []geo.Place, 
 				role = dorv1.Role_ROLE_VENUE
 			}
 			res.Locations = []*dorv1.Location{placeLocation(c, prec, role, 0.6)}
+			listed := geo.CommaListedCities(article.GetTitle(), candidates)
+			primaryListed := false
+			for _, place := range listed {
+				primaryListed = primaryListed || place.ID == c.ID
+			}
+			if primaryListed {
+				for _, place := range listed {
+					if place.ID != c.ID {
+						res.Locations = append(res.Locations, placeLocation(place, dorv1.Precision(geo.PrecisionOf(place)), dorv1.Role_ROLE_PARTY, 0.6))
+					}
+				}
+				res.Locations = capLocations(res.Locations)
+				res.MultiRegion = multiCountry(candidates, res.Locations)
+			}
 			return res
 		}
 	}

@@ -13,6 +13,43 @@ type mention struct {
 	qualified  bool
 }
 
+// CommaListedCities identifies adjacent, independently admitted city names in
+// a literal comma-separated title. It does not infer that incidental places,
+// country qualifiers, or unrelated city mentions are coequal event locations.
+func CommaListedCities(title string, candidates []Place) []Place {
+	words := tokenize(title)
+	var mentions []mention
+	for start := range words {
+		for n := 1; n <= min(8, len(words)-start); n++ {
+			if !validPlaceSpan(words, start, n) {
+				break
+			}
+			phrase := tokensText(words[start : start+n])
+			for _, p := range candidates {
+				if !p.CountryID && p.Feature != "ADM1" && p.Normalized == phrase {
+					mentions = append(mentions, mention{place: p, start: start, end: start + n})
+				}
+			}
+		}
+	}
+	var result []Place
+	seen := map[string]bool{}
+	for _, a := range mentions {
+		for _, b := range mentions {
+			if a.end != b.start || a.place.ID == b.place.ID || b.start >= len(words) || !strings.Contains(words[b.start].sep, ",") || strings.ContainsAny(words[b.start].sep, "\n.;:!?/") {
+				continue
+			}
+			for _, p := range []Place{a.place, b.place} {
+				if !seen[p.ID] {
+					seen[p.ID] = true
+					result = append(result, p)
+				}
+			}
+		}
+	}
+	return result
+}
+
 // matchedPlaces admits geographic spans, not arbitrary aliases anywhere in the
 // text. A longer admitted span hides its contained words; an exact jurisdiction
 // name hides a colliding city/alternate name unless independently qualified.
@@ -164,7 +201,7 @@ func validPlaceSpan(words []token, start, count int) bool {
 		if abbreviationToken(words[k-1].norm) && strings.Count(separator, ".") == 1 {
 			separator = strings.ReplaceAll(separator, ".", "")
 		}
-		if strings.ContainsAny(separator, "\n.;:!?") {
+		if strings.ContainsAny(separator, "\n.;:!?,()/") {
 			return false
 		}
 	}
@@ -209,6 +246,9 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place, populatio
 	}
 	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") {
 		previous := words[start-1]
+		if !strings.ContainsAny(words[start].sep, ",()/") && capitalized(previous.raw) && !strings.Contains(" in at near across around within outside into ", " "+previous.norm+" ") {
+			return true
+		}
 		if population < 200000 && strings.Contains(" del de da das do dos van von der den ", " "+previous.norm+" ") {
 			return true
 		}
@@ -217,7 +257,7 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place, populatio
 		}
 	}
 	end := start + count
-	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") {
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?,()/") {
 		return false
 	}
 	next := words[end]
@@ -248,7 +288,7 @@ func allCapsAcronym(raw string) bool {
 
 func properCompoundHead(words []token, start, count int, p Place) bool {
 	end := start + count
-	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") || !capitalized(words[end].raw) {
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?,()/") || !capitalized(words[end].raw) {
 		return false
 	}
 	next := words[end].norm
@@ -359,6 +399,9 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	if p.RegionAlias != "" || !ValidCoordinates(p.Lat, p.Lon) || !capitalized(words[start].raw) {
 		return 0
 	}
+	if end := start + count; p.Feature == "ADM1" && end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?,()/") && words[end].norm == "river" {
+		return 0
+	}
 	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
 		!(p.Feature == "ADM1" && (g.majorPlaceSupported(p) || g.majorPopulation(p) >= 50000)) &&
 		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && containerSuffix(words[end].norm) ||
@@ -394,7 +437,8 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	}
 	if !p.CountryID && !canonical {
 		longForm := expandedPlaceName(phrase)
-		if longForm == expandedPlaceName(p.Admin) || longForm == expandedPlaceName(p.Country) {
+		if (longForm == expandedPlaceName(p.Admin) || longForm == expandedPlaceName(p.Country)) &&
+			!(dateline && strings.HasPrefix(expandedPlaceName(p.Name), longForm+" ") && p.Population >= 1000000) {
 			// A city's alternate name can duplicate its enclosing region
 			// (Rio Grande / Rio Grande do Sul). It is evidence for that
 			// jurisdiction, never an independently supported city coordinate.
@@ -440,7 +484,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	_, ambiguous := g.skip[phrase]
 	// Possessive apostrophe-s is grammar, not a location pattern. Only an
 	// actual preposition or the explicit '-based' construction is locative.
-	locative := locativeEvidence(words, start, count)
+	locative := locativeEvidence(words, start, count) || administrativeContainerEvidence(p, words, start)
 	explicitCountry := countryName && g.explicitCountryEvidence(p, words, start, count, dateline, hint)
 	if countryName && g.foreignRegionCollision(p) && !explicitCountry {
 		// A locative such as 'living in Georgia' does not distinguish the
@@ -454,6 +498,18 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	_, contextualName := contextNames[phrase]
 	contextualName = contextualName || givenNames[phrase] || familyNames[phrase]
 	geographicHead := geographicHead(words, start, count)
+	// A title-cased word is weak evidence: common words, given names, and
+	// smaller names also found as proper nouns need independent geography.
+	// Apply this before both the head and capitalization shortcuts.
+	population := g.majorPopulation(p)
+	lexical := count == 1 && (commonEnglish[phrase] || censusGivenNames[phrase] || properWords[phrase] && p.Feature != "ADM1" && population > 0 && population < 1000000 && !g.nationalCapital(p))
+	if !historical && !p.CountryID && lexical && !(textQualified || dateline || locative || typedRegionEvidence(p, words, start, count)) {
+		return 0
+	}
+	if !historical && geographicHead && start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?,()/") && capitalized(words[start-1].raw) &&
+		strings.Contains(" open summit conference expo ", " "+words[start+count].norm+" ") {
+		return 0
+	}
 	adminLabel := p.Feature == "ADM1" && start+count < len(words) && adminTypeNoun(words[start+count].norm)
 	typedRegion := adminLabel && g.uniqueAdministrativeName(p)
 	if contextualName && !historical && !p.CountryID && !qualified && !typedRegion && (p.Feature == "ADM1" || !g.majorPlaceSupported(p)) && g.foreignCanonicalCollision(p) {
@@ -469,7 +525,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
 		return 0
 	}
-	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || (seatLike(p) && g.majorPlaceSupported(p)))
+	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || ((capitalLetterSeat(p) || p.Feature == "PPL" && p.Population >= 250000) && g.majorPlaceSupported(p)))
 	if historical && canonical {
 		return 31
 	}
@@ -506,6 +562,13 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	}
 	if locative {
 		return 40
+	}
+	// Administrative seats below the first level need an actual civic action,
+	// not capitalization alone. The lexical gate still applies above.
+	if canonical && count == 1 && strings.HasPrefix(p.Feature, "PPLA") && !capitalLetterSeat(p) && g.majorPlaceSupported(p) &&
+		(civicAction(words, start, count) || g.adjacentIndependentCity(words, start, count, p.ID)) &&
+		!capitalLetterOnlyReject(words, start, count, p, g.majorPopulation(p)) {
+		return 33
 	}
 	if major && p.Feature != "ADM1" {
 		if !historical && !textQualified && !dateline && !locative && p.Feature != "PPLC" && p.Feature != "PPLG" && capitalLetterOnlyReject(words, start, count, p, g.majorPopulation(p)) {
@@ -559,7 +622,19 @@ func geographicHead(words []token, start, count int) bool {
 	if end < len(words) && words[end].norm == "s" && strings.ContainsAny(words[end].sep, "'’") {
 		end++
 	}
-	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && geographicHeadWord(words[end].norm)
+	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?,()/") && geographicHeadWord(words[end].norm)
+}
+
+func typedRegionEvidence(p Place, words []token, start, count int) bool {
+	end := start + count
+	return p.Feature == "ADM1" && end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?,()/") && adminTypeNoun(words[end].norm)
+}
+
+// "county of Mississippi" explicitly names the containing jurisdiction; an
+// unqualified "of Mississippi" alone would also occur in non-geographic uses.
+func administrativeContainerEvidence(p Place, words []token, start int) bool {
+	return p.Feature == "ADM1" && start >= 2 && words[start-1].norm == "of" &&
+		jurisdictionNoun(words[start-2].norm) && !strings.ContainsAny(words[start].sep+words[start-1].sep, "\n.;:!?,()/")
 }
 
 func geographicHeadWord(word string) bool {
@@ -599,6 +674,49 @@ func routeContextNearby(words []token, end int) bool {
 
 func seatLike(p Place) bool {
 	return p.Feature == "PPLC" || p.Feature == "PPLG" || strings.HasPrefix(p.Feature, "PPLA")
+}
+
+func capitalLetterSeat(p Place) bool {
+	return p.Feature == "PPLC" || p.Feature == "PPLG" || p.Feature == "PPLA"
+}
+
+func civicAction(words []token, start, count int) bool {
+	end := start + count
+	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?,()/") && strings.Contains(" announces reopens opens hosts launches adopts unveils ", " "+words[end].norm+" ")
+}
+
+// A comma next to another independently supported city is geographic
+// evidence for a dominant lower-level seat, not just capitalization. Never
+// use a country qualifier or another seat needing this same inference as the
+// witness; that prevents circular admission of two unknown names.
+func (g *Gazetteer) adjacentIndependentCity(words []token, start, count int, excludeID string) bool {
+	end := start + count
+	if !(end < len(words) && strings.Contains(words[end].sep, ",")) && !(start > 0 && strings.Contains(words[start].sep, ",")) {
+		return false
+	}
+	for otherStart := 0; otherStart < len(words); otherStart++ {
+		for n := 1; n <= min(8, len(words)-otherStart); n++ {
+			otherEnd := otherStart + n
+			if !validPlaceSpan(words, otherStart, n) {
+				break
+			}
+			if !((otherStart == end && strings.Contains(words[otherStart].sep, ",")) ||
+				(otherEnd == start && strings.Contains(words[start].sep, ","))) {
+				continue
+			}
+			phrase := tokensText(words[otherStart:otherEnd])
+			for _, other := range g.byName[phrase] {
+				if other.ID == excludeID || other.CountryID || other.Feature == "ADM1" ||
+					!(capitalLetterSeat(other) || other.Feature == "PPL" && other.Population >= 250000) {
+					continue
+				}
+				if g.geographicEvidence(other, phrase, words, otherStart, n, false, "") > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func sameJurisdiction(a, b Place) bool {
@@ -645,9 +763,10 @@ func (g *Gazetteer) majorPopulation(p Place) int64 {
 	return p.Population
 }
 
-// Capitalization can support an unambiguous major canonical place. Where a
-// foreign homonym exists, only a capital/administrative seat that dominates it
-// by at least five to one is admitted; population alone never rescues aliases.
+// Capitalization can support an unambiguous major canonical place. A PPL must
+// have at least 250,000 residents; the full-cache examples Noida and Cirebon
+// have fewer than one million. A foreign homonym must be dominated five to one;
+// population alone never rescues aliases.
 func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 	population := g.majorPopulation(p)
 	if population < 50000 {
@@ -673,9 +792,9 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 		largestOther = max(largestOther, otherPopulation)
 	}
 	if !conflict {
-		return seatLike(p)
+		return seatLike(p) || p.Feature == "PPL" && p.Population >= 250000
 	}
-	return (p.Feature == "ADM1" || seatLike(p)) && population >= 5*largestOther
+	return (p.Feature == "ADM1" || seatLike(p) || p.Feature == "PPL" && p.Population >= 250000) && population >= 5*largestOther
 }
 
 // A multiword homonym resolves only to the exact canonical name of a capital
@@ -695,6 +814,10 @@ func (g *Gazetteer) dominatesHomonym(p, other Place, phrase string) bool {
 // Named organizations are not literal city evidence. A following City Council
 // is geographic administration; City/United/FC in club names are not.
 func organizationUse(words []token, start, count int) bool {
+	if start >= 2 && words[start-1].norm == "of" && strings.Contains(" university college ", " "+words[start-2].norm+" ") &&
+		!strings.ContainsAny(words[start].sep+words[start-1].sep, "\n.;:!?,()/") {
+		return true
+	}
 	if start > 0 && strings.Contains(" real atletico bayern borussia deportivo sporting inter dinamo dynamo lokomotiv pss persebaya persib psm fc cf afc fk nk ", " "+words[start-1].norm+" ") {
 		return true
 	}

@@ -73,10 +73,17 @@ func plannedRows(before []location, changes []change) map[ownerKey][]geo.Locatio
 		p := c.decision.Replacement
 		owner := key(c.row)
 		duplicate := false
-		for _, existing := range rows[owner] {
+		for existingKey, existing := range rows[owner] {
 			if existing.PlaceID == p.ID {
+				if existing.Role == c.row.Role {
+					if owner.table == "story_locations" {
+						existing.Weight = max(existing.Weight, c.row.Weight)
+					} else {
+						existing.Confidence = max(existing.Confidence, c.row.Weight)
+					}
+					rows[owner][existingKey] = existing
+				}
 				duplicate = true
-				break
 			}
 		}
 		if duplicate {

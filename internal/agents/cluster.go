@@ -1259,6 +1259,51 @@ func (c *clusterer) coolStories(ctx context.Context) {
 		return
 	}
 	c.lastCool = now
+	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		return
+	}
+	outCtx := context.WithoutCancel(ctx)
+	// Marker-only edits must reach subscribers even when a story has cooled
+	// to the floor and receives no further articles.
+	for _, st := range c.stories {
+		if st == nil || st.Story == nil {
+			continue
+		}
+		marker, err := live.Get(outCtx, "storytitle."+st.Story.Id)
+		if err != nil {
+			continue
+		}
+		var title struct {
+			Title string `json:"title"`
+		}
+		if json.Unmarshal(marker.Value(), &title) != nil || strings.TrimSpace(title.Title) == "" {
+			continue
+		}
+		oldTitle, oldSource := st.Story.Title, st.Story.TitleSource
+		st.Story.Title, st.Story.TitleSource = title.Title, "editor"
+		ackKey := "storytitleack." + st.Story.Id
+		if ack, err := live.Get(outCtx, ackKey); err == nil && string(ack.Value()) == fmt.Sprint(marker.Revision()) {
+			continue
+		}
+		data, err := proto.Marshal(st.Story)
+		if err != nil {
+			st.Story.Title, st.Story.TitleSource = oldTitle, oldSource
+			continue
+		}
+		if _, err = live.Put(outCtx, "story."+st.Story.Id, data); err != nil {
+			st.Story.Title, st.Story.TitleSource = oldTitle, oldSource
+			continue
+		}
+		if err := c.publishStoryUpdate(outCtx, st, fmt.Sprintf("story:%s:title:%d", st.Story.Id, marker.Revision()), nil); err != nil {
+			st.Story.Title, st.Story.TitleSource = oldTitle, oldSource
+			continue
+		}
+		if _, err = live.Put(outCtx, ackKey, []byte(fmt.Sprint(marker.Revision()))); err != nil {
+			st.Story.Title, st.Story.TitleSource = oldTitle, oldSource
+		}
+
+	}
 	type cooled struct {
 		st   *storyState
 		heat float32
@@ -1303,11 +1348,6 @@ func (c *clusterer) coolStories(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
-	live, err := c.bus.KV(ctx, bus.KVBucketLiveState)
-	if err != nil {
-		return
-	}
-	outCtx := context.WithoutCancel(ctx)
 	for _, item := range batch {
 		prevHeat, prevCooled := item.st.Story.Heat, item.st.CooledAt
 		item.st.Story.Heat = item.heat
@@ -1406,9 +1446,9 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 	if st == nil || st.Story == nil {
 		return
 	}
-	markerApplied := c.applyEditorTitleMarker(ctx, kv, st)
 	latest, ok := live.LoadStory(ctx, kv, st.Story.Id)
 	if !ok || latest == nil {
+		c.applyEditorTitleMarker(ctx, kv, st)
 		return
 	}
 	// Heat is derived and cooling writes only story.<id>. Adopt it only when
@@ -1419,6 +1459,7 @@ func (c *clusterer) overlayEditorTitle(ctx context.Context, kv jetstream.KeyValu
 	if sameStoryContentIgnoringHeat(st.Story, latest) {
 		st.Story.Heat = latest.Heat
 	}
+	markerApplied := c.applyEditorTitleMarker(ctx, kv, st)
 	if !markerApplied && latest.Title != "" && latest.GetTitleSource() == "editor" {
 		st.Story.Title = latest.Title
 		st.Story.TitleSource = "editor"

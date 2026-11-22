@@ -103,6 +103,8 @@ export type WorkerPatch = {
   adjacency?: AdjacencyArrays;
   topStories: Uint16Array;
   wire: WireRow[];
+  /** Receipt timestamps, independent of the capped display wire. */
+  wireArrivals?: number[];
   bounds?: { stories: number; links: number; wire: number; pendingWire: number };
   alerts: Array<Extract<Delta["body"], { case: "alert" }>["value"]>;
 };

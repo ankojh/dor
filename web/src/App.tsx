@@ -3500,6 +3500,7 @@ export function App() {
                     class={`ev ${event.showLabel ? "" : "dotonly"}`}
                     style={`left:${event.left}%;--c:${event.color}`}
                     title={event.title}
+                    aria-label={event.title}
                   >
                     {event.showLabel ? event.label : ""}
                   </button>

@@ -193,6 +193,77 @@ func TestRepairCommitFailureRollsBackAndReturnsNoCommittedAudit(t *testing.T) {
 	assertOriginalRepairRows(t, ctx, conn)
 }
 
+func TestRepairAuditReportsPreservedAmbiguousCanonicalLocations(t *testing.T) {
+	dsn := repairTestDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, g := prepareRepairDB(t, ctx, dsn)
+	defer conn.Close(ctx)
+	statements := []string{
+		`INSERT INTO public.stories(id,title,primary_loc) VALUES ('story-review','Hyderabad Announces a New Policy','hyderabad-pk')`,
+		`INSERT INTO public.articles(id,story_id,title,lede,dateline) VALUES ('article-review','story-review','Hyderabad Announces a New Policy','','')`,
+		`INSERT INTO public.story_locations VALUES ('story-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+		`INSERT INTO public.article_locations VALUES ('article-review','hyderabad-pk','Hyderabad',25.395999908447266,68.35780334472656,2,0,.6)`,
+	}
+	for _, statement := range statements {
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed ambiguous historical location: %v", err)
+		}
+	}
+
+	audit, err := repair(ctx, conn, g, false)
+	if err != nil {
+		t.Fatalf("dry-run ambiguous-location audit: %v", err)
+	}
+	if audit.Tables["story_locations"].NeedsReview != 1 || audit.Tables["article_locations"].NeedsReview != 1 {
+		t.Fatalf("ambiguous canonical locations must increment needs_review without proposing deletion: story=%+v article=%+v", audit.Tables["story_locations"], audit.Tables["article_locations"])
+	}
+	for _, want := range []struct{ table, owner string }{{"story_locations", "story-review"}, {"article_locations", "article-review"}} {
+		found := false
+		for _, review := range audit.Reviews {
+			if review.Table == want.table && review.Owner == want.owner {
+				found = true
+				if review.PlaceID != "hyderabad-pk" || review.Reason != "canonical_title_requires_disambiguation" {
+					t.Errorf("unexpected review record for %s/%s: %+v", want.table, want.owner, review)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("missing structured review for %s/%s: %+v", want.table, want.owner, audit.Reviews)
+		}
+	}
+	for _, change := range audit.Changes {
+		if change.Owner == "story-review" || change.Owner == "article-review" {
+			t.Errorf("review-only location must not appear as a destructive/replot change: %+v", change)
+		}
+	}
+	for _, story := range audit.Bundle.Stories {
+		if story.ID == "story-review" {
+			t.Errorf("review-only story must not be placed in deletion/replacement bundle: %+v", story)
+		}
+	}
+	for _, article := range audit.Bundle.Articles {
+		if article.ID == "article-review" {
+			t.Errorf("review-only article must not be placed in deletion/replacement bundle: %+v", article)
+		}
+	}
+	for _, table := range []string{"story_locations", "article_locations"} {
+		ownerCol := "story_id"
+		if table == "article_locations" {
+			ownerCol = "article_id"
+		}
+		var count int
+		query := `SELECT count(*) FROM public.` + table + ` WHERE ` + ownerCol + `=$1 AND place_id='hyderabad-pk'`
+		owner := "story-review"
+		if table == "article_locations" {
+			owner = "article-review"
+		}
+		if err := conn.QueryRow(ctx, query, owner).Scan(&count); err != nil || count != 1 {
+			t.Errorf("dry-run must leave the reviewed canonical location present in %s: count=%d err=%v", table, count, err)
+		}
+	}
+}
+
 func TestWriteReportReplacesFileWithCommittedOutcome(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.json")
 	if err := os.WriteFile(path, []byte("old report"), 0o600); err != nil {
@@ -259,12 +330,14 @@ func repairFixtureGazetteer(t *testing.T) *geo.Gazetteer {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"countryInfo.txt":      "US\tUSA\t\t\tUnited States\tWashington\nFR\tFRA\t\t\tFrance\tParis\n",
-		"admin1CodesASCII.txt": "US.MA\tMassachusetts\nFR.11\tIle-de-France\n",
+		"countryInfo.txt":      "US\tUSA\t\t\tUnited States\tWashington\nFR\tFRA\t\t\tFrance\tParis\nIN\tIND\t\t\tIndia\tNew Delhi\nPK\tPAK\t\t\tPakistan\tIslamabad\n",
+		"admin1CodesASCII.txt": "US.MA\tMassachusetts\nFR.11\tIle-de-France\nIN.TG\tTelangana\nPK.SD\tSindh\n",
 		"cities15000.txt": strings.Join([]string{
 			geoRow("paris", "Paris", "PPLC", "48.8566", "2.3522", "FR", "11", "2161000"),
 			geoRow("boston", "Boston", "PPLA", "42.3601", "-71.0589", "US", "MA", "675000"),
 			geoRow("washington", "Washington", "PPLC", "38.9072", "-77.0369", "US", "DC", "700000"),
+			geoRow("hyderabad-in", "Hyderabad", "PPLA", "17.3850", "78.4867", "IN", "TG", "10000000"),
+			geoRow("hyderabad-pk", "Hyderabad", "PPLA", "25.3960", "68.3578", "PK", "SD", "1000000"),
 		}, ""),
 	}
 	for name, contents := range files {

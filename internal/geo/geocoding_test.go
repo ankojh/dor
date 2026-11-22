@@ -185,6 +185,26 @@ func TestRegionFallbackUsesSeatOrMostPopulousMemberNotWeightedCentre(t *testing.
 	}
 }
 
+func TestSameCountryAdminRegionSeatHomonymHasOneCanonicalCandidate(t *testing.T) {
+	countries := countryRow("US", "USA", "United States", "Washington")
+	admins := "US.DC\tDistrict of Columbia\n"
+	places := cityRow("701", "Washington", "Washington DC", "PPLC", "38.9072", "-77.0369", "US", "DC", "700000")
+	g := writeGazetteer(t, countries, admins, places)
+
+	region, ok := g.ByID("admin:US.DC")
+	if !ok || region.Feature != "ADM1" || region.CountryCode != "US" {
+		t.Fatalf("expected canonical District of Columbia ADM1: %+v, found=%v", region, ok)
+	}
+	seat, ok := g.ByID("701")
+	if !ok || seat.CountryCode != region.CountryCode || seat.AdminCode != region.AdminCode || region.Lat != seat.Lat || region.Lon != seat.Lon {
+		t.Fatalf("fixture should model a same-country/admin region and capital seat: region=%+v seat=%+v found=%v", region, seat, ok)
+	}
+	candidates := g.Candidates("", "Officials meet in Washington, DC", "", "", 10)
+	if len(candidates) != 1 || candidates[0].ID != "701" {
+		t.Fatalf("same-country/admin seat homonym should have one canonical city interpretation, got %+v", candidates)
+	}
+}
+
 func TestExplicitLookupRemainsAvailableForAmbiguousNames(t *testing.T) {
 	g := fixtureGazetteer(t)
 	for _, tc := range []struct {
@@ -265,6 +285,31 @@ func TestRepairPreservesValidHazardHintPoint(t *testing.T) {
 	decision := g.RepairLocation(StoredLocation{PlaceID: "hint:event-7", Lat: 12.3, Lon: 45.6, Precision: PointResolution}, []TextEvidence{{Title: "Earthquake reported"}})
 	if decision.Reason != "" || decision.Replacement != nil {
 		t.Fatalf("valid hazard point should remain unchanged, got %+v", decision)
+	}
+}
+
+func TestRepairReviewsAmbiguousCanonicalTitleButReplotsStrongConflict(t *testing.T) {
+	g := writeGazetteer(t,
+		countryRow("IN", "IND", "India", "New Delhi")+countryRow("PK", "PAK", "Pakistan", "Islamabad"),
+		"IN.TG\tTelangana\nPK.SD\tSindh\n",
+		cityRow("801", "Hyderabad", "", "PPLA", "17.3850", "78.4867", "IN", "TG", "10000000")+
+			cityRow("802", "Hyderabad", "", "PPLA", "25.3960", "68.3578", "PK", "SD", "1000000"),
+	)
+	india, ok := g.ByID("801")
+	if !ok {
+		t.Fatal("fixture city Hyderabad, India is missing")
+	}
+	pakistan, ok := g.ByID("802")
+	if !ok {
+		t.Fatal("fixture city Hyderabad, Pakistan is missing")
+	}
+	ambiguous := g.RepairLocation(StoredLocation{PlaceID: pakistan.ID, Lat: float64(float32(pakistan.Lat)), Lon: float64(float32(pakistan.Lon)), Precision: CityResolution}, []TextEvidence{{Title: "Hyderabad Announces a New Policy"}})
+	if ambiguous.Reason != "" || ambiguous.Replacement != nil || ambiguous.ReviewReason != "canonical_title_requires_disambiguation" {
+		t.Fatalf("ambiguous canonical historical title should be preserved with needs-review, not deleted/replotted: %+v", ambiguous)
+	}
+	conflict := g.RepairLocation(StoredLocation{PlaceID: pakistan.ID, Lat: float64(float32(pakistan.Lat)), Lon: float64(float32(pakistan.Lon)), Precision: CityResolution}, []TextEvidence{{Title: "Officials meet in Hyderabad, India"}})
+	if conflict.Reason != "unsupported_match" || conflict.Replacement == nil || conflict.Replacement.ID != india.ID {
+		t.Fatalf("strong explicit country evidence should replot to the matching Hyderabad: %+v", conflict)
 	}
 }
 

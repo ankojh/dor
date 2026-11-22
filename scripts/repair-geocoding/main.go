@@ -25,12 +25,13 @@ type location struct {
 	Evidence                    []geo.TextEvidence
 }
 type counts struct {
-	Scanned    int            `json:"scanned"`
-	Flagged    int            `json:"flagged"`
-	Replotted  int            `json:"replotted"`
-	Downgraded int            `json:"downgraded"`
-	Removed    int            `json:"removed"`
-	Reasons    map[string]int `json:"reasons"`
+	Scanned     int            `json:"scanned"`
+	Flagged     int            `json:"flagged"`
+	Replotted   int            `json:"replotted"`
+	Downgraded  int            `json:"downgraded"`
+	Removed     int            `json:"removed"`
+	NeedsReview int            `json:"needs_review"`
+	Reasons     map[string]int `json:"reasons"`
 }
 type change struct {
 	row      location
@@ -45,11 +46,19 @@ type auditChange struct {
 	Replacement *geo.Place     `json:"replacement"`
 	Precision   geo.Resolution `json:"precision"`
 }
+type auditReview struct {
+	Table   string `json:"table"`
+	Owner   string `json:"owner"`
+	PlaceID string `json:"place_id"`
+	Name    string `json:"name"`
+	Reason  string `json:"reason"`
+}
 type report struct {
 	Status    string               `json:"status"`
 	Committed bool                 `json:"committed"`
 	Tables    map[string]*counts   `json:"tables"`
 	Changes   []auditChange        `json:"changes"`
+	Reviews   []auditReview        `json:"reviews"`
 	Bundle    LocationRepairBundle `json:"bundle"`
 }
 type options struct {
@@ -205,6 +214,10 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 		c := r.Tables[row.Table]
 		c.Scanned++
 		d := g.RepairLocation(geo.StoredLocation{PlaceID: row.PlaceID, Lat: row.Lat, Lon: row.Lon, Precision: geo.Resolution(row.Precision)}, row.Evidence)
+		if d.ReviewReason != "" {
+			c.NeedsReview++
+			r.Reviews = append(r.Reviews, auditReview{row.Table, row.Owner, row.PlaceID, row.Name, d.ReviewReason})
+		}
 		if d.Reason == "" {
 			continue
 		}

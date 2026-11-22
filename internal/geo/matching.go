@@ -26,21 +26,7 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 		var spans []mention
 		for n := 8; n > 0; n-- {
 			for i := 0; i+n <= len(words); i++ {
-				separated := false
-				for k := i + 1; k < i+n; k++ {
-					separator := words[k].sep
-					// GeoNames uses punctuated abbreviations and initials in
-					// canonical names (St. Louis, José C. Paz, U.S.). A full
-					// sentence boundary still cannot join an ordinary phrase.
-					if abbreviationToken(words[k-1].norm) && strings.Count(separator, ".") == 1 {
-						separator = strings.ReplaceAll(separator, ".", "")
-					}
-					if strings.ContainsAny(separator, "\n.;:!?") {
-						separated = true
-						break
-					}
-				}
-				if separated {
+				if !validPlaceSpan(words, i, n) {
 					continue
 				}
 				phrase := tokensText(words[i : i+n])
@@ -64,6 +50,14 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 				// A span has one supported deterministic interpretation. Keeping a
 				// colliding loser here would make the repair retain its old dot.
 				m := atSpan[0]
+				for _, other := range atSpan[1:] {
+					if n > 1 && other.quality == m.quality && other.place.CountryCode != m.place.CountryCode {
+						// Population cannot choose an unresolved cross-country
+						// multiword homonym. Block contained fragments too.
+						m.place = Place{}
+						break
+					}
+				}
 				contained := false
 				for _, longer := range spans {
 					if longer.start <= m.start && longer.end >= m.end && longer.end-longer.start > n {
@@ -77,6 +71,9 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 			}
 		}
 		for _, m := range spans {
+			if m.place.ID == "" {
+				continue
+			}
 			if old, ok := found[m.place.ID]; !ok || betterPlace(m.place, old) {
 				found[m.place.ID] = m.place
 			}
@@ -88,6 +85,19 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 	}
 	sort.Slice(out, func(i, j int) bool { return betterPlace(out[i], out[j]) })
 	return out
+}
+
+func validPlaceSpan(words []token, start, count int) bool {
+	for k := start + 1; k < start+count; k++ {
+		separator := words[k].sep
+		if abbreviationToken(words[k-1].norm) && strings.Count(separator, ".") == 1 {
+			separator = strings.ReplaceAll(separator, ".", "")
+		}
+		if strings.ContainsAny(separator, "\n.;:!?") {
+			return false
+		}
+	}
+	return true
 }
 
 func betterPlace(a, b Place) bool {
@@ -122,7 +132,13 @@ func independentQualifier(p Place, words []token, start, count int, dateline boo
 			return true
 		}
 		end := start + count
+		if p.Feature == "ADM1" && end < len(words) && adminTypeNoun(words[end].norm) {
+			end++
+		}
 		if matches(end) && (dateline || strings.ContainsAny(words[end].sep, ",(")) {
+			return true
+		}
+		if start > len(parts) && words[start-1].norm == "s" && strings.ContainsAny(words[start-1].sep, "'’") && matches(start-len(parts)-1) {
 			return true
 		}
 		if matches(start-len(parts)) && (dateline || strings.ContainsAny(words[start].sep, ",:(")) {
@@ -145,17 +161,22 @@ func independentQualifier(p Place, words []token, start, count int, dateline boo
 }
 
 func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, start, count int, dateline bool, hint string) int {
+	return g.geographicEvidenceFor(p, phrase, words, start, count, dateline, hint, false)
+}
+
+func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token, start, count int, dateline bool, hint string, historical bool) int {
 	// No-data regions may remain explicit lookup aliases, but cannot turn a
 	// bare regional name into an automatic dot at another country's capital.
 	if p.RegionAlias != "" || !ValidCoordinates(p.Lat, p.Lon) || !capitalized(words[start].raw) {
 		return 0
 	}
-	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) {
+	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
+		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && strings.Contains(" region province district county ", " "+words[end].norm+" ") || words[end].norm == "park" && p.Population >= 50000)) {
 		// A populated-place coordinate does not establish the position of a
 		// separately named river/valley, or an administrative jurisdiction.
 		return 0
 	}
-	canonical := expandedPlaceName(phrase) == expandedPlaceName(p.Name)
+	canonical := expandedPlaceName(phrase) == expandedPlaceName(p.Name) || p.CountryID && p.CountryCode == "PS" && phrase == "palestine"
 	countryName := p.CountryID && canonical
 	// ISO/IATA aliases describe explicit lookup vocabulary, not ordinary prose.
 	if p.CountryID && !canonical {
@@ -200,6 +221,9 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 		}
 	}
 	textQualified := independentQualifier(p, words, start, count, dateline)
+	if personUse(words, start, count) && !textQualified || !p.CountryID && organizationUse(words, start, count) {
+		return 0
+	}
 	hintQualified := hint != "" && p.CountryCode == hint
 	qualified := textQualified || hintQualified
 	if !p.CountryID {
@@ -222,22 +246,33 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 		// independent evidence identifies the country or an actual venue.
 		return 0
 	}
+	if countryName && !dateline && !explicitCountry && countryNonGeographicUse(p, words, start, count) {
+		return 0
+	}
 	_, contextualName := contextNames[phrase]
-	if contextualName && !p.CountryID && !qualified && g.foreignCanonicalCollision(p) {
+	contextualName = contextualName || givenNames[phrase] || familyNames[phrase]
+	geographicHead := geographicHead(words, start, count)
+	adminLabel := p.Feature == "ADM1" && start+count < len(words) && adminTypeNoun(words[start+count].norm)
+	typedRegion := adminLabel && g.uniqueAdministrativeName(p)
+	if contextualName && !historical && !p.CountryID && !qualified && !typedRegion && (p.Feature == "ADM1" || !g.majorPlaceSupported(p)) && g.foreignCanonicalCollision(p) {
 		// 'in Victoria' is geographic syntax, but still cannot distinguish
 		// the Australian region from several cities in other countries.
 		return 0
 	}
 	// Shared personal names and country/commodity names need actual text
 	// evidence. A publisher's country alone cannot locate a person or brand.
-	if contextualName && !(textQualified || dateline || locative || explicitCountry || countryName && disasterImpact(words, start)) {
+	if contextualName && !historical && !p.CountryID && !(textQualified || dateline || locative || typedRegion || geographicHead && g.majorPlaceSupported(p) || explicitCountry || countryName && disasterImpact(words, start)) {
 		return 0
 	}
 	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
 		return 0
 	}
-	if canonical && p.Feature == "ADM1" && count == 1 && !g.uniqueRegionName(p) &&
-		!(textQualified || dateline || locative) {
+	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || g.majorPlaceSupported(p))
+	if historical && canonical {
+		return 31
+	}
+	if canonical && p.Feature == "ADM1" && count == 1 && !g.uniqueRegionName(p) && !major &&
+		!(textQualified || dateline || locative || typedRegion) {
 		return 0
 	}
 	if dateline {
@@ -258,23 +293,175 @@ func (g *Gazetteer) geographicEvidence(p Place, phrase string, words []token, st
 	if ambiguous {
 		return 0
 	}
+	if geographicHead {
+		return 40
+	}
 	if locative {
 		return 40
+	}
+	if major && p.Feature != "ADM1" {
+		return 33
 	}
 	if canonical && p.Feature == "ADM1" && count == 1 {
 		return 32
 	}
 	// A full multiword name is more specific than a capitalized surname or
-	// brand. Single-token canonical cities still require geographic context.
+	// brand. Major canonical cities also have population/uniqueness evidence.
 	if count > 1 {
 		return 30
 	}
 	return 0
 }
 
+// Curated common given/family names: they are lexical ambiguity classes, not
+// headline phrases. Adjacent personal-name structure must not become a city.
+var givenNames = nameVocabulary(`aaron adam austin adrian ahmed ahmad ali amran andi anwar ariel alan alex alexander alfred alice amanda amy andrew andi anna anne anthony arthur barbara ben benjamin bernard bill bob brian carl carlos charles charlotte cheryl christopher daniel david dennis denzel diana diane darwin donna donald dorothy edward ella emily eric eugene evan francis frank florence fred frederick george gerald harold harry helen henry hugh irene irving isaac jack jacob james jane jason jean jeff jeffrey jennifer jeremy jerry jim joan joe john jon jonathan jose joseph joshua joyce judith julie justin karen kathleen kathryn kelly kenneth kevin laura lawrence leo leonard leslie lewis linda lois louis louise luis lynn marco margaret maria marie marilyn mark martha martin mary matthew michael nancy natalie nicholas nicole norman oliver oscar patrick paul paula peter philip raymond rebecca richard robert roger ronald rose roy ruth sam samuel santiago sandra sarah scott sharon shawn shirley simon stephen steven susan thomas timothy tom valerie victoria vincent virginia vladimir walter wayne william yahaya`)
+var familyNames = nameVocabulary(`smith johnson williams brown jones garcia miller davis rodriguez martinez hernandez lopez gonzalez wilson anderson thomas taylor moore jackson martin lee perez thompson white harris sanchez clark ramirez lewis robinson walker young allen king wright scott torres nguyen hill flores green adams nelson baker hall rivera campbell mitchell carter roberts gomez phillips evans turner diaz parker cruz edwards collins reyes stewart morris morales murphy cook rogers ortiz morgan cooper peterson reed kelly howard kim ward watson brooks wood bennett gray hughes price myers ross foster perry russell bell butler barnes fisher jordan alexander hamilton graham west hayes ford marshall kennedy clinton lincoln washington bolton rubio shevchenko bello langley lima hilton beckham giuffre berry hollen orden gogh adesanya`)
+
+func nameVocabulary(words string) map[string]bool {
+	out := map[string]bool{}
+	for _, word := range strings.Fields(words) {
+		out[word] = true
+	}
+	return out
+}
+func personUse(words []token, start, count int) bool {
+	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") && capitalized(words[start-1].raw) &&
+		(givenNames[words[start-1].norm] || familyNames[words[start-1].norm] && (givenNames[words[start].norm] || familyNames[words[start].norm]) || strings.Contains(" mr mrs ms dr senator governor president professor coach pope ", " "+words[start-1].norm+" ")) {
+		return true
+	}
+	end := start + count
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?,():") || !capitalized(words[end].raw) {
+		return false
+	}
+	if familyNames[words[end].norm] {
+		return true
+	}
+	return count == 1 && givenNames[words[start].norm] && !geographicHead(words, start, count) && !actorHead(words[end].norm)
+}
+func actorHead(word string) bool {
+	return strings.Contains(" businesswomen wholesaler government parliament economy opposition president minister officials forces troops army police military authorities leaders delegation elections election court courts policy announces plans says warns agrees rejects attacks strikes opens sends reports demands calls seeks faces approves expands allows bans launches backs talks votes will has is are can may reopens rolls extends tightens hosts closes debates adopts receives gets makes sees proposes unveils residents population council civic road session schools businesses hospital health and but or was had ", " "+word+" ")
+}
+
+func geographicHead(words []token, start, count int) bool {
+	end := start + count
+	if end < len(words) && words[end].norm == "s" && strings.ContainsAny(words[end].sep, "'’") {
+		end++
+	}
+	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && strings.Contains(" mayor governor residents population economy municipal municipality council cbd streets hospitals province region state prefecture ", " "+words[end].norm+" ")
+}
+
+func adminTypeNoun(word string) bool {
+	return strings.Contains(" region state province prefecture ", " "+word+" ")
+}
+
+func sameJurisdiction(a, b Place) bool {
+	return a.CountryCode == b.CountryCode && a.AdminCode != "" && a.AdminCode == b.AdminCode
+}
+
+func (g *Gazetteer) majorPopulation(p Place) int64 {
+	if p.Feature == "ADM1" {
+		return g.regionPopulation[p.CountryCode+"."+p.AdminCode]
+	}
+	return p.Population
+}
+
+// Capitalization can support an unambiguous major canonical place. Where a
+// foreign homonym exists, only a capital/administrative seat that dominates it
+// by at least five to one is admitted; population alone never rescues aliases.
+func (g *Gazetteer) majorPlaceSupported(p Place) bool {
+	population := g.majorPopulation(p)
+	if population < 50000 {
+		return false
+	}
+	largestOther := int64(0)
+	conflict := false
+	for _, other := range g.byName[normalize(p.Name)] {
+		if other.RegionAlias != "" || expandedPlaceName(other.Name) != expandedPlaceName(p.Name) || other.ID == p.ID || sameJurisdiction(p, other) {
+			continue
+		}
+		conflict = true
+		otherPopulation := g.majorPopulation(other)
+		if otherPopulation == 0 {
+			return false
+		}
+		largestOther = max(largestOther, otherPopulation)
+	}
+	if !conflict {
+		return true
+	}
+	return (p.Feature == "ADM1" || p.Feature == "PPLC" || strings.HasPrefix(p.Feature, "PPLA")) && population >= 5*largestOther
+}
+
+// Named organizations are not literal city evidence. A following City Council
+// is geographic administration; City/United/FC in club names are not.
+func organizationUse(words []token, start, count int) bool {
+	if start > 0 && strings.Contains(" real atletico bayern borussia deportivo sporting inter dinamo dynamo lokomotiv pss persebaya persib psm fc cf afc fk nk ", " "+words[start-1].norm+" ") {
+		return true
+	}
+	end := start + count
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") {
+		return false
+	}
+	if end+1 < len(words) && (words[end].norm == "st" || words[end].norm == "saint") && words[end+1].norm == "germain" {
+		return true
+	}
+	if capitalized(words[end].raw) && strings.Contains(" post times herald gazette chronicle tribune journal news ", " "+words[end].norm+" ") && (end+1 >= len(words) || words[end+1].norm != "office") {
+		return true
+	}
+	if words[end].norm == "city" {
+		return end+1 >= len(words) || !strings.Contains(" council government hall police administration officials ", " "+words[end+1].norm+" ")
+	}
+	if strings.Contains(" united pirates fc cf capitals hotspur rovers wanderers bucks lakers dodgers rams yankees mets celtics ", " "+words[end].norm+" ") {
+		return true
+	}
+	if strings.Contains(" sign signs signed sack sacks sacked beat beats defeat defeats draw draws win wins lose loses appoint appoints ", " "+words[end].norm+" ") {
+		sport := false
+		for i := end + 1; i < min(len(words), end+8); i++ {
+			if strings.ContainsAny(words[i].sep, "\n.;:!?") {
+				break
+			}
+			if words[i].norm == "bid" || words[i].norm == "host" {
+				return false
+			}
+			if strings.Contains(" manager midfielder striker forward player players coach goal match club team football league cup defender captain winger ", " "+words[i].norm+" ") {
+				sport = true
+			}
+		}
+		return sport
+	}
+	return false
+}
+
+// Countries can be actors and possessives without a locative. Ambiguous
+// personal names still reject an adjacent proper surname; ordinary political
+// and economic heads are admitted even in title case. Commodity senses have
+// separate lexical cues instead of blocking all uses of Turkey/Reunion.
+func countryNonGeographicUse(p Place, words []token, start, count int) bool {
+	name := normalize(p.Name)
+	end := start + count
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") {
+		return false
+	}
+	next := words[end]
+	if next.norm == "s" && strings.ContainsAny(next.sep, "'’") {
+		return false
+	}
+	if name == "turkey" && strings.Contains(" price prices meat poultry roast roasting breast breasts sandwich sandwiches ", " "+next.norm+" ") {
+		return true
+	}
+	if name == "reunion" && strings.Contains(" tour tours concert concerts band album dates ", " "+next.norm+" ") {
+		return true
+	}
+	if !strings.Contains(" israel chad jordan ", " "+name+" ") || !capitalized(next.raw) {
+		return false
+	}
+	return !actorHead(next.norm)
+}
+
 func incompatibleFeatureSuffix(p Place, next string) bool {
-	natural := strings.Contains(" river lake valley mountain range ", " "+next+" ")
-	admin := strings.Contains(" province state county district ", " "+next+" ")
+	natural := strings.Contains(" river lake valley mountain range forest park island islands reservoir canal harbour harbor street avenue road lane boulevard drive bridge overpass interchange highway freeway tunnel ", " "+next+" ")
+	admin := strings.Contains(" province state county district region prefecture constituency canton municipality department ", " "+next+" ")
 	if p.CountryID {
 		return false // A country can honestly represent a coarser jurisdiction.
 	}
@@ -331,7 +518,9 @@ var contextNames = map[string]struct{}{
 	"reunion": {}, "georgia": {}, "lori": {}, "mila": {}, "diana": {},
 	"nan": {}, "mara": {}, "carolina": {}, "alberta": {}, "brittany": {},
 	"miranda": {}, "uri": {}, "andreas": {}, "douglas": {}, "patrick": {},
-	"constantine": {}, "sofia": {}, "sal": {}, "paola": {}, "indiana": {},
+	"constantine": {}, "sofia": {}, "sal": {}, "paola": {}, "indiana": {}, "washington": {},
+	"bournemouth": {}, "dortmund": {}, "southampton": {}, "liverpool": {}, "fulham": {}, "tottenham": {}, "ipswich": {}, "sunderland": {}, "stellenbosch": {}, "koln": {},
+	"patra": {}, "arak": {}, "rahat": {}, "fullerton": {}, "phoenix": {}, "chelsea": {},
 }
 
 // An impact verb alone can describe a person. Require a nearby disaster noun
@@ -383,6 +572,15 @@ func (g *Gazetteer) explicitCountryEvidence(p Place, words []token, start, count
 	return ok && dateline && capital != "" && strings.Contains(" "+tokensText(words)+" ", " "+capital+" ")
 }
 
+func (g *Gazetteer) uniqueAdministrativeName(p Place) bool {
+	for _, other := range g.byName[normalize(p.Name)] {
+		if other.Feature == "ADM1" && other.RegionAlias == "" && expandedPlaceName(other.Name) == expandedPlaceName(p.Name) && !sameJurisdiction(p, other) {
+			return false
+		}
+	}
+	return true
+}
+
 // The capitalization-only ADM1 shortcut is limited to canonical names with
 // one geographic meaning. Cities, countries and other regions with the same
 // name require a dateline, locative or independently stated qualifier.
@@ -391,7 +589,7 @@ func (g *Gazetteer) uniqueRegionName(p Place) bool {
 		if other.RegionAlias != "" || normalize(other.Name) != normalize(p.Name) || other.ID == p.ID {
 			continue
 		}
-		if other.Feature == "ADM1" && other.CountryCode == p.CountryCode && other.AdminCode == p.AdminCode {
+		if sameJurisdiction(p, other) {
 			continue
 		}
 		return false

@@ -9,15 +9,26 @@ requires all three existing GeoNames files; it never downloads a replacement
 dataset. The exact source files are identified by SHA-256 in the audit/bundle.
 
 Automatic matching excludes no-data region aliases that point at country
-capitals; those aliases remain available to explicit lookup. Single-word ADM1
-names without geographic syntax are accepted only when geographically unique
-and absent from the curated common-word/personal-name ambiguity vocabulary.
-Punctuated canonical abbreviations (St./Ste./Ft./Mt./initials) remain supported.
-Ambiguous personal or commodity country names need geographic text; a country
-that shares its name with a foreign region needs stronger country evidence.
-For example, unqualified “in Victoria” or “living in Georgia” can remain
-unlocated, while “Victoria, Australia” and “Tbilisi, Georgia” are supported.
-This deliberately reduces recall instead of inventing a jurisdiction.
+capitals; those aliases remain available to explicit lookup. A canonical
+single-word city needs geographic syntax, or at least 50,000 population and
+geographic uniqueness. A capital/administrative seat may also qualify when it
+dominates foreign homonyms by at least five to one. A region's own same-named
+seat is the same jurisdiction, not a foreign homonym. Person, club, commodity,
+common-word and demonym evidence guards still apply. Countries can be actors
+and possessives without a locative. Punctuated canonical abbreviations
+(St./Ste./Ft./Mt./initials) remain supported. Unresolved equal-quality
+cross-country multiword homonyms abstain and block their contained fragments.
+
+The new-point admission threshold is not evidence that an existing canonical
+point is false. A valid canonical title witness that passes the explicit
+rejection guards is retained when disambiguation remains uncertain. The audit
+records `needs_review` counts and complete `reviews` entries instead of an
+unsupported deletion. Stronger contradictory country/admin evidence still
+replots it; invalid coordinates and unsupported precision are still corrected.
+These unresolved retained points are not certified as accurate. They require
+separate review and do not appear as destructive changes in the bundle. A
+zero-change second run may still have `needs_review` entries; idempotency is not
+geographic completion or permission to serve the proposal live.
 
 ## Audit and explicit apply
 

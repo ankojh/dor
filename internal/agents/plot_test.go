@@ -703,13 +703,14 @@ func TestFullCacheContextualReviewEvidence(t *testing.T) {
 		{"Reunion tour", "Band announces Reunion tour dates", "Tickets will go on sale next week.", "", "", "", 0, true},
 		{"Georgia runoff", "Georgia runoff election draws national attention", "Campaigns spent heavily on advertising.", "", "", "", 0, true},
 		{"Georgia without country proof", "Atlanta crash injures two people", "The victims were living in Georgia.", "", "", "", 0, true},
-		{"Southampton team", "Southampton signs a new midfielder", "The club confirmed the transfer.", "", "", "", 0, true},
+		{"Southampton team", "Southampton FC signs a new midfielder", "The club confirmed the transfer.", "", "", "", 0, true},
 		// Safe administrative regions and explicit country/geographic contexts.
 		{"Texas region", "Texas officials announce a new safety plan", "The policy applies statewide.", "", "US", "texas", dorv1.Precision_PRECISION_REGION, false},
+		{"Washington State typed region", "Washington State Announces a New Water Plan", "The policy applies statewide.", "", "US", "washington", dorv1.Precision_PRECISION_REGION, false},
 		{"Kerala region", "Heavy rain hits Kerala", "Flood warnings were issued across the state.", "", "IN", "kerala", dorv1.Precision_PRECISION_REGION, false},
 		{"Gauteng region", "Thunderstorms to hit Gauteng over the weekend", "Residents were advised to take precautions.", "", "ZA", "gauteng", dorv1.Precision_PRECISION_REGION, false},
-		{"St Louis locative", "Officials meet in St. Louis", "The talks focused on transit.", "", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
-		{"St Louis dateline", "Officials announce a new plan", "The city hosted the announcement.", "ST. LOUIS", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
+		{"St Louis locative Missouri", "Officials meet in St. Louis, Missouri", "The talks focused on transit.", "St. Louis, Missouri, United States", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
+		{"St Louis qualified dateline", "Officials announce a new plan", "The city hosted the announcement.", "ST. LOUIS, MISSOURI, US", "US", "st. louis", dorv1.Precision_PRECISION_CITY, false},
 		{"St Johns Newfoundland", "Officials gather in St. John's, Newfoundland", "The meeting was held at city hall.", "St. John's, Newfoundland and Labrador, Canada", "CA", "st. john", dorv1.Precision_PRECISION_CITY, false},
 		{"St Petersburg Russia", "Ministers meet in St. Petersburg, Russia", "The meeting continued through the afternoon.", "St. Petersburg, Russia", "RU", "saint petersburg", dorv1.Precision_PRECISION_CITY, false},
 		{"Ft Worth Texas", "Officials gather in Ft. Worth, Texas", "The meeting was held downtown.", "Ft. Worth, Texas", "US", "fort worth", dorv1.Precision_PRECISION_CITY, false},
@@ -760,14 +761,16 @@ func TestFullCacheContextualReviewEvidence(t *testing.T) {
 	}{
 		{"bare San Salvador mayor", "San Salvador mayor announces new plan", "", "SV", []string{"BS"}, false},
 		{"bare San Salvador dateline", "Mayor announces a new plan", "SAN SALVADOR", "SV", []string{"BS"}, false},
-		{"bare Santa Cruz floods", "Santa Cruz floods after heavy rain", "", "BO", []string{"BS"}, false},
-		{"bare Santa Cruz dateline", "Flood warnings issued", "SANTA CRUZ", "BO", []string{"BS"}, false},
+		{"bare Santa Cruz floods", "Santa Cruz floods after heavy rain", "", "", nil, true},
+		{"bare Santa Cruz dateline", "Flood warnings issued", "SANTA CRUZ", "", nil, true},
 		{"bare Boa Vista hospitals", "Boa Vista hospitals prepare for strike", "", "BR", []string{"CV"}, false},
 		{"bare Boa Vista dateline", "Hospitals prepare for strike", "BOA VISTA", "BR", []string{"CV"}, false},
 		{"bare Porto Novo summit", "Porto Novo hosts regional summit", "", "BJ", []string{"CV"}, false},
 		{"bare Porto Novo dateline", "Regional summit opens", "PORTO NOVO", "BJ", []string{"CV"}, false},
 		{"Florida governor", "Florida governor signs budget", "", "", []string{"PR"}, false},
 		{"Rio Grande valley", "Rio Grande valley braces for flooding", "", "", []string{"PR"}, false},
+		{"St Louis locative", "Officials meet in St. Louis", "", "", nil, true},
+		{"St Louis dateline", "Officials announce a new plan", "ST. LOUIS", "", nil, true},
 		{"Male nurses", "Male nurses call for better conditions", "", "", nil, true},
 		{"Washington warns", "Washington warns officials of new sanctions", "", "", nil, true},
 	} {
@@ -814,6 +817,246 @@ func TestFullCacheContextualReviewEvidence(t *testing.T) {
 						t.Errorf("river feature phrase %q must not be resolved as city %q (%s): %+v", tc.title, candidate.Name, candidate.ID, loc)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestFullCacheCanonicalMajorCityRecallAndHistoricalRepair(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	cases := []struct {
+		city, country, title string
+	}{
+		{"Delhi", "IN", "Delhi Rolls Out a New Policy"},
+		{"Lagos", "NG", "Lagos Reopens a Major Road"},
+		{"Gaza", "PS", "Gaza Health Ministry Announces New Measures"},
+		{"Moscow", "RU", "Moscow Talks Resume After Recess"},
+		{"Jakarta", "ID", "Jakarta Announces a Transit Plan"},
+		{"Durban", "ZA", "Durban Hosts a Climate Summit"},
+		{"Recife", "BR", "Recife Opens a New Hospital"},
+		{"Shenzhen", "CN", "Shenzhen Opens a Technology Center"},
+		{"Istanbul", "TR", "Istanbul Airport Adds New Routes"},
+		{"Madrid", "ES", "Madrid Approves a Housing Plan"},
+		{"Tehran", "IR", "Tehran Announces New Talks"},
+		{"Bengaluru", "IN", "Bengaluru Opens a Technology Center"},
+		{"Leeds", "GB", "Leeds Reopens the City Museum"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.city, func(t *testing.T) {
+			canonical, ok := g.Lookup(tc.city, tc.country)
+			if !ok || canonical.CountryID || strings.EqualFold(canonical.Feature, "ADM1") {
+				t.Fatalf("full cache must contain canonical city %s/%s, got %+v (found=%v)", tc.city, tc.country, canonical, ok)
+			}
+			placed := p.place(context.Background(), &dorv1.Article{Id: "major-city-" + tc.city, Title: tc.title})
+			if len(placed.Locations) == 0 {
+				t.Fatalf("bare canonical major-city subject should resolve: %q -> %+v", tc.title, placed)
+			}
+			resolved, ok := g.ByID(placed.Locations[0].PlaceId)
+			if !ok || resolved.ID != canonical.ID || resolved.CountryCode != tc.country || placed.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+				t.Fatalf("canonical major city should resolve to %s/%s at CITY precision; got %+v (known=%v, canonical=%+v)", tc.city, tc.country, placed.Locations, ok, canonical)
+			}
+
+			// A previously stored canonical city with valid coordinates must not be
+			// deleted just because fresh matching is more conservative for this text.
+			decision := g.RepairLocation(geo.StoredLocation{
+				PlaceID: canonical.ID, Lat: float64(float32(canonical.Lat)), Lon: float64(float32(canonical.Lon)), Precision: geo.CityResolution,
+			}, []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "" && (decision.Replacement == nil || decision.Replacement.ID != canonical.ID) {
+				t.Fatalf("valid historical canonical city should never be deleted on matcher abstention: %s/%s -> %+v", tc.city, tc.country, decision)
+			}
+		})
+	}
+	// Hyderabad is a cross-country homonym: new plotting needs explicit country
+	// evidence, while a valid historical canonical title must remain intact.
+	hyderabad, ok := g.Lookup("Hyderabad", "IN")
+	if !ok {
+		t.Fatal("full cache must contain Hyderabad, India")
+	}
+	qualified := p.place(context.Background(), &dorv1.Article{Id: "major-city-Hyderabad-qualified", Title: "Hyderabad, India Announces a New Transit Plan"})
+	if len(qualified.Locations) == 0 || qualified.Locations[0].PlaceId != hyderabad.ID || qualified.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+		t.Fatalf("new Hyderabad match needs and should accept explicit country evidence: %+v", qualified)
+	}
+	historicalTitle := "Hyderabad Announces a New Transit Plan"
+	historical := g.RepairLocation(geo.StoredLocation{PlaceID: hyderabad.ID, Lat: float64(float32(hyderabad.Lat)), Lon: float64(float32(hyderabad.Lon)), Precision: geo.CityResolution}, []geo.TextEvidence{{Title: historicalTitle}})
+	if historical.Reason != "" && (historical.Replacement == nil || historical.Replacement.ID != hyderabad.ID) {
+		t.Fatalf("historical Hyderabad title must not be deleted just because fresh matching lacks country qualification: %+v", historical)
+	}
+}
+
+func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	for _, title := range []string{
+		"Israel Adesanya Announces Return", "Chad Johnson joins the broadcast", "Jordan Peterson publishes a new essay",
+		"Turkey prices fall before the holiday", "Band announces a Reunion tour", "Somali officials discuss language policy",
+		"Balkan leaders meet for a summit", "Harari researchers publish new findings", "Falcon launches a new product",
+		"Sud residents discuss the new policy", "Tabasco sauce recalls bottles", "Quiche sales rise in cafes", "Afar tradition inspires an exhibit",
+		"Leeds United Signs a New Forward", "Delhi Capitals Win in Final Over", "Orlando Pirates Announce New Coach", "Shenzhen FC Signs a New Player",
+		"Sunrise Film Wins an International Award", "Confederation of African Football Elects President", "Rugby Bosses Reject Proposal",
+		"Marco Rubio Announces a New Campaign", "Ella Langley Releases an Album", "Nancy Pelosi Addresses the House",
+		"Vladimir Putin Announces New Measures", "Paris Hilton Launches a Product", "Bayern Munich Signs a Forward",
+		"PM-RAHAT Scheme Provides Housing Assistance", "Fullerton Health Opens a Clinic", "Metro Service Delayed During Repairs",
+		"Como Wins a Football Match", "Natal Gifts Sell Quickly Before Christmas", "Sabha Members Approve the Budget",
+		"Police Investigate the Incident", "Officials Hit by Storm", "The Fountain Film Wins an Award",
+	} {
+		t.Run("unqualified_"+title, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "word-" + title, Title: title})
+			if len(placed.Locations) != 0 {
+				t.Errorf("person, commodity, demonym, or unqualified ambiguous word must not become a location: title=%q locations=%+v", title, placed.Locations)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		title, country, name string
+		precision            dorv1.Precision
+	}{
+		{"ISRAEL’S ECONOMY GROWS DESPITE PRESSURE", "IL", "israel", dorv1.Precision_PRECISION_COUNTRY},
+		{"Israel Government Announces Policy", "IL", "israel", dorv1.Precision_PRECISION_COUNTRY},
+		{"Israel's economy faces new challenges", "IL", "israel", dorv1.Precision_PRECISION_COUNTRY},
+		{"Officials detained by Israel", "IL", "israel", dorv1.Precision_PRECISION_COUNTRY},
+		{"Turkey opposition protests new rules", "TR", "turkey", dorv1.Precision_PRECISION_COUNTRY},
+		{"Somali Region in Ethiopia Announces a New Policy", "ET", "somali", dorv1.Precision_PRECISION_REGION},
+		{"Harari, Ethiopia, opens a cultural center", "ET", "harari", dorv1.Precision_PRECISION_REGION},
+		{"Falcon State, Venezuela, reports flooding", "VE", "falcón", dorv1.Precision_PRECISION_REGION},
+		{"Sud, Haiti, reports new storm damage", "HT", "sud", dorv1.Precision_PRECISION_REGION},
+		{"Tabasco, Mexico, reports heavy rain", "MX", "tabasco", dorv1.Precision_PRECISION_REGION},
+		{"Quiché, Guatemala, announces a new program", "GT", "quiché", dorv1.Precision_PRECISION_REGION},
+		{"Afar, Ethiopia, announces a regional plan", "ET", "āfar", dorv1.Precision_PRECISION_REGION},
+		{"Sunrise, Florida, residents approve a new plan", "US", "sunrise", dorv1.Precision_PRECISION_CITY},
+		{"Rugby, England, hosts a regional tournament", "GB", "rugby", dorv1.Precision_PRECISION_CITY},
+		{"Fullerton, California, opens a new clinic", "US", "fullerton", dorv1.Precision_PRECISION_CITY},
+		{"Rahat, Israel, hosts a civic meeting", "IL", "rahat", dorv1.Precision_PRECISION_CITY},
+		{"Como, Italy, residents approve a transit plan", "IT", "como", dorv1.Precision_PRECISION_CITY},
+		{"Natal, Brazil, opens a new hospital", "BR", "natal", dorv1.Precision_PRECISION_CITY},
+		{"Sabha, Libya, reports heavy rain", "LY", "sabha", dorv1.Precision_PRECISION_CITY},
+		{"Orlando, Florida, opens a new public center", "US", "orlando", dorv1.Precision_PRECISION_CITY},
+		{"Police, Poland, residents approve a new plan", "PL", "police", dorv1.Precision_PRECISION_CITY},
+		{"Hīt, Iraq, hosts a public meeting", "IQ", "hīt", dorv1.Precision_PRECISION_CITY},
+		{"Fountain, Colorado, residents approve a new plan", "US", "fountain", dorv1.Precision_PRECISION_CITY},
+		{"Oman's Khasab hosts a maritime meeting", "OM", "khasab", dorv1.Precision_PRECISION_CITY},
+		{"Palestine, Texas, residents approve a new plan", "US", "palestine", dorv1.Precision_PRECISION_CITY},
+	} {
+		t.Run("qualified_"+tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "qualified-" + tc.name, Title: tc.title})
+			if len(placed.Locations) == 0 {
+				t.Fatalf("qualified geographic counterpart should resolve: %q -> %+v", tc.title, placed)
+			}
+			loc := placed.Locations[0]
+			place, ok := g.ByID(loc.PlaceId)
+			if !ok || place.CountryCode != tc.country || !strings.Contains(strings.ToLower(place.Name), tc.name) || loc.Precision != tc.precision {
+				t.Errorf("qualified geographic counterpart mismatch: got %+v (known=%v), want %s/%s precision=%s", loc, ok, tc.country, tc.name, tc.precision)
+			}
+		})
+	}
+}
+
+func TestFullCachePalestineAndWashingtonRepairStrongConflicts(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+
+	palestineCountry := p.place(context.Background(), &dorv1.Article{Id: "palestine-country", Title: "Palestine Government Announces New Aid Plan"})
+	if len(palestineCountry.Locations) == 0 {
+		t.Fatalf("Palestine country reference should resolve: %+v", palestineCountry)
+	}
+	ps, ok := g.ByID(palestineCountry.Locations[0].PlaceId)
+	if !ok || ps.CountryCode != "PS" || !ps.CountryID || palestineCountry.Locations[0].Precision != dorv1.Precision_PRECISION_COUNTRY {
+		t.Fatalf("Palestine should resolve as the PS country in country context: %+v (known=%v place=%+v)", palestineCountry.Locations, ok, ps)
+	}
+	texasCity, ok := g.Lookup("Palestine", "US")
+	if !ok || texasCity.AdminCode != "TX" {
+		t.Fatalf("full cache must contain Palestine, Texas: %+v found=%v", texasCity, ok)
+	}
+	oldPalestine, ok := g.ByID("country:PS")
+	if !ok || !geo.ValidCoordinates(oldPalestine.Lat, oldPalestine.Lon) {
+		t.Fatalf("full cache must expose the valid Palestine country fallback for the repair test: %+v found=%v", oldPalestine, ok)
+	}
+	palestineRepair := g.RepairLocation(geo.StoredLocation{
+		PlaceID: oldPalestine.ID, Lat: float64(float32(oldPalestine.Lat)), Lon: float64(float32(oldPalestine.Lon)), Precision: geo.CountryResolution,
+	}, []geo.TextEvidence{{Title: "Palestine, Texas Residents Approve a New Plan"}})
+	if palestineRepair.Reason != "unsupported_match" || palestineRepair.Replacement == nil || palestineRepair.Replacement.ID != texasCity.ID {
+		t.Fatalf("qualified Texas evidence should replace the Palestine country fallback with the actual city: %+v; want %s", palestineRepair, texasCity.ID)
+	}
+	texasToCountry := g.RepairLocation(geo.StoredLocation{
+		PlaceID: texasCity.ID, Lat: float64(float32(texasCity.Lat)), Lon: float64(float32(texasCity.Lon)), Precision: geo.CityResolution,
+	}, []geo.TextEvidence{{Title: "Palestine Government Announces New Aid Plan"}})
+	if texasToCountry.Reason != "unsupported_match" || texasToCountry.Replacement == nil || texasToCountry.Replacement.ID != oldPalestine.ID || texasToCountry.Precision != geo.CountryResolution {
+		t.Fatalf("strong Palestinian-context evidence should replace the old Texas city with the PS country fallback: %+v", texasToCountry)
+	}
+
+	wrongWashington, ok := g.ByID("admin:US.WA")
+	if !ok || !geo.ValidCoordinates(wrongWashington.Lat, wrongWashington.Lon) {
+		t.Fatalf("full cache must expose Washington State ADM1 for the repair test: %+v found=%v", wrongWashington, ok)
+	}
+	dc, ok := g.Lookup("Washington", "US")
+	if !ok || dc.AdminCode != "DC" {
+		t.Fatalf("full cache must resolve Washington, D.C. as the US canonical city: %+v found=%v", dc, ok)
+	}
+	femaRepair := g.RepairLocation(geo.StoredLocation{
+		PlaceID: wrongWashington.ID, Lat: float64(float32(wrongWashington.Lat)), Lon: float64(float32(wrongWashington.Lon)), Precision: geo.RegionResolution,
+	}, []geo.TextEvidence{{Title: "FEMA opens a Washington, D.C. office"}})
+	if femaRepair.Reason != "unsupported_match" || femaRepair.Replacement == nil || femaRepair.Replacement.ID != dc.ID || femaRepair.Precision != geo.CityResolution {
+		t.Fatalf("strong DC evidence should replace the old Washington State point with the DC city: %+v; want %s", femaRepair, dc.ID)
+	}
+}
+
+func TestFullCacheHistoricalSingaporeAndGeorgePointsAreNotDeleted(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	cases := []struct {
+		name, id, title string
+	}{
+		{"Singapore city amid country talks", "1880252", "Singapore-US-China Talks Continue"},
+		{"George businesswomen", "1002145", "George Businesswomen Expand Their Export Network"},
+		{"George wholesaler", "1002145", "George Wholesaler Adds New Customers"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stored, ok := g.ByID(tc.id)
+			if !ok || !geo.ValidCoordinates(stored.Lat, stored.Lon) {
+				t.Fatalf("full cache must contain valid canonical row %s: %+v found=%v", tc.id, stored, ok)
+			}
+			decision := g.RepairLocation(geo.StoredLocation{
+				PlaceID: stored.ID, Lat: float64(float32(stored.Lat)), Lon: float64(float32(stored.Lon)), Precision: geo.PrecisionOf(stored),
+			}, []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "" && (decision.Replacement == nil || decision.Replacement.ID != stored.ID) {
+				t.Fatalf("valid historical canonical point must not be removed/replaced for ambiguous title %q (review is acceptable): %+v", tc.title, decision)
+			}
+		})
+	}
+
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	for _, title := range []string{
+		"George Russell Announces a New Season",         // person, not the South African city
+		"Lincoln Overpass Closes for Emergency Repairs", // a named structure, not the city
+	} {
+		t.Run("false_match_"+title, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{Id: "historical-name-" + title, Title: title})
+			if len(placed.Locations) != 0 {
+				t.Errorf("person/structure phrase must not plot as an unrelated canonical city: %q -> %+v", title, placed.Locations)
+			}
+		})
+	}
+}
+
+func TestFullCacheHistoricalCityUnderFeatureContextIsReviewOnly(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	for _, tc := range []struct {
+		name, id, title string
+	}{
+		{"Zhytomyr region", "686967", "Zhytomyr Region Officials Announce a New Plan"},
+		{"Mukono district", "228853", "Mukono District Officials Announce a New Plan"},
+		{"Mumbai park", "1275339", "Mumbai Park Project Receives Funding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stored, ok := g.ByID(tc.id)
+			if !ok || !geo.ValidCoordinates(stored.Lat, stored.Lon) {
+				t.Fatalf("full cache must contain valid canonical point %s: %+v found=%v", tc.id, stored, ok)
+			}
+			decision := g.RepairLocation(geo.StoredLocation{
+				PlaceID: stored.ID, Lat: float64(float32(stored.Lat)), Lon: float64(float32(stored.Lon)), Precision: geo.PrecisionOf(stored),
+			}, []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "" || decision.Replacement != nil || decision.ReviewReason == "" {
+				t.Fatalf("historical canonical point in ambiguous feature context should be preserved for explicit review, not destructively changed: title=%q decision=%+v", tc.title, decision)
 			}
 		})
 	}

@@ -67,18 +67,19 @@ type Country struct {
 // Gazetteer is an in-memory name index. It is safe for concurrent reads after
 // Load returns.
 type Gazetteer struct {
-	byName      map[string][]Place
-	byID        map[string]Place
-	aliases     map[string][]string
-	skip        map[string]struct{}
-	countries   map[string]Country
-	byCountry   map[string][]Place
-	names       []string
-	majors      []Place
-	countryList []Place
-	fingerprint string
-	loaded      bool
-	loadedNames int
+	byName           map[string][]Place
+	byID             map[string]Place
+	aliases          map[string][]string
+	skip             map[string]struct{}
+	countries        map[string]Country
+	byCountry        map[string][]Place
+	regionPopulation map[string]int64
+	names            []string
+	majors           []Place
+	countryList      []Place
+	fingerprint      string
+	loaded           bool
+	loadedNames      int
 }
 
 // Load downloads (once) and indexes the GeoNames files under dir. The context
@@ -191,6 +192,9 @@ func load(ctx context.Context, dir string, log *slog.Logger, allowDownload bool)
 		g.addAlias(c.Name, cp)
 		g.addAlias(code, cp)
 		g.addAlias(c.ISO3, cp)
+		if code == "PS" {
+			g.addAlias("Palestine", cp)
+		}
 		if code == "US" {
 			g.addAlias("U.S.", cp)
 			g.addAlias("U.S.A.", cp)
@@ -276,6 +280,13 @@ func (g *Gazetteer) Loaded() bool { return g != nil && g.loaded }
 func (g *Gazetteer) add(p Place) {
 	if g == nil || len(p.Normalized) < 3 || !ValidCoordinates(p.Lat, p.Lon) {
 		return
+	}
+	if g != nil && p.CountryCode != "" && p.AdminCode != "" && strings.HasPrefix(p.Feature, "PPL") {
+		if g.regionPopulation == nil {
+			g.regionPopulation = make(map[string]int64)
+		}
+		key := p.CountryCode + "." + p.AdminCode
+		g.regionPopulation[key] = max(g.regionPopulation[key], p.Population)
 	}
 	for _, existing := range g.byName[p.Normalized] {
 		if existing.ID == p.ID {
@@ -545,6 +556,11 @@ func (g *Gazetteer) Country(codeOrName string) (Country, bool) {
 		return c, true
 	}
 	want := normalize(codeOrName)
+	if want == "palestine" {
+		if c, ok := g.countries["PS"]; ok {
+			return c, true
+		}
+	}
 	for _, c := range g.countries {
 		if normalize(c.Name) == want {
 			return c, true
@@ -917,10 +933,18 @@ func ambiguousNames() map[string]struct{} {
 		"forest", "vale", "bride", "peel", "northwest", "northeast", "saga", "ogre",
 		"bar", "mon", "rota", "muscat", "cascade", "ascension", "grad", "bay",
 		"lac", "maritime", "male", "mascara", "oriental", "savannah",
+		"somali", "balkan", "harari", "afar", "falcon", "sud", "tabasco", "quiche",
+		"sunrise", "confederation", "rugby", "metro", "springs", "como", "natal", "sabha", "vitoria", "franca",
+		"police", "hit", "fountain", "safety", "health", "fight", "union", "prospect", "progress", "freedom", "reform", "peace", "justice",
 	}
 	out := make(map[string]struct{}, len(names))
 	for _, n := range names {
 		out[n] = struct{}{}
+	}
+	// Personal names use contextual/person-pattern guards rather than the
+	// common-word rejection rule, so valid historical city evidence survives.
+	for _, n := range strings.Fields("paul santiago george john james peter david jackson michael hamilton lincoln austin florence charlotte phoenix taylor chelsea") {
+		delete(out, n)
 	}
 
 	return out

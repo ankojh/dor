@@ -376,3 +376,96 @@ describe("worker/index.ts: teardown", () => {
     expect(instances).toHaveLength(1);
   });
 });
+
+describe("worker/index.ts: delta sequencing regressions", () => {
+  it("applies only the newest delta of [5, 4, 6] after snapshot(5): one ACK(6), none for duplicates", async () => {
+    await importWorker();
+    const ws = startAndOpen(); // Hello(0)
+    ws.receive(snapshotFrame(5)); // Ack(5)
+    expect(ws.sent).toHaveLength(2);
+
+    ws.receive(deltasFrame([5, 4, 6]));
+
+    // Exactly one new client message: the ACK for the only applied frame.
+    expect(ws.sent).toHaveLength(3);
+    const ackSeqs = ws.sent
+      .map((_, index) => decodeSent(ws, index))
+      .filter((message) => message.body.case === "ack")
+      .map((message) => Number((message.body as { value: { seq: bigint } }).value.seq));
+    expect(ackSeqs).toEqual([5, 6]);
+    expect(postedOfType("status").at(-1)?.lastSeq).toBe(6);
+  });
+
+  it("closes 4002 on a gap with no wire filters and reconnects with Hello(lastSeq=5)", async () => {
+    await importWorker();
+    const ws = startAndOpen();
+    ws.receive(snapshotFrame(5));
+
+    ws.receive(deltasFrame([8]));
+
+    // No filter can explain the missing 6 and 7, so the frames were lost.
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toBe(4002);
+    expect(ws.sent).toHaveLength(2); // no ACK for the rejected delta
+    expect(instances).toHaveLength(1);
+
+    // requestResync schedules an immediate reconnect, resuming from the
+    // contiguous seq rather than resetting to zero.
+    vi.advanceTimersByTime(1);
+    expect(instances).toHaveLength(2);
+    const replacement = instances[1]!;
+    replacement.open();
+    const hello = decodeSent(replacement, 0);
+    expect(hello.body.case).toBe("hello");
+    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(5n);
+  });
+
+  it("accepts a gap when a wire filter is active, because filtered rows create legitimate gaps", async () => {
+    await importWorker();
+    send({
+      type: "filters",
+      filters: {
+        categories: [1],
+        regions: [],
+        minSources: 0,
+        lang: [],
+        sources: [],
+        lat: 0,
+        lon: 0,
+        radiusKm: 0,
+      },
+    });
+    const ws = startAndOpen();
+    ws.receive(snapshotFrame(5));
+    const sentBefore = ws.sent.length;
+
+    ws.receive(deltasFrame([8]));
+
+    expect(ws.closed).toBe(false);
+    expect(instances).toHaveLength(1);
+    expect(ws.sent).toHaveLength(sentBefore + 1);
+    const ack = decodeSent(ws, ws.sent.length - 1);
+    expect(ack.body.case).toBe("ack");
+    expect((ack.body as { value: { seq: bigint } }).value.seq).toBe(8n);
+    expect(postedOfType("status").at(-1)?.lastSeq).toBe(8);
+  });
+
+  it("retires the socket on refresh (4001) and sends Hello(lastSeq=0) on the replacement", async () => {
+    await importWorker();
+    const first = startAndOpen();
+    first.receive(snapshotFrame(5));
+
+    send({ type: "refresh" });
+
+    expect(first.closed).toBe(true);
+    expect(first.closeCode).toBe(4001);
+    expect(instances).toHaveLength(2);
+    const replacement = instances[1]!;
+    expect(replacement.sent).toHaveLength(0); // nothing is sent before it opens
+
+    replacement.open();
+    const hello = decodeSent(replacement, 0);
+    expect(hello.body.case).toBe("hello");
+    expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
+  });
+});

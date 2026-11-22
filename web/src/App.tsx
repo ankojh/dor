@@ -3,6 +3,9 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import type { Category, Precision, Role, WireRow } from "./gen/dor/v1/dor_pb";
 import { afterShellPaint } from "./globe/load";
 import { createFocusHandler } from "./globe/focus-events";
+import { shouldIgnoreGlobeKeys, isTypingTarget } from "./keyboard";
+import { nextSelectionIndex, selectionKeyForStory, keepSelectionForStory } from "./globe/selection";
+import { TtlLruCache, LatestRequest } from "./text-cache";
 import { LruCache } from "./worker/lru";
 import type { StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
@@ -46,6 +49,9 @@ const EMPTY_GLOBE: GlobeState = {
   quality: 0,
   tileFailed: false,
 };
+
+/** Briefs/details appear after the Editor writes them; retry soon, not never. */
+const BRIEF_RETRY_MS = 5_000;
 
 type WireItem = {
   row: WireRow;
@@ -355,14 +361,19 @@ export function App() {
   const pendingWire: WireItem[] = [];
   const alertInbox = new AlertInbox();
   const seen = new Set<string>();
-  const briefCache = new LruCache<string, StoryText>();
-  const detailsCache = new LruCache<string, StoryDetails>();
-  const whyCache = new LruCache<string, LinkWhy>();
+  const briefCache = new TtlLruCache<string, StoryText>();
+  const detailsCache = new TtlLruCache<string, StoryDetails>();
+  const whyCache = new TtlLruCache<string, LinkWhy>();
   const prefetched = new LruCache<string, true>();
+  const briefRequests = new LatestRequest();
+  const whyRequests = new LatestRequest();
   const initialHash = new URLSearchParams(location.hash.slice(1));
   const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+  let briefRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastHashHref = "";
+  let requestedSelection: string | null = null;
   let touchStartY = 0;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
@@ -730,11 +741,12 @@ export function App() {
     if (threadOnly()) params.set("f", "thread");
     else if (globe().secondDegree) params.set("f", "second");
     const next = params.toString();
-    history.replaceState(
-      null,
-      "",
-      `${location.pathname}${location.search}${next ? `#${next}` : ""}`,
-    );
+    const href = `${location.pathname}${location.search}${next ? `#${next}` : ""}`;
+    // moveend fires for real gestures and flights; only rewrite the URL when
+    // the shareable state actually changed.
+    if (href === lastHashHref) return;
+    lastHashHref = href;
+    history.replaceState(null, "", href);
   };
 
   const scheduleHash = (): void => {
@@ -745,13 +757,32 @@ export function App() {
     }, 180);
   };
 
+  const detailsMiss = new TtlLruCache<string, true>();
+  const briefInflight = new Set<string>();
+  const detailsInflight = new Set<string>();
+
+  const scheduleBriefRetry = (storyId: string): void => {
+    if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
+    briefRetryTimer = setTimeout(() => {
+      briefRetryTimer = null;
+      if (focus()?.storyId === storyId) void loadStoryText(storyId);
+    }, BRIEF_RETRY_MS);
+  };
+
   const loadStoryText = async (storyId: string): Promise<void> => {
     const cached = briefCache.get(storyId);
     if (cached) {
-      setStoryText(cached);
+      if (focus()?.storyId === storyId) setStoryText(cached);
+      // A missing brief is cached briefly so a later Editor result is picked
+      // up by a retry instead of being remembered as permanently unavailable.
+      if (!cached.available) scheduleBriefRetry(storyId);
       return;
     }
-    setStoryText({ loading: true, available: false });
+    if (briefInflight.has(storyId)) return;
+    briefInflight.add(storyId);
+    const token = briefRequests.next();
+    if (focus()?.storyId === storyId) setStoryText({ loading: true, available: false });
+    let next: StoryText;
     try {
       const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
         credentials: "include",
@@ -761,44 +792,55 @@ export function App() {
         brief?: string;
         error?: string;
       };
-      const next: StoryText = {
+      next = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.brief),
         ...(payload.brief ? { brief: payload.brief } : {}),
         ...(payload.error ? { error: payload.error } : {}),
       };
-      briefCache.set(storyId, next);
-      if (focus()?.storyId === storyId) setStoryText(next);
     } catch (error) {
-      const next: StoryText = {
+      next = {
         loading: false,
         available: false,
         error: String(error),
       };
-      briefCache.set(storyId, next);
-      if (focus()?.storyId === storyId) setStoryText(next);
+    } finally {
+      briefInflight.delete(storyId);
     }
+    if (next.available) briefCache.set(storyId, next);
+    else briefCache.set(storyId, next, BRIEF_RETRY_MS);
+    if (briefRequests.isCurrent(token) && focus()?.storyId === storyId) setStoryText(next);
+    if (!next.available) scheduleBriefRetry(storyId);
   };
 
   const loadStoryDetails = async (storyId: string): Promise<void> => {
     const cached = detailsCache.get(storyId);
     if (cached) {
-      setStoryDetails(cached);
+      if (focus()?.storyId === storyId) setStoryDetails(cached);
       return;
     }
+    if (detailsMiss.get(storyId) || detailsInflight.has(storyId)) {
+      if (focus()?.storyId === storyId) setStoryDetails(null);
+      return;
+    }
+    detailsInflight.add(storyId);
     try {
       const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}`, {
         credentials: "include",
       });
       if (!response.ok) {
-        setStoryDetails(null);
+        detailsMiss.set(storyId, true, BRIEF_RETRY_MS);
+        if (focus()?.storyId === storyId) setStoryDetails(null);
         return;
       }
       const payload = (await response.json()) as StoryDetails;
       detailsCache.set(storyId, payload);
       if (focus()?.storyId === storyId) setStoryDetails(payload);
     } catch {
-      setStoryDetails(null);
+      detailsMiss.set(storyId, true, BRIEF_RETRY_MS);
+      if (focus()?.storyId === storyId) setStoryDetails(null);
+    } finally {
+      detailsInflight.delete(storyId);
     }
   };
 
@@ -1004,12 +1046,18 @@ export function App() {
 
   const loadLinkWhy = async (link: LinkInfo): Promise<void> => {
     const key = `${link.aId}\u0000${link.bId}`;
+    const isSelected = (): boolean => {
+      const current = selectedLink();
+      return current !== null && current.aId === link.aId && current.bId === link.bId;
+    };
     const cached = whyCache.get(key);
     if (cached) {
-      setLinkWhy(cached);
+      if (isSelected()) setLinkWhy(cached);
       return;
     }
-    setLinkWhy({ loading: true, available: false });
+    const token = whyRequests.next();
+    if (isSelected()) setLinkWhy({ loading: true, available: false });
+    let next: LinkWhy;
     try {
       const response = await fetch(
         `${API_BASE}/api/text?link_a=${encodeURIComponent(link.aId)}&link_b=${encodeURIComponent(link.bId)}`,
@@ -1020,19 +1068,20 @@ export function App() {
         why?: string;
         error?: string;
       };
-      const next: LinkWhy = {
+      next = {
         loading: false,
         available: Boolean(payload.available) && Boolean(payload.why),
         ...(payload.why ? { why: payload.why } : {}),
         ...(payload.error ? { error: payload.error } : {}),
       };
-      whyCache.set(key, next);
-      setLinkWhy(next);
     } catch (error) {
-      const next: LinkWhy = { loading: false, available: false, error: String(error) };
-      whyCache.set(key, next);
-      setLinkWhy(next);
+      next = { loading: false, available: false, error: String(error) };
     }
+    if (next.available) whyCache.set(key, next);
+    else whyCache.set(key, next, BRIEF_RETRY_MS);
+    // A late answer for a closed or replaced popover must not overwrite the
+    // current one (the review's "why" race).
+    if (whyRequests.isCurrent(token) && isSelected()) setLinkWhy(next);
   };
 
   const openLink = (link: LinkInfo): void => {
@@ -1079,7 +1128,8 @@ export function App() {
         pendingWire.length = 0;
         setWireRows([]);
         setPendingNew(0);
-        setSelectedArticle(null);
+        // Keep the selected row: a reconnect snapshot preserves the focused
+        // story, so the user's row must not jump back to the newest one.
         setLastSeq(message.seq);
         liveGlobe?.setInit(message);
         if (message.recentWire.length) enqueueWire(message.recentWire);
@@ -1119,6 +1169,24 @@ export function App() {
             worker: workerBounds,
           };
         },
+        get selection() {
+          const key = selectedArticle();
+          const item = key ? wireRows().find((row) => row.key === key) : undefined;
+          return {
+            key,
+            storyId: item?.row.storyId ?? null,
+            title: item?.row.title ?? null,
+            focusedStoryId: focus()?.storyId ?? null,
+            focusedTitle: focus()?.story.title ?? null,
+            connection: connection(),
+            lastSeq: lastSeq(),
+          };
+        },
+        get rows() {
+          return articleRows()
+            .slice(0, 200)
+            .map((row) => ({ key: row.key, storyId: row.storyId, displayIndex: row.displayIndex }));
+        },
       };
     }
     void (async () => {
@@ -1136,8 +1204,17 @@ export function App() {
         onFocus: createFocusHandler<FocusDetails>(setFocus, (details) => {
           if (details) {
             pendingInitialStory = null;
-            const matching = wireRows().find((item) => item.row.storyId === details.storyId);
-            setSelectedArticle(matching?.key ?? null);
+            const rows = wireRows().map((item) => ({
+              key: item.key,
+              storyId: item.row.storyId,
+            }));
+            // Only a story change may move the selected row; a metadata
+            // refresh of the same story keeps the user's row.
+            const nextSelection =
+              keepSelectionForStory(selectedArticle(), rows, details.storyId) ??
+              selectionKeyForStory(rows, details.storyId, requestedSelection);
+            requestedSelection = null;
+            setSelectedArticle(nextSelection);
             setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
             setStoryDetails(detailsCache.get(details.storyId) ?? null);
             void loadStoryText(details.storyId);
@@ -1145,6 +1222,7 @@ export function App() {
             worker?.postMessage({ type: "focus", storyId: details.storyId });
             syncHash(details.storyId);
           } else {
+            requestedSelection = null;
             setSelectedArticle(null);
             setThreadOnly(false);
             setSelectedLink(null);
@@ -1157,6 +1235,11 @@ export function App() {
         onView: (nextView) => {
           setView(nextView);
           scheduleHash();
+        },
+        onContextRestored: () => {
+          // Custom GPU state cannot survive a context loss; ask the worker for
+          // one authoritative snapshot (no camera move, focus is preserved).
+          worker?.postMessage({ type: "refresh" });
         },
       });
       liveGlobe.setStrengthFloor(layerFloor());
@@ -1215,21 +1298,50 @@ export function App() {
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
 
     const onKey = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null;
-      const typing =
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable === true;
+      // ⌘K works everywhere, including from an input.
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         searchInput?.focus();
         return;
       }
       if (event.key === "Escape") {
+        // Never consume Esc while the user is typing.
+        if (isTypingTarget(event.target)) return;
+        // Esc closes the topmost open panel. Consuming the event also keeps
+        // the runtime Esc handler from clearing globe focus behind it.
+        if (alertsOpen()) {
+          event.preventDefault();
+          setAlertsOpen(false);
+          return;
+        }
+        if (selectedLink()) {
+          event.preventDefault();
+          setSelectedLink(null);
+          return;
+        }
+        if (filterPanelOpen()) {
+          event.preventDefault();
+          setFilterPanelOpen(false);
+          return;
+        }
+        if (layersOpen()) {
+          event.preventDefault();
+          setLayersOpen(false);
+          return;
+        }
+        if (searchOpen()) {
+          event.preventDefault();
+          setSearchOpen(false);
+          return;
+        }
+      }
+      // Typing, dialogs and open panels own the keyboard: q/Esc/arrows must
+      // not change globe focus or walk the wire behind them.
+      if (shouldIgnoreGlobeKeys(event, document)) return;
+      if (event.key === "Escape") {
         setSearchOpen(false);
         setSelectedLink(null);
       }
-      if (typing) return;
       if (event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
         setPerfOverlay((value) => !value);
@@ -1253,33 +1365,60 @@ export function App() {
       if (clockTimer !== null) clearInterval(clockTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
+      if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
+      if (hashTimer !== null) clearTimeout(hashTimer);
     });
   });
 
+  const articleRows = (): Array<{ key: string; storyId: string; displayIndex: number }> =>
+    displayRows().flatMap((row, displayIndex) =>
+      row.kind === "article" ? [{ key: row.key, storyId: row.item.row.storyId, displayIndex }] : [],
+    );
+
+  const focusStory = (storyId: string): void => {
+    // Adjacent rows of the same story only move the selection; they must not
+    // refocus the globe, refly the camera, or reload the panel.
+    if (!storyId || focus()?.storyId === storyId) return;
+    liveGlobe?.focusStoryId(storyId);
+  };
+
+  // Fill a missing selection for the focused story once rows exist (deep link
+  // or a reconnect that no longer contains the old row). A valid selected row
+  // is never replaced here.
+  createEffect(() => {
+    const details = focus();
+    if (!details) return;
+    const rows = wireRows().map((item) => ({ key: item.key, storyId: item.row.storyId }));
+    const current = selectedArticle();
+    if (current && rows.some((row) => row.key === current)) return;
+    const key = selectionKeyForStory(rows, details.storyId);
+    if (key) setSelectedArticle(key);
+  });
+
   const moveSelection = (delta: number): void => {
-    const rows = displayRows()
-      .filter(
-        (row): row is { kind: "article"; key: string; item: WireItem } => row.kind === "article",
-      )
-      .map((row) => row.item);
-    if (rows.length === 0) return;
-    const current = rows.findIndex((item) => item.key === selectedArticle());
-    const next = Math.max(0, Math.min(rows.length - 1, current < 0 ? 0 : current + delta));
-    const item = rows[next];
-    if (!item) return;
+    const rows = articleRows();
+    const next = nextSelectionIndex(rows, selectedArticle(), delta);
+    if (next === null) return;
+    const item = rows[next]!;
+    requestedSelection = item.key;
     setSelectedArticle(item.key);
-    if (item.row.storyId) liveGlobe?.focusStoryId(item.row.storyId);
+    // Keyboard walk keeps the selected row centred: estimated row heights are
+    // unreliable for wrapped headlines, and centring is always fully visible.
+    virtualizer.scrollToIndex(item.displayIndex, { align: "center" });
+    focusStory(item.storyId);
   };
 
   const selectArticle = (item: WireItem): void => {
+    requestedSelection = item.key;
     setSelectedArticle(item.key);
-    if (item.row.storyId) liveGlobe?.focusStoryId(item.row.storyId);
+    focusStory(item.row.storyId);
   };
 
   const clearFocus = (): void => {
     liveGlobe?.clearFocus();
     setFocus(null);
     setSelectedArticle(null);
+    setSelectedLink(null);
   };
 
   const focusTopStory = (story: StorySummary): void => {
@@ -1781,6 +1920,11 @@ export function App() {
                   const display = () => displayRows()[virtualRow.index];
                   return (
                     <div
+                      data-index={virtualRow.index}
+                      ref={(element) => {
+                        element.setAttribute("data-index", String(virtualRow.index));
+                        virtualizer.measureElement(element);
+                      }}
                       class={`wr ${
                         display()?.kind === "article" &&
                         selectedArticle() ===

@@ -565,7 +565,7 @@ out float vId;
 
 void main() {
   vec4 story = texelFetch(uStoryTex, dorTexel(aIndex, uStoryTexWidth), 0);
-  float radius = max(3.0, 2.0 + 3.4 * story.x);
+  float radius = max(4.0, (DOR_DOT_BASE + DOR_DOT_SCALE * story.x) * 1.28);
   if (story.x <= 0.001) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;
@@ -595,6 +595,90 @@ out vec4 outColor;
 
 void main() {
   if (length(vLocal) > vRadius) discard;
+  float id = vId;
+  float r = mod(id, 256.0);
+  float g = mod(floor(id / 256.0), 256.0);
+  float b = floor(id / 65536.0);
+  outColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+}
+`;
+
+/**
+ * Arc id pass. It mirrors the visible arc pass (same projection, width, focus
+ * and floor rules) so focused links below the ambient floor stay clickable and
+ * links hidden by the floor, quality level or street-zoom attenuation are not.
+ */
+export const PICK_ARC_VERT = /* glsl */ `${COMMON_HEADER}
+layout(location = 0) in vec2 aStartHi;
+layout(location = 1) in vec2 aStartLo;
+layout(location = 2) in vec2 aEndHi;
+layout(location = 3) in vec2 aEndLo;
+layout(location = 4) in float aStartElev;
+layout(location = 5) in float aEndElev;
+layout(location = 6) in float aT0;
+layout(location = 7) in float aT1;
+layout(location = 8) in float aLink;
+layout(location = 9) in float aType;
+layout(location = 10) in vec2 aCorner;
+layout(location = 11) in float aArcLength;
+
+uniform sampler2D uArcFocusTex;
+
+out float vSidePx;
+out float vId;
+
+void main() {
+  vec4 focus = texelFetch(uArcFocusTex, dorTexel(aLink, uLinkTexWidth), 0);
+  float state = focus.x;
+  float strength = abs(focus.w);
+  float second = step(2.5, state);
+  float alpha = (DOR_ARC_OPACITY_MIN + DOR_ARC_OPACITY_SPAN * strength) *
+    mix(1.0, DOR_ARC_SECOND_ALPHA, second);
+  if (strength < DOR_MIN_STRENGTH) alpha = 0.0;
+  if (uHasFocus < 0.5 && strength < uFloor) alpha = 0.0;
+  if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
+  if (uZoom > 11.5) alpha *= 1.0 - smoothstep(15000.0, 40000.0, aArcLength);
+  if (uZoom > 13.0) alpha *= smoothstep(0.52, 0.68, strength);
+  if (alpha < 0.004) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
+    return;
+  }
+
+  vec4 c0 = dorProject(aStartHi, aStartLo, aStartElev);
+  vec4 c1 = dorProject(aEndHi, aEndLo, aEndElev);
+  if (dorClipped(c0) || dorClipped(c1)) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
+    return;
+  }
+
+  vec2 scr0 = (c0.xy / c0.w) * 0.5 * uViewport;
+  vec2 scr1 = (c1.xy / c1.w) * 0.5 * uViewport;
+  vec2 dir = scr1 - scr0;
+  float len = length(dir);
+  vec2 normal = len > 0.001 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
+  float width = (DOR_ARC_WIDTH_MIN + DOR_ARC_WIDTH_SPAN * strength) *
+    mix(1.0, DOR_ARC_SECOND_WIDTH, second);
+  // A click should not need pixel-perfect aim: widen the hit corridor by 3 px
+  // on each side, like a touch target.
+  float pickWidth = max(5.0, width + 6.0);
+  vec2 base = mix(scr0, scr1, aCorner.x);
+  vec2 pos = base + normal * aCorner.y * pickWidth * 0.5;
+  vec4 clip = mix(c0, c1, aCorner.x);
+  gl_Position = vec4(pos / (0.5 * uViewport) * clip.w, clip.z, clip.w);
+  vSidePx = aCorner.y * pickWidth * 0.5;
+  vId = aLink + 1.0;
+}
+`;
+
+export const PICK_ARC_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+
+in float vSidePx;
+in float vId;
+
+out vec4 outColor;
+
+void main() {
   float id = vId;
   float r = mod(id, 256.0);
   float g = mod(floor(id / 256.0), 256.0);

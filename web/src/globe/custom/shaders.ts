@@ -1,3 +1,4 @@
+import { ARC_VISIBILITY_GLSL } from "../arc-hit";
 /**
  * GLSL for the custom WebGL layer.
  *
@@ -131,16 +132,7 @@ float dorFocusOpacity(float state) {
   return mix(1.0, DOR_AMBIENT_ALPHA, level);
 }
 
-/** Shared by the visible and ID passes so click targets match what is drawn. */
-float dorArcZoomVisibility(float arcLength) {
-  float arcKm = arcLength * 0.001;
-  float maxArcKm = uZoom > 13.0 ? 2.0 : uZoom > 10.0 ? 25.0 : uZoom > 8.0 ? 250.0 : 14000.0;
-  return 1.0 - smoothstep(maxArcKm * 0.8, maxArcKm, arcKm);
-}
-
-float dorArcStreetVisibility(float strength) {
-  return uZoom > 13.0 ? smoothstep(0.52, 0.68, strength) : 1.0;
-}
+${ARC_VISIBILITY_GLSL}
 `;
 
 export const DOT_VERT = /* glsl */ `${COMMON_HEADER}
@@ -291,22 +283,11 @@ void main() {
   vec4 focus = texelFetch(uArcFocusTex, dorTexel(aLink, uLinkTexWidth), 0);
   float direction = texelFetch(uArcDirTex, dorTexel(aLink, uLinkTexWidth), 0).x;
   float state = focus.x;
-  float prev = focus.y;
-  float at = focus.z;
   float strength = abs(focus.w);
-  float fade = clamp((uTime - at) / DOR_FOCUS_FADE, 0.0, 1.0);
-  float alpha = mix(dorFocusOpacity(prev), dorFocusOpacity(state), fade) * (focus.w < 0.0 ? 0.12 : 1.0);
-
+  float alpha = dorArcVisibility(aArcLength, aType, focus);
   float second = step(2.5, state);
-  float ambient = 1.0 - step(0.5, state);
   float width = (DOR_ARC_WIDTH_MIN + DOR_ARC_WIDTH_SPAN * strength) *
     mix(1.0, DOR_ARC_SECOND_WIDTH, second);
-  alpha *= (DOR_ARC_OPACITY_MIN + DOR_ARC_OPACITY_SPAN * strength) *
-    mix(1.0, DOR_ARC_SECOND_ALPHA, second);
-  // Board A2: off-thread arcs stay as a very faint context web.
-  if (strength < DOR_MIN_STRENGTH) alpha = 0.0;
-  if (uHasFocus < 0.5 && strength < uFloor) alpha = 0.0;
-  if (ambient > 0.5 && uHasFocus > 0.5) alpha *= DOR_OFF_THREAD_ALPHA;
 
   vec4 c0 = dorProject(aStartHi, aStartLo, aStartElev);
   vec4 c1 = dorProject(aEndHi, aEndLo, aEndElev);
@@ -321,8 +302,6 @@ void main() {
   float len = length(dir);
   // At street zoom a link between cities would be a screen-long line; keep
   // only links that are local to the viewport, tapering with zoom.
-  alpha *= dorArcZoomVisibility(aArcLength);
-  alpha *= dorArcStreetVisibility(strength);
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;
@@ -343,7 +322,6 @@ void main() {
   vDirection = direction;
   vPulse = (1.0 - vDashed) * (1.0 - second) * step(DOR_PULSE_1, strength) *
     (1.0 - (1.0 - step(0.5, state)) * uHasFocus) * (1.0 - uDropPulses);
-  if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
   vSeed = fract(sin(aLink * 3.71) * 43758.5453);
   vColor = uLinkColors[int(aType)];
 }
@@ -653,13 +631,7 @@ void main() {
   float state = focus.x;
   float strength = abs(focus.w);
   float second = step(2.5, state);
-  float alpha = (DOR_ARC_OPACITY_MIN + DOR_ARC_OPACITY_SPAN * strength) *
-    mix(1.0, DOR_ARC_SECOND_ALPHA, second);
-  if (strength < DOR_MIN_STRENGTH) alpha = 0.0;
-  if (uHasFocus < 0.5 && strength < uFloor) alpha = 0.0;
-  if (uDropThematic > 0.5 && aType > 1.5) alpha = 0.0;
-  alpha *= dorArcZoomVisibility(aArcLength);
-  alpha *= dorArcStreetVisibility(strength);
+  float alpha = dorArcVisibility(aArcLength, aType, focus);
   if (alpha < 0.004) {
     gl_Position = vec4(2.0, 2.0, 2.0, 0.0);
     return;

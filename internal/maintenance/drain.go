@@ -223,6 +223,18 @@ func quiesceReasons(report *DrainReport) []string {
 				reasons = append(reasons, "expected consumer "+id+" is missing")
 			}
 		}
+		expected := map[string]bool{}
+		for _, id := range report.ExpectedConsumers {
+			expected[id] = true
+		}
+		for _, c := range report.Consumers {
+			if c.AckPolicy == "none" {
+				continue
+			}
+			if id := c.Stream + "/" + c.Name; !expected[id] {
+				reasons = append(reasons, "unexpected durable consumer "+id+" is not in the inventory")
+			}
+		}
 	}
 	if len(report.ExpectedProducers) == 0 {
 		reasons = append(reasons, "expected producer inventory is required")

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ankojh/dor/config"
@@ -1016,6 +1017,36 @@ func TestFullCachePalestineAndWashingtonRepairStrongConflicts(t *testing.T) {
 	}
 }
 
+func TestFullCacheRepairUsesAcceptedLiteralSpanDespiteUnrelatedCountries(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	for _, tc := range []struct {
+		name, oldID, title, wantID string
+		precision                  dorv1.Precision
+	}{
+		{"Armenia Colombia vote resolves to country", "", "Armenia and France Sign Accord", "country:AM", dorv1.Precision_PRECISION_COUNTRY},
+		{"Taiwan province vote resolves to country", "admin:TW.04", "Taiwan Says China Threatens Regional Stability", "country:TW", dorv1.Precision_PRECISION_COUNTRY},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := geo.Place{}
+			var ok bool
+			if tc.oldID != "" {
+				old, ok = g.ByID(tc.oldID)
+			} else {
+				old, ok = g.Lookup("Armenia", "CO")
+			}
+			if !ok || !geo.ValidCoordinates(old.Lat, old.Lon) {
+				t.Fatalf("full cache must contain a valid old row for repair: %+v found=%v", old, ok)
+			}
+			decision := g.RepairLocation(geo.StoredLocation{
+				PlaceID: old.ID, Lat: float64(float32(old.Lat)), Lon: float64(float32(old.Lon)), Precision: geo.PrecisionOf(old),
+			}, []geo.TextEvidence{{Title: tc.title}})
+			if decision.Reason != "unsupported_match" || decision.Replacement == nil || decision.Replacement.ID != tc.wantID || decision.Precision != geo.CountryResolution {
+				t.Fatalf("accepted literal country span should replace the stale row despite unrelated country candidates: old=%s title=%q decision=%+v; want %s at %s", old.ID, tc.title, decision, tc.wantID, tc.precision)
+			}
+		})
+	}
+}
+
 func TestFullCacheHistoricalSingaporeAndGeorgePointsAreNotDeleted(t *testing.T) {
 	g := loadFullCacheForPlotTests(t)
 	cases := []struct {
@@ -1078,6 +1109,25 @@ func TestFullCacheHistoricalCityUnderFeatureContextIsReviewOnly(t *testing.T) {
 	}
 }
 
+func TestFullCacheHistoricalKerchBridgeTitleIsReviewOnly(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	kerch, ok := g.ByID("706524")
+	if !ok || !geo.ValidCoordinates(kerch.Lat, kerch.Lon) {
+		t.Fatalf("full cache must contain canonical Kerch: %+v found=%v", kerch, ok)
+	}
+	decision := g.RepairLocation(geo.StoredLocation{
+		PlaceID: kerch.ID, Lat: float64(float32(kerch.Lat)), Lon: float64(float32(kerch.Lon)), Precision: geo.PrecisionOf(kerch),
+	}, []geo.TextEvidence{{Title: "Kerch Bridge Reopens After Repairs"}})
+	if decision.Reason != "" || decision.Replacement != nil || decision.ReviewReason == "" {
+		t.Fatalf("canonical Kerch history should be retained for review without inferring a bridge location: %+v", decision)
+	}
+}
+
+var fullCachePlotGazetteers = struct {
+	sync.Mutex
+	byDir map[string]*geo.Gazetteer
+}{byDir: make(map[string]*geo.Gazetteer)}
+
 func loadFullCacheForPlotTests(t *testing.T) *geo.Gazetteer {
 	t.Helper()
 	dir := os.Getenv("DOR_TEST_GEONAMES_DIR")
@@ -1089,10 +1139,20 @@ func loadFullCacheForPlotTests(t *testing.T) *geo.Gazetteer {
 			t.Fatalf("full cached GeoNames dataset is incomplete (%s): %v", file, err)
 		}
 	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("resolve full cached GeoNames directory: %v", err)
+	}
+	fullCachePlotGazetteers.Lock()
+	defer fullCachePlotGazetteers.Unlock()
+	if g := fullCachePlotGazetteers.byDir[dir]; g != nil {
+		return g
+	}
 	g, err := geo.LoadExisting(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("load full cached GeoNames: %v", err)
 	}
+	fullCachePlotGazetteers.byDir[dir] = g
 	return g
 }
 

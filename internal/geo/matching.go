@@ -171,7 +171,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 0
 	}
 	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
-		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && strings.Contains(" region province district county ", " "+words[end].norm+" ") || words[end].norm == "park" && p.Population >= 50000)) {
+		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && strings.Contains(" region province district county ", " "+words[end].norm+" ") || words[end].norm == "park" && p.Population >= 50000 || words[end].norm == "bridge" && g.majorPlaceSupported(p) && !givenNames[phrase] && !familyNames[phrase])) {
 		// A populated-place coordinate does not establish the position of a
 		// separately named river/valley, or an administrative jurisdiction.
 		return 0

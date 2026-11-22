@@ -39,6 +39,19 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 	}
 	sort.Slice(admitted, func(i, j int) bool { return betterPlace(admitted[i], admitted[j]) })
 	best, _ := DeterministicPrimary(admitted)
+	if known {
+		var sameSpan []Place
+		for _, candidate := range admitted {
+			if strings.Contains(" "+candidate.Normalized+" ", " "+normalize(p.Name)+" ") {
+				sameSpan = append(sameSpan, candidate)
+			}
+		}
+		// A row's accepted interpretation is independent of choosing a new
+		// event primary among unrelated countries/places in the same story.
+		if literal, ok := DeterministicPrimary(sameSpan); ok {
+			best = literal
+		}
+	}
 	_, supported := byID[loc.PlaceID]
 	valid := ValidCoordinates(loc.Lat, loc.Lon)
 	reviewReason := ""

@@ -100,6 +100,11 @@ function decodeSent(ws: MockWebSocket, index: number): ClientMessage {
   return fromBinary(ClientMessageSchema, ws.sent[index]!);
 }
 
+/** The last message a socket sent; Hello is no longer always first. */
+function lastHello(ws: MockWebSocket): ClientMessage {
+  return decodeSent(ws, ws.sent.length - 1);
+}
+
 function serverMessage(body: ServerMessage["body"]): Uint8Array {
   const message = create(ServerMessageSchema, { body });
   return toBinary(ServerMessageSchema, message);
@@ -380,14 +385,14 @@ describe("worker/index.ts: teardown", () => {
 describe("worker/index.ts: delta sequencing regressions", () => {
   it("applies only the newest delta of [5, 4, 6] after snapshot(5): one ACK(6), none for duplicates", async () => {
     await importWorker();
-    const ws = startAndOpen(); // Hello(0)
+    const ws = startAndOpen(); // SetPrompts + Hello(0)
     ws.receive(snapshotFrame(5)); // Ack(5)
-    expect(ws.sent).toHaveLength(2);
+    expect(ws.sent).toHaveLength(3);
 
     ws.receive(deltasFrame([5, 4, 6]));
 
     // Exactly one new client message: the ACK for the only applied frame.
-    expect(ws.sent).toHaveLength(3);
+    expect(ws.sent).toHaveLength(4);
     const ackSeqs = ws.sent
       .map((_, index) => decodeSent(ws, index))
       .filter((message) => message.body.case === "ack")
@@ -406,7 +411,7 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     // No filter can explain the missing 6 and 7, so the frames were lost.
     expect(ws.closed).toBe(true);
     expect(ws.closeCode).toBe(4002);
-    expect(ws.sent).toHaveLength(2); // no ACK for the rejected delta
+    expect(ws.sent).toHaveLength(3); // prompts + Hello + snapshot Ack, no ACK for the rejected delta
     expect(instances).toHaveLength(1);
 
     // requestResync schedules an immediate reconnect, resuming from the
@@ -415,7 +420,7 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     expect(instances).toHaveLength(2);
     const replacement = instances[1]!;
     replacement.open();
-    const hello = decodeSent(replacement, 0);
+    const hello = lastHello(replacement);
     expect(hello.body.case).toBe("hello");
     expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(5n);
   });
@@ -464,7 +469,7 @@ describe("worker/index.ts: delta sequencing regressions", () => {
     expect(replacement.sent).toHaveLength(0); // nothing is sent before it opens
 
     replacement.open();
-    const hello = decodeSent(replacement, 0);
+    const hello = lastHello(replacement);
     expect(hello.body.case).toBe("hello");
     expect((hello.body as { value: { lastSeq: bigint } }).value.lastSeq).toBe(0n);
   });

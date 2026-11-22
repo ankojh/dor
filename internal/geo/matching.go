@@ -199,7 +199,7 @@ func (g *Gazetteer) regionDominates(region, other Place) bool {
 // population. Proper-name compounds (Buffalo Bills, Orlando Bloom), acronyms
 // in mixed-case prose (NEMA), a longer unknown name's connector (Agusan del
 // Sur) and common-word/proper-name heads do not become city dots.
-func capitalLetterOnlyReject(words []token, start, count int, p Place) bool {
+func capitalLetterOnlyReject(words []token, start, count int, p Place, population int64) bool {
 	if count != 1 {
 		return false
 	}
@@ -209,7 +209,7 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place) bool {
 	}
 	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") {
 		previous := words[start-1]
-		if strings.Contains(" del de da das do dos van von der den of the el la los las ", " "+previous.norm+" ") {
+		if population < 200000 && strings.Contains(" del de da das do dos van von der den ", " "+previous.norm+" ") {
 			return true
 		}
 		if previous.norm == "s" && strings.ContainsAny(previous.sep, "'’") {
@@ -220,11 +220,30 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place) bool {
 	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") {
 		return false
 	}
-	next := words[end].norm
-	if next == normalize(p.Country) || next == normalize(p.Admin) || adminTypeNoun(next) || jurisdictionNoun(next) {
+	next := words[end]
+	if !capitalized(next.raw) {
+		// A lowercase continuation is ordinary prose ("Gaza doctor", "Durban
+		// fire chief"); common-word/name ambiguity is handled by the lexicons.
 		return false
 	}
-	return !(actorHead(next) || geographicHeadWord(next) || civicHead(next))
+	if next.norm == normalize(p.Country) || next.norm == normalize(p.Admin) || adminTypeNoun(next.norm) ||
+		jurisdictionNoun(next.norm) || actorHead(next.norm) || geographicHeadWord(next.norm) || civicHead(next.norm) ||
+		allCapsAcronym(next.raw) {
+		return false
+	}
+	return true
+}
+
+func allCapsAcronym(raw string) bool {
+	if len(raw) < 2 || len(raw) > 5 || raw != strings.ToUpper(raw) {
+		return false
+	}
+	for _, r := range raw {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func properCompoundHead(words []token, start, count int, p Place) bool {
@@ -277,7 +296,7 @@ func mixedCaseText(words []token) bool {
 }
 
 func civicHead(word string) bool {
-	return strings.Contains(" health ministry department agency airport traffic weather temperature climate hospital hospitals school schools road roads metro transit election elections voters candidates court courts high ", " "+word+" ")
+	return strings.Contains(" health ministry department agency airport traffic weather temperature climate hospital hospitals school schools road roads metro transit election elections voters candidates court courts high corporation international national global world ", " "+word+" ")
 }
 
 // Qualifiers must be outside the matched name; a city must never receive a
@@ -489,7 +508,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 40
 	}
 	if major && p.Feature != "ADM1" {
-		if !historical && !textQualified && !dateline && !locative && p.Feature != "PPLC" && p.Feature != "PPLG" && capitalLetterOnlyReject(words, start, count, p) {
+		if !historical && !textQualified && !dateline && !locative && p.Feature != "PPLC" && p.Feature != "PPLG" && capitalLetterOnlyReject(words, start, count, p, g.majorPopulation(p)) {
 			return 0
 		}
 		return 33
@@ -532,7 +551,7 @@ func personUse(words []token, start, count int) bool {
 	return count == 1 && givenNames[words[start].norm] && !geographicHead(words, start, count) && !actorHead(words[end].norm)
 }
 func actorHead(word string) bool {
-	return strings.Contains(" businesswomen wholesaler government parliament economy opposition president minister officials forces troops army police military authorities leaders delegation elections election court courts policy announces plans says warns agrees rejects attacks strikes opens sends reports demands calls seeks faces approves expands allows bans launches backs talks votes will has is are can may reopens rolls extends tightens hosts closes debates adopts receives gets makes sees proposes unveils residents population council civic road session schools businesses hospital health and but or was had ", " "+word+" ")
+	return strings.Contains(" flags begins starts businesswomen wholesaler government parliament economy opposition president minister officials forces troops army police military authorities leaders delegation elections election court courts policy announces plans says warns agrees rejects attacks strikes opens sends reports demands calls seeks faces approves expands allows bans launches backs talks votes will has is are can may reopens rolls extends tightens hosts closes debates adopts receives gets makes sees proposes unveils residents population council civic road session schools businesses hospital health and but or was had ", " "+word+" ")
 }
 
 func geographicHead(words []token, start, count int) bool {

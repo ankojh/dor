@@ -138,12 +138,12 @@ func TestF11RepairSamePlaceCollisionKeepsLargerWeight(t *testing.T) {
 	}
 	proposedStory := f11StoryPatchByID(t, proposed.Bundle.Stories, "story-weight")
 	proposedVote, ok := voteByID(proposedStory.Locations, "paris")
-	if !ok || proposedVote.Weight != .9 || len(proposedStory.Locations) != 1 || proposedStory.PrimaryPlaceID != "paris" {
+	if !ok || proposedVote.Country != "FR" || proposedVote.Weight != .9 || len(proposedStory.Locations) != 1 || proposedStory.PrimaryPlaceID != "paris" {
 		t.Fatalf("proposal must keep the larger story weight .9 and one Paris row: %+v", proposedStory)
 	}
 	proposedArticle := articlePatchByID(t, proposed.Bundle.Articles, "article-weight")
 	proposedArticleVote, ok := voteByID(proposedArticle.Locations, "paris")
-	if !ok || proposedArticleVote.Confidence != .8 || len(proposedArticle.Locations) != 1 {
+	if !ok || proposedArticleVote.Country != "FR" || proposedArticleVote.Confidence != .8 || len(proposedArticle.Locations) != 1 {
 		t.Fatalf("proposal must keep the larger article confidence .8 and one Paris row: %+v", proposedArticle)
 	}
 
@@ -166,12 +166,13 @@ func TestF11RepairSamePlaceCollisionKeepsLargerWeight(t *testing.T) {
 	}
 
 	var count int
+	var country string
 	var weight float32
-	if err := conn.QueryRow(ctx, `SELECT count(*),max(weight) FROM public.story_locations WHERE story_id='story-weight' AND place_id='paris' AND role=0`).Scan(&count, &weight); err != nil || count != 1 || weight != .9 {
+	if err := conn.QueryRow(ctx, `SELECT count(*),max(weight),max(country) FROM public.story_locations WHERE story_id='story-weight' AND place_id='paris' AND role=0`).Scan(&count, &weight, &country); err != nil || count != 1 || weight != .9 || country != "FR" {
 		t.Fatalf("applied story collision must keep one Paris row at weight .9: count=%d weight=%v err=%v", count, weight, err)
 	}
 	var conf float32
-	if err := conn.QueryRow(ctx, `SELECT count(*),max(conf) FROM public.article_locations WHERE article_id='article-weight' AND place_id='paris' AND role=0`).Scan(&count, &conf); err != nil || count != 1 || conf != .8 {
+	if err := conn.QueryRow(ctx, `SELECT count(*),max(conf),max(country) FROM public.article_locations WHERE article_id='article-weight' AND place_id='paris' AND role=0`).Scan(&count, &conf, &country); err != nil || count != 1 || conf != .8 || country != "FR" {
 		t.Fatalf("applied article collision must keep one Paris row at conf .8: count=%d conf=%v err=%v", count, conf, err)
 	}
 	var primary string

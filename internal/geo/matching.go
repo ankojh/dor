@@ -246,7 +246,7 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place, populatio
 	}
 	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") {
 		previous := words[start-1]
-		if !strings.ContainsAny(words[start].sep, ",()/") && capitalized(previous.raw) && !strings.Contains(" in at near across around within outside into ", " "+previous.norm+" ") {
+		if start > 1 && !strings.ContainsAny(words[start].sep, ",()/") && capitalized(previous.raw) && !strings.Contains(" in at near across around within outside into from the a an after before former to of and or ", " "+previous.norm+" ") {
 			return true
 		}
 		if population < 200000 && strings.Contains(" del de da das do dos van von der den ", " "+previous.norm+" ") {
@@ -257,6 +257,9 @@ func capitalLetterOnlyReject(words []token, start, count int, p Place, populatio
 		}
 	}
 	end := start + count
+	if end+1 < len(words) && words[end].norm == "upon" && capitalized(words[end+1].raw) && !strings.ContainsAny(words[end].sep+words[end+1].sep, "\n.;:!?,()/") {
+		return true
+	}
 	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?,()/") {
 		return false
 	}
@@ -485,6 +488,12 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	// Possessive apostrophe-s is grammar, not a location pattern. Only an
 	// actual preposition or the explicit '-based' construction is locative.
 	locative := locativeEvidence(words, start, count) || administrativeContainerEvidence(p, words, start)
+	if end := start + count; end+1 < len(words) && words[end].norm == "upon" && capitalized(words[end+1].raw) && !strings.ContainsAny(words[end].sep+words[end+1].sep, "\n.;:!?,()/") {
+		return 0
+	}
+	if !canonical && strings.HasSuffix(expandedPlaceName(p.Name), " city") && expandedPlaceName(p.Name) == expandedPlaceName(phrase)+" city" && !(dateline || locative) {
+		return 0
+	}
 	explicitCountry := countryName && g.explicitCountryEvidence(p, words, start, count, dateline, hint)
 	if countryName && g.foreignRegionCollision(p) && !explicitCountry {
 		// A locative such as 'living in Georgia' does not distinguish the
@@ -502,7 +511,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	// smaller names also found as proper nouns need independent geography.
 	// Apply this before both the head and capitalization shortcuts.
 	population := g.majorPopulation(p)
-	lexical := count == 1 && (commonEnglish[phrase] || censusGivenNames[phrase] || properWords[phrase] && p.Feature != "ADM1" && population > 0 && population < 1000000 && !g.nationalCapital(p))
+	lexical := count == 1 && !g.nationalCapital(p) && !(p.Feature != "ADM1" && population >= 1000000) && (commonEnglish[phrase] || censusGivenNames[phrase] || properWords[phrase] && p.Feature != "ADM1" && population > 0 && population < 1000000)
 	if !historical && !p.CountryID && lexical && !(textQualified || dateline || locative || typedRegionEvidence(p, words, start, count)) {
 		return 0
 	}
@@ -525,7 +534,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
 		return 0
 	}
-	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || ((capitalLetterSeat(p) || p.Feature == "PPL" && p.Population >= 250000) && g.majorPlaceSupported(p)))
+	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || ((capitalLetterSeat(p) || (p.Feature == "PPL" || strings.HasPrefix(p.Feature, "PPLA")) && p.Population >= 250000) && g.majorPlaceSupported(p)))
 	if historical && canonical {
 		return 31
 	}

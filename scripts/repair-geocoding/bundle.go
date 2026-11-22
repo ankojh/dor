@@ -20,7 +20,7 @@ type ownerKey struct{ table, id string }
 func key(row location) ownerKey            { return ownerKey{row.Table, row.Owner} }
 func voteKey(id string, role int16) string { return fmt.Sprintf("%s/%d", id, role) }
 func vote(row location) geo.LocationVote {
-	v := geo.LocationVote{PlaceID: row.PlaceID, Name: row.Name, Lat: row.Lat, Lon: row.Lon, Precision: row.Precision, Role: row.Role}
+	v := geo.LocationVote{PlaceID: row.PlaceID, Name: row.Name, Country: row.Country, Lat: row.Lat, Lon: row.Lon, Precision: row.Precision, Role: row.Role}
 	if row.Table == "article_locations" {
 		v.Confidence = row.Weight
 	} else {
@@ -40,12 +40,12 @@ func sortVotes(v []geo.LocationVote) {
 // Hash numeric values as strings so even an old NaN/Inf sentinel has an exact,
 // stable before hash. After arrays themselves always contain valid coordinates.
 func locationHash(votes []geo.LocationVote, primary string) string {
-	type scalar struct{ ID, Name, Lat, Lon, Precision, Role, Weight, Confidence string }
+	type scalar struct{ ID, Name, Country, Lat, Lon, Precision, Role, Weight, Confidence string }
 	copyVotes := append([]geo.LocationVote(nil), votes...)
 	sortVotes(copyVotes)
 	vals := make([]scalar, 0, len(copyVotes))
 	for _, v := range copyVotes {
-		vals = append(vals, scalar{v.PlaceID, v.Name, strconv.FormatFloat(v.Lat, 'g', -1, 64), strconv.FormatFloat(v.Lon, 'g', -1, 64), strconv.Itoa(int(v.Precision)), strconv.Itoa(int(v.Role)), strconv.FormatFloat(float64(v.Weight), 'g', -1, 32), strconv.FormatFloat(float64(v.Confidence), 'g', -1, 32)})
+		vals = append(vals, scalar{v.PlaceID, v.Name, v.Country, strconv.FormatFloat(v.Lat, 'g', -1, 64), strconv.FormatFloat(v.Lon, 'g', -1, 64), strconv.Itoa(int(v.Precision)), strconv.Itoa(int(v.Role)), strconv.FormatFloat(float64(v.Weight), 'g', -1, 32), strconv.FormatFloat(float64(v.Confidence), 'g', -1, 32)})
 	}
 	data, _ := json.Marshal(struct {
 		Primary   string
@@ -75,14 +75,17 @@ func plannedRows(before []location, changes []change) map[ownerKey][]geo.Locatio
 		duplicate := false
 		for existingKey, existing := range rows[owner] {
 			if existing.PlaceID == p.ID {
+				if existing.Country == "" && p.CountryCode != "" {
+					existing.Country = p.CountryCode
+				}
 				if existing.Role == c.row.Role {
 					if owner.table == "story_locations" {
 						existing.Weight = max(existing.Weight, c.row.Weight)
 					} else {
 						existing.Confidence = max(existing.Confidence, c.row.Weight)
 					}
-					rows[owner][existingKey] = existing
 				}
+				rows[owner][existingKey] = existing
 				duplicate = true
 			}
 		}
@@ -90,6 +93,7 @@ func plannedRows(before []location, changes []change) map[ownerKey][]geo.Locatio
 			continue
 		}
 		r := c.row
+		r.Country = replacementCountry(r, p)
 		r.PlaceID, r.Lat, r.Lon, r.Precision = p.ID, p.Lat, p.Lon, int16(c.decision.Precision)
 		if p.Name != "" {
 			r.Name = p.Name

@@ -18,11 +18,11 @@ import (
 )
 
 type location struct {
-	Table, Owner, PlaceID, Name string
-	Lat, Lon                    float64
-	Precision, Role             int16
-	Weight                      float32
-	Evidence                    []geo.TextEvidence
+	Table, Owner, PlaceID, Name, Country string
+	Lat, Lon                             float64
+	Precision, Role                      int16
+	Weight                               float32
+	Evidence                             []geo.TextEvidence
 }
 type counts struct {
 	Scanned        int            `json:"scanned"`
@@ -76,7 +76,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.reportPath, "report", "", "atomic JSON audit and repair bundle output")
 	fs.BoolVar(&o.apply, "apply", false, "explicitly commit isolated-copy Postgres repairs")
 	fs.StringVar(&o.allowDB, "allow-db", "", "required exact isolated database name for --apply (live dor is refused)")
-	fs.StringVar(&o.reviewAllowlist, "review-allowlist", "", "optional table|owner|place_id lines to keep review candidates instead of removing them")
+	fs.StringVar(&o.reviewAllowlist, "review-allowlist", "", "optional table|owner|place_id[|region|keep] reviewed keeps and precision caps")
 	dry := fs.Bool("dry-run", true, "read-only proposed audit (default)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -96,7 +96,7 @@ func parseOptions(args []string) (options, error) {
 	return o, nil
 }
 
-// loadReviewAllowlist reads explicit table|owner|place_id lines. Every entry is
+// loadReviewAllowlist reads table|owner|place_id[|region|keep] lines. Every entry is
 // reviewed maintenance input; an empty or missing file removes all review
 // candidates by default.
 func loadReviewAllowlist(path string) (map[string]bool, error) {
@@ -114,10 +114,14 @@ func loadReviewAllowlist(path string) (map[string]bool, error) {
 			continue
 		}
 		parts := strings.Split(line, "|")
-		if len(parts) != 3 || parts[0] != "story_locations" && parts[0] != "article_locations" || parts[1] == "" || parts[2] == "" {
-			return nil, fmt.Errorf("review allowlist line %d must be table|owner|place_id with a supported table", lineNo+1)
+		if (len(parts) != 3 && len(parts) != 4) || parts[0] != "story_locations" && parts[0] != "article_locations" || parts[1] == "" || parts[2] == "" || len(parts) == 4 && parts[3] != "region" && parts[3] != "keep" {
+			return nil, fmt.Errorf("review allowlist line %d must be table|owner|place_id[|region|keep] with a supported table", lineNo+1)
 		}
-		allow[parts[0]+"|"+parts[1]+"|"+parts[2]] = true
+		key := parts[0] + "|" + parts[1] + "|" + parts[2]
+		allow[key] = true
+		if len(parts) == 4 {
+			allow[key+"|"+parts[3]] = true
+		}
 	}
 	return allow, nil
 }
@@ -248,10 +252,10 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 		c := r.Tables[row.Table]
 		c.Scanned++
 		d := g.RepairLocation(geo.StoredLocation{PlaceID: row.PlaceID, Lat: row.Lat, Lon: row.Lon, Precision: geo.Resolution(row.Precision)}, row.Evidence)
+		keepKey := row.Table + "|" + row.Owner + "|" + row.PlaceID
 		if d.ReviewReason != "" {
 			review := auditReview{row.Table, row.Owner, row.PlaceID, row.Name, d.ReviewReason}
 			c.NeedsReview++
-			keepKey := row.Table + "|" + row.Owner + "|" + row.PlaceID
 			if allowKeep[keepKey] {
 				r.Reviews = append(r.Reviews, review)
 			} else {
@@ -260,6 +264,30 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 				r.ReviewRemovals = append(r.ReviewRemovals, review)
 				c.ReviewRemovals++
 				d = geo.RepairDecision{Reason: "review_required"}
+			}
+		}
+		if allowKeep[keepKey+"|keep"] && (d.Replacement == nil || d.Replacement.ID != row.PlaceID) {
+			p, found := g.ByID(row.PlaceID)
+			if !found || !geo.ValidCoordinates(row.Lat, row.Lon) || geo.DistanceKM(row.Lat, row.Lon, p.Lat, p.Lon) >= 1 {
+				return report{}, fmt.Errorf("reviewed keep %s does not have a valid canonical coordinate", keepKey)
+			}
+			p.Lat, p.Lon = float64(float32(p.Lat)), float64(float32(p.Lon))
+			precision := min(geo.Resolution(row.Precision), geo.PrecisionOf(p))
+			d = geo.RepairDecision{}
+			if precision != geo.Resolution(row.Precision) || row.Lat != p.Lat || row.Lon != p.Lon {
+				d = geo.RepairDecision{Reason: "precision", Replacement: &p, Precision: precision}
+			}
+		}
+		if allowKeep[keepKey] {
+			precision, ok := titleContainerPrecision(row)
+			if allowKeep[keepKey+"|region"] {
+				precision, ok = geo.RegionResolution, true
+			}
+			if ok && geo.Resolution(row.Precision) > precision && (d.Replacement == nil && d.Reason == "" || d.Replacement != nil && d.Replacement.ID == row.PlaceID) {
+				if p, found := g.ByID(row.PlaceID); found {
+					p.Lat, p.Lon = float64(float32(p.Lat)), float64(float32(p.Lon))
+					d = geo.RepairDecision{Reason: "precision", Replacement: &p, Precision: precision, ReviewReason: d.ReviewReason}
+				}
 			}
 		}
 		if d.Reason == "" {
@@ -327,6 +355,12 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 			}
 			// Preserve the strongest vote when replacements collide in the
 			// same role. Different roles still collapse as before.
+			// A retained collision target may predate migration 0006; fill an
+			// unknown country from the resolved replacement without overwriting
+			// an existing provenance value.
+			if _, err := tx.Exec(ctx, `UPDATE public.`+c.row.Table+` SET country=$1 WHERE `+owner+`=$2 AND place_id=$3 AND country=''`, p.CountryCode, c.row.Owner, p.ID); err != nil {
+				return report{}, err
+			}
 			if _, err := tx.Exec(ctx, `UPDATE public.`+c.row.Table+` SET `+weight+`=GREATEST(`+weight+`,$1) WHERE `+owner+`=$2 AND place_id=$3 AND role=$4`, c.row.Weight, c.row.Owner, p.ID, c.row.Role); err != nil {
 				return report{}, err
 			}
@@ -360,6 +394,27 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 	return r, nil
 }
 
+// A reviewed keep can describe the surrounding jurisdiction rather than the
+// named city point. Cap its precision at the explicit title's container level.
+func titleContainerPrecision(row location) (geo.Resolution, bool) {
+	name := strings.ToLower(strings.TrimSpace(row.Name))
+	if name == "" {
+		return 0, false
+	}
+	for _, e := range row.Evidence {
+		title := " " + strings.ToLower(e.Title) + " "
+		for _, suffix := range []string{" region", " state", " province"} {
+			if strings.Contains(title, " "+name+suffix) {
+				return geo.RegionResolution, true
+			}
+		}
+		if strings.Contains(title, " "+name+" district") {
+			return geo.RegionResolution, true // The wire format has no district value.
+		}
+	}
+	return 0, false
+}
+
 func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
 	var out []location
 	// The two table/column choices are constants, never user-supplied SQL.
@@ -368,13 +423,13 @@ func loadLocations(ctx context.Context, tx pgx.Tx) ([]location, error) {
 		if table == "article_locations" {
 			owner, weight = "article_id", "conf"
 		}
-		rows, err := tx.Query(ctx, `SELECT `+owner+`,place_id,name,lat,lon,precision,role,`+weight+` FROM public.`+table+` ORDER BY `+owner+`,place_id,role`)
+		rows, err := tx.Query(ctx, `SELECT `+owner+`,place_id,name,country,lat,lon,precision,role,`+weight+` FROM public.`+table+` ORDER BY `+owner+`,place_id,role`)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			r := location{Table: table}
-			if err := rows.Scan(&r.Owner, &r.PlaceID, &r.Name, &r.Lat, &r.Lon, &r.Precision, &r.Role, &r.Weight); err != nil {
+			if err := rows.Scan(&r.Owner, &r.PlaceID, &r.Name, &r.Country, &r.Lat, &r.Lon, &r.Precision, &r.Role, &r.Weight); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -447,11 +502,20 @@ func applyLocation(ctx context.Context, tx pgx.Tx, row location, d geo.RepairDec
 	if strings.TrimSpace(name) == "" {
 		name = row.Name
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO public.`+row.Table+` (`+owner+`,place_id,name,lat,lon,precision,role,`+weight+`)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (`+owner+`,place_id,role) DO UPDATE
- SET name=EXCLUDED.name,lat=EXCLUDED.lat,lon=EXCLUDED.lon,precision=EXCLUDED.precision,
- `+weight+`=GREATEST(`+row.Table+`.`+weight+`,EXCLUDED.`+weight+`)`, row.Owner, p.ID, name, p.Lat, p.Lon, int16(d.Precision), row.Role, row.Weight)
+	_, err := tx.Exec(ctx, `INSERT INTO public.`+row.Table+` (`+owner+`,place_id,name,country,lat,lon,precision,role,`+weight+`)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (`+owner+`,place_id,role) DO UPDATE
+ SET name=EXCLUDED.name,country=EXCLUDED.country,lat=EXCLUDED.lat,lon=EXCLUDED.lon,precision=EXCLUDED.precision,
+ `+weight+`=GREATEST(`+row.Table+`.`+weight+`,EXCLUDED.`+weight+`)`, row.Owner, p.ID, name, replacementCountry(row, p), p.Lat, p.Lon, int16(d.Precision), row.Role, row.Weight)
 	return err
+}
+
+// A refresh retains existing provenance, including unknown; a different place
+// obtains its country from the resolved gazetteer result.
+func replacementCountry(row location, p *geo.Place) string {
+	if p.ID == row.PlaceID {
+		return row.Country
+	}
+	return p.CountryCode
 }
 
 func deleteLocation(ctx context.Context, tx pgx.Tx, row location) error {

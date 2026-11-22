@@ -239,7 +239,7 @@ func TestEstimateRunMatchesDataset(t *testing.T) {
 		t.Fatal(err)
 	}
 	models := config.DefaultModels()
-	jev, claude, calls := EstimateRun(ds, models)
+	jev, claude, calls := EstimateRun(ds, models, models.Jev.Price)
 	if jev <= 0 || claude <= 0 {
 		t.Errorf("estimates = %v / %v", jev, claude)
 	}

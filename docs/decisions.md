@@ -385,7 +385,7 @@ the real HTTP/SDK clients at them. The report's first line is
 is plumbing evidence only; it is never used to claim accuracy or to change a
 threshold. The Claude price schedule in `config/models.yaml` is a provisional
 estimate (the API returns tokens, not money); jev cost is `usage.cost` from the
-response.
+response on OpenRouter and tokens × the `jev.typesafe` price on TypeSafe direct.
 
 **Bus change:** `bus.KVBucketSpend` (`spend`, 48 h TTL) is new in M0·3 and is
 the only addition to provisioning. M1·1 also touches agents/sources; this is
@@ -476,7 +476,7 @@ labelled items (N), not answered items.
 **Retries cover the whole 5xx range.** Both clients retry 429 and 500–599,
 including 524/529, plus per-attempt transport timeouts while the parent context
 is alive. A cancelled or expired parent is never retried. In `make eval`, a
-`TYPESAFE_API_KEY` alone still fails early (see below for the runtime). Push CI
+lone `TYPESAFE_API_KEY` uses the same `jev.typesafe` block and price. Push CI
 is mock-only and gets no secrets; only manual `workflow_dispatch` runs live.
 
 **TypeSafe direct and subscription backends (runtime, 2026-11-21).** `dor run`

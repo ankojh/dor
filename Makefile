@@ -8,7 +8,12 @@ WEB := web
 BIN := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help build go-build test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke sources-check replay
+# The Go binaries do not read .env themselves. Targets that make live calls
+# source it when present, the same way a shell would: set -a; . ./.env; set +a.
+ENV_FILE := $(ROOT)/.env
+LOAD_ENV = set -a; [ -f "$(ENV_FILE)" ] && . "$(ENV_FILE)"; set +a;
+
+.PHONY: help build go-build run test test-race vet proto proto-check proto-golden web-install web-dev web-lint web-format-check web-typecheck web-test web-build dev dev-photon dev-down dev-reset ci test-echo-restart clean eval eval-collect eval-label llm-smoke sources-check replay
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -21,8 +26,11 @@ go-build:
 	$(GO) build -o $(BIN)/probe ./tools/probe
 	$(GO) build -o $(BIN)/replayer ./tools/replayer
 
+run: build ## Build and run dor (AGENTS=classify,plot; loads .env when present)
+	$(LOAD_ENV) ./$(BIN)/dor run --agents=$(or $(AGENTS),all)
+
 replay: go-build ## Replay the latest recorded day at 10× into the local stack (DAY=, RATE=)
-	./$(BIN)/replayer -dir $${DOR_RECORD_DIR:?set DOR_RECORD_DIR} $(if $(DAY),-day $(DAY),) -rate $(or $(RATE),10)
+	$(LOAD_ENV) ./$(BIN)/replayer -dir $${DOR_RECORD_DIR:?set DOR_RECORD_DIR} $(if $(DAY),-day $(DAY),) -rate $(or $(RATE),10)
 
 test: ## Go tests
 	$(GO) test ./...
@@ -86,8 +94,8 @@ ci: web-install proto-check vet test-race go-build web-lint web-format-check web
 test-echo-restart: ## Kill -9 the echo agent mid-stream and verify no duplicate output
 	./scripts/test-echo-restart.sh
 
-eval: ## Run the model eval (mock backends when no API keys are set)
-	$(GO) run ./eval/cmd/eval
+eval: ## Run the model eval (mock backends when no API keys are set; loads .env)
+	$(LOAD_ENV) $(GO) run ./eval/cmd/eval
 
 eval-collect: ## Rebuild eval/data candidates from public RSS (network; reviewed diff)
 	$(GO) run ./eval/cmd/collect

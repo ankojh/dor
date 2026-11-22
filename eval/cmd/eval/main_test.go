@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"go.yaml.in/yaml/v4"
 
+	"github.com/ankojh/dor/config"
 	decidemock "github.com/ankojh/dor/internal/decide/mockapi"
 	llmmock "github.com/ankojh/dor/internal/llm/mockapi"
 )
@@ -67,14 +72,21 @@ type env struct {
 	json   string
 }
 
+// clearJevEnv clears every jev- and Claude-related variable so a test starts
+// from "no keys". t.Setenv restores the original values on cleanup.
+func clearJevEnv(t *testing.T) {
+	t.Helper()
+	for _, n := range envNames {
+		t.Setenv(n, "")
+	}
+}
+
 // setup copies the committed config into a temp dir (the CLI may rewrite
 // thresholds.yaml on a live run), clears every credential variable and returns
 // the base arguments. Nothing in the repo is written.
 func setup(t *testing.T) env {
 	t.Helper()
-	for _, n := range envNames {
-		t.Setenv(n, "")
-	}
+	clearJevEnv(t)
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config")
 	if err := os.MkdirAll(cfg, 0o755); err != nil {
@@ -342,52 +354,247 @@ func TestBackendFailingEntirelyStillWritesReportThenErrors(t *testing.T) {
 	}
 }
 
-func TestTypeSafeNeedsExplicitConfiguration(t *testing.T) {
-	cases := map[string]map[string]string{
-		"key alone":         {"TYPESAFE_API_KEY": "k"},
-		"no path":           {"TYPESAFE_API_KEY": "k", "DOR_JEV_BASE_URL": "http://x", "DOR_JEV_REQUEST_SHAPE": "openrouter-decisions"},
-		"no base":           {"TYPESAFE_API_KEY": "k", "DOR_JEV_PATH": "/p", "DOR_JEV_REQUEST_SHAPE": "openrouter-decisions"},
-		"no shape":          {"TYPESAFE_API_KEY": "k", "DOR_JEV_BASE_URL": "http://x", "DOR_JEV_PATH": "/p"},
-		"unsupported shape": {"TYPESAFE_API_KEY": "k", "DOR_JEV_BASE_URL": "http://x", "DOR_JEV_PATH": "/p", "DOR_JEV_REQUEST_SHAPE": "systemone"},
+func TestSelectJev(t *testing.T) {
+	models := config.DefaultModels()
+
+	openrouter := jevSelection{
+		Host:    "openrouter",
+		Key:     "or-key",
+		BaseURL: models.Jev.BaseURL,
+		Path:    models.Jev.Path,
+		Model:   models.Jev.Model,
+		Price:   models.Jev.Price,
 	}
-	for name, vars := range cases {
-		e := setup(t)
-		jev, claude := jevFake(t), claudeFake(t)
-		for k, v := range vars {
-			if k == "DOR_JEV_BASE_URL" {
-				v = jev.URL
+	openrouterOverrides := openrouter
+	openrouterOverrides.BaseURL = "http://openrouter.example.test"
+	openrouterOverrides.Path = "/custom/decisions"
+
+	// Spelled out rather than copied from models so this test pins the
+	// committed TypeSafe model, endpoint and price.
+	typesafe := jevSelection{
+		Host:          "typesafe",
+		Key:           "ts-key",
+		BaseURL:       "https://api.typesafe.ai",
+		Path:          "/v1/systemone",
+		Model:         "jev-1.14.0",
+		Price:         config.Price{InputPerMTok: 0.042},
+		CostFromPrice: true,
+	}
+	typesafeOverrides := typesafe
+	typesafeOverrides.BaseURL = "http://typesafe.example.test"
+	typesafeOverrides.Path = "/custom/systemone"
+	typesafeBase := typesafe
+	typesafeBase.BaseURL = "http://typesafe-base.example.test"
+	typesafeDORBase := typesafe
+	typesafeDORBase.BaseURL = "http://dor.example.test"
+
+	cases := []struct {
+		name    string
+		env     map[string]string
+		want    jevSelection
+		wantErr string
+	}{
+		{
+			name: "openrouter alone",
+			env:  map[string]string{"OPENROUTER_API_KEY": "or-key"},
+			want: openrouter,
+		},
+		{
+			name: "openrouter env overrides",
+			env: map[string]string{
+				"OPENROUTER_API_KEY": "or-key",
+				"DOR_JEV_BASE_URL":   "http://openrouter.example.test",
+				"DOR_JEV_PATH":       "/custom/decisions",
+			},
+			want: openrouterOverrides,
+		},
+		{
+			name: "typesafe alone",
+			env:  map[string]string{"TYPESAFE_API_KEY": "ts-key"},
+			want: typesafe,
+		},
+		{
+			name: "typesafe env overrides",
+			env: map[string]string{
+				"TYPESAFE_API_KEY": "ts-key",
+				"DOR_JEV_BASE_URL": "http://typesafe.example.test",
+				"DOR_JEV_PATH":     "/custom/systemone",
+			},
+			want: typesafeOverrides,
+		},
+		{
+			name: "typesafe base url env",
+			env: map[string]string{
+				"TYPESAFE_API_KEY":  "ts-key",
+				"TYPESAFE_BASE_URL": "http://typesafe-base.example.test",
+			},
+			want: typesafeBase,
+		},
+		{
+			name: "dor base url wins over typesafe base url",
+			env: map[string]string{
+				"TYPESAFE_API_KEY":  "ts-key",
+				"TYPESAFE_BASE_URL": "http://typesafe-base.example.test",
+				"DOR_JEV_BASE_URL":  "http://dor.example.test",
+			},
+			want: typesafeDORBase,
+		},
+		{
+			name: "typesafe accepts systemone shape",
+			env: map[string]string{
+				"TYPESAFE_API_KEY":      "ts-key",
+				"DOR_JEV_REQUEST_SHAPE": "systemone",
+			},
+			want: typesafe,
+		},
+		{
+			name: "typesafe accepts openrouter decisions shape",
+			env: map[string]string{
+				"TYPESAFE_API_KEY":      "ts-key",
+				"DOR_JEV_REQUEST_SHAPE": "openrouter-decisions",
+			},
+			want: typesafe,
+		},
+		{
+			name: "typesafe rejects unknown shape",
+			env: map[string]string{
+				"TYPESAFE_API_KEY":      "ts-key",
+				"DOR_JEV_REQUEST_SHAPE": "chat-completions",
+			},
+			wantErr: "unsupported DOR_JEV_REQUEST_SHAPE",
+		},
+		{
+			name: "both keys prefer openrouter",
+			env: map[string]string{
+				"OPENROUTER_API_KEY": "or-key",
+				"TYPESAFE_API_KEY":   "ts-key",
+			},
+			want: openrouter,
+		},
+		{
+			name: "no keys",
+			env:  map[string]string{},
+			want: jevSelection{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearJevEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
 			}
-			t.Setenv(k, v)
-		}
-		err := run(e.args)
-		if err == nil {
-			t.Errorf("%s: expected an error", name)
-			continue
-		}
-		if name == "unsupported shape" && !strings.Contains(err.Error(), "unsupported DOR_JEV_REQUEST_SHAPE") {
-			t.Errorf("%s: err = %v", name, err)
-		}
-		if name != "unsupported shape" && !strings.Contains(err.Error(), "TYPESAFE_API_KEY needs") {
-			t.Errorf("%s: err = %v", name, err)
-		}
-		if jev.Hits() != 0 || claude.Hits() != 0 || e.hasReport() {
-			t.Errorf("%s: must fail before any call and write no report (hits %d/%d)", name, jev.Hits(), claude.Hits())
-		}
+			got, err := selectJev(models)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("selectJev error = %v, want one containing %q", err, tc.wantErr)
+				}
+				if got != (jevSelection{}) {
+					t.Errorf("a rejected selection must be zero, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("selectJev: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("selectJev = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestTypeSafeWithAllThreeEnvsRuns(t *testing.T) {
+// TestTypeSafeLiveRunHitsSystemone makes a live (non-mock) jev run through a
+// local fake that only accepts the TypeSafe path and model, then rewrites the
+// request to the decisions route the mock answers.
+func TestTypeSafeLiveRunHitsSystemone(t *testing.T) {
 	e := setup(t)
-	jev := jevFake(t)
+	opts := decidemock.DefaultOptions()
+	opts.Latency = 0
+	decisions := decidemock.NewHandler(opts)
+
+	var mu sync.Mutex
+	var paths, models, auth []string
+	fake := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		var model string
+		if json.Unmarshal(body, &req) == nil {
+			model = req.Model
+		}
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		models = append(models, model)
+		auth = append(auth, r.Header.Get("Authorization"))
+		mu.Unlock()
+
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.URL.Path = "/api/alpha/decisions"
+		r.URL.RawPath = ""
+		decisions.ServeHTTP(w, r)
+	}))
+
+	t.Setenv("TYPESAFE_API_KEY", "ts-key")
+	t.Setenv("DOR_JEV_BASE_URL", fake.URL)
+
+	if err := run(e.args); err != nil {
+		t.Fatalf("TypeSafe run: %v", err)
+	}
+	if fake.Hits() == 0 {
+		t.Fatal("the configured TypeSafe endpoint was never called")
+	}
+	for i := range paths {
+		if paths[i] != "/v1/systemone" {
+			t.Errorf("request %d path = %q, want /v1/systemone", i, paths[i])
+		}
+		if models[i] != "jev-1.14.0" {
+			t.Errorf("request %d model = %q, want jev-1.14.0", i, models[i])
+		}
+		if auth[i] != "Bearer ts-key" {
+			t.Errorf("request %d Authorization = %q, want the TYPESAFE_API_KEY", i, auth[i])
+		}
+	}
+
+	// Claude has no key, so this is a mixed run: the marker stays and
+	// thresholds are never rewritten.
+	if first := e.firstLine(t); first != mockMarker {
+		t.Errorf("mixed run first line = %q, want the mock marker", first)
+	}
+	raw, _ := os.ReadFile(e.report)
+	for _, want := range []string{
+		"Mixed run: jev live, Claude mock",
+		"jev host: typesafe (" + fake.URL + ", model jev-1.14.0)",
+		"priced from tokens at $0.042/Mtok input",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("report lacks %q", want)
+		}
+	}
+	cur, _ := os.ReadFile(filepath.Join(e.cfgDir, "thresholds.yaml"))
+	orig, _ := os.ReadFile(filepath.Join("..", "..", "..", "config", "thresholds.yaml"))
+	if string(cur) != string(orig) {
+		t.Error("a mixed TypeSafe run must not rewrite thresholds.yaml")
+	}
+}
+
+func TestTypeSafeBadRequestShapeFailsBeforeAnyCall(t *testing.T) {
+	e := setup(t)
+	jev, claude := jevFake(t), claudeFake(t)
 	t.Setenv("TYPESAFE_API_KEY", "k")
 	t.Setenv("DOR_JEV_BASE_URL", jev.URL)
-	t.Setenv("DOR_JEV_PATH", "/api/alpha/decisions")
-	t.Setenv("DOR_JEV_REQUEST_SHAPE", "openrouter-decisions")
-	if err := run(e.args); err != nil {
-		t.Fatal(err)
+	t.Setenv("DOR_JEV_REQUEST_SHAPE", "chat-completions")
+	err := run(e.args)
+	if err == nil || !strings.Contains(err.Error(), "unsupported DOR_JEV_REQUEST_SHAPE") {
+		t.Fatalf("err = %v, want an unsupported DOR_JEV_REQUEST_SHAPE error", err)
 	}
-	if jev.Hits() == 0 {
-		t.Error("the configured TypeSafe-compatible endpoint was not called")
+	if jev.Hits() != 0 || claude.Hits() != 0 || e.hasReport() {
+		t.Errorf("must fail before any call and write no report (hits %d/%d)", jev.Hits(), claude.Hits())
 	}
 }
 

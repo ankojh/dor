@@ -1,10 +1,10 @@
 // Command eval runs Dor's model evaluation and writes eval/report.md and
 // eval/report.json.
 //
-// Without OPENROUTER_API_KEY and ANTHROPIC_API_KEY it runs both backends as
-// in-process mocks. The report's first line then says
-// "MOCK BACKENDS — NOT A MEASUREMENT" and thresholds stay at their starting
-// values.
+// Without a jev key (OPENROUTER_API_KEY or TYPESAFE_API_KEY) and
+// ANTHROPIC_API_KEY it runs both backends as in-process mocks. The report's
+// first line then says "MOCK BACKENDS — NOT A MEASUREMENT" and thresholds stay
+// at their starting values.
 package main
 
 import (
@@ -73,17 +73,17 @@ func run(args []string) error {
 		return fmt.Errorf("no labels in %s; seed agent labels or run the labelling CLI", *dataDir)
 	}
 
-	// TypeSafe direct is deliberately not guessed. OpenRouter is the supported
-	// live path; a TypeSafe key needs an explicit compatible base URL, path and
-	// request shape, and the direct /v1/systemone shape is not implemented.
-	var jevKey, jevBase, jevPath string
+	// A jev key selects the live host: OPENROUTER_API_KEY wins when both are
+	// set; a lone TYPESAFE_API_KEY uses the jev.typesafe block from
+	// config/models.yaml (model, host, path and price).
 	jevMock := *forceMock
+	var jevSel jevSelection
 	if !*forceMock {
-		jevKey, jevBase, jevPath, err = jevCredentials()
+		jevSel, err = selectJev(models)
 		if err != nil {
 			return err
 		}
-		jevMock = jevKey == ""
+		jevMock = jevSel.Key == ""
 	}
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	claudeBase := os.Getenv("DOR_CLAUDE_BASE_URL")
@@ -145,23 +145,7 @@ func run(args []string) error {
 		jev = client
 		jevKind = "mock"
 	} else {
-		if jevBase == "" {
-			jevBase = models.Jev.BaseURL
-		}
-		if jevPath == "" {
-			jevPath = models.Jev.Path
-		}
-		client, err := decide.NewClient(decide.ClientConfig{
-			BaseURL:    jevBase,
-			Path:       jevPath,
-			APIKey:     jevKey,
-			Model:      models.Jev.Model,
-			Timeout:    models.Jev.Timeout.Std(),
-			MaxRetries: models.Jev.MaxRetries,
-			MinBackoff: models.Jev.MinBackoff.Std(),
-			MaxBackoff: models.Jev.MaxBackoff.Std(),
-			Price:      models.Jev.Price,
-		}, limiter)
+		client, err := decide.NewClient(jevSel.clientConfig(models), limiter)
 		if err != nil {
 			return err
 		}
@@ -196,7 +180,7 @@ func run(args []string) error {
 		claude = client
 	}
 
-	jevCost, claudeCost, calls := eval.EstimateRun(ds, models)
+	jevCost, claudeCost, calls := eval.EstimateRun(ds, models, jevSel.Price)
 	liveJev, liveClaude := 0.0, 0.0
 	if !jevMock {
 		liveJev = jevCost
@@ -240,7 +224,14 @@ func run(args []string) error {
 		notes = append(notes, fmt.Sprintf("Mixed run: jev %s, Claude %s. Threshold selection is skipped for mixed runs.", jevKind, claudeKind))
 	}
 	if jevMock {
-		notes = append(notes, "No OPENROUTER_API_KEY: jev ran against the mock decisions endpoint.")
+		notes = append(notes, "No jev key (OPENROUTER_API_KEY or TYPESAFE_API_KEY): jev ran against the mock decisions endpoint.")
+	}
+	if !jevMock {
+		host := fmt.Sprintf("jev host: %s (%s, model %s).", jevSel.Host, jevSel.BaseURL, jevSel.Model)
+		if jevSel.CostFromPrice {
+			host += fmt.Sprintf(" This host returns no usage.cost; cost is priced from tokens at $%.3f/Mtok input.", jevSel.Price.InputPerMTok)
+		}
+		notes = append(notes, host)
 	}
 	if claudeMock {
 		notes = append(notes, "No ANTHROPIC_API_KEY: Claude ran against the mock Messages endpoint.")
@@ -280,26 +271,81 @@ func run(args []string) error {
 	return nil
 }
 
-// jevCredentials resolves the live jev provider. OpenRouter is the supported
-// path. TypeSafe direct is not guessed: a TYPESAFE_API_KEY without an explicit
-// compatible base URL, path and request shape fails before any call.
-func jevCredentials() (key, base, path string, err error) {
-	if k := os.Getenv("OPENROUTER_API_KEY"); k != "" {
-		return k, os.Getenv("DOR_JEV_BASE_URL"), os.Getenv("DOR_JEV_PATH"), nil
+// jevSelection is the live jev backend resolved from the environment. A zero
+// Key means no jev key is set and the eval runs jev as a mock.
+type jevSelection struct {
+	Host          string
+	Key           string
+	BaseURL       string
+	Path          string
+	Model         string
+	Price         config.Price
+	CostFromPrice bool
+}
+
+// clientConfig applies the selection to the connection settings shared by
+// both jev hosts (timeout, retries and backoff).
+func (s jevSelection) clientConfig(models config.Models) decide.ClientConfig {
+	return decide.ClientConfig{
+		BaseURL:       s.BaseURL,
+		Path:          s.Path,
+		APIKey:        s.Key,
+		Model:         s.Model,
+		Timeout:       models.Jev.Timeout.Std(),
+		MaxRetries:    models.Jev.MaxRetries,
+		MinBackoff:    models.Jev.MinBackoff.Std(),
+		MaxBackoff:    models.Jev.MaxBackoff.Std(),
+		Price:         s.Price,
+		CostFromPrice: s.CostFromPrice,
 	}
-	if k := os.Getenv("TYPESAFE_API_KEY"); k != "" {
-		base = firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL")
-		path = os.Getenv("DOR_JEV_PATH")
-		shape := os.Getenv("DOR_JEV_REQUEST_SHAPE")
-		if base == "" || path == "" || shape == "" {
-			return "", "", "", errors.New("TYPESAFE_API_KEY needs DOR_JEV_BASE_URL, DOR_JEV_PATH and DOR_JEV_REQUEST_SHAPE; TypeSafe direct is not implemented, use OPENROUTER_API_KEY")
-		}
-		if shape != "openrouter-decisions" {
-			return "", "", "", fmt.Errorf("unsupported DOR_JEV_REQUEST_SHAPE %q: TypeSafe direct /v1/systemone is not implemented; use OPENROUTER_API_KEY", shape)
-		}
-		return k, base, path, nil
+}
+
+// selectJev resolves the live jev provider from the environment. OpenRouter
+// keeps its existing behaviour. A lone TYPESAFE_API_KEY calls TypeSafe
+// directly with the jev.typesafe block, which supplies the model pin, path and
+// price; DOR_JEV_BASE_URL/TYPESAFE_BASE_URL and DOR_JEV_PATH override the
+// endpoint. DOR_JEV_REQUEST_SHAPE is optional now that both hosts accept the
+// decisions body, but an unknown value still fails before any call.
+func selectJev(models config.Models) (jevSelection, error) {
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		return jevSelection{
+			Host:    "openrouter",
+			Key:     key,
+			BaseURL: envOr("DOR_JEV_BASE_URL", models.Jev.BaseURL),
+			Path:    envOr("DOR_JEV_PATH", models.Jev.Path),
+			Model:   models.Jev.Model,
+			Price:   models.Jev.Price,
+		}, nil
 	}
-	return "", "", "", nil
+	if key := os.Getenv("TYPESAFE_API_KEY"); key != "" {
+		switch shape := os.Getenv("DOR_JEV_REQUEST_SHAPE"); shape {
+		case "", "openrouter-decisions", "systemone":
+		default:
+			return jevSelection{}, fmt.Errorf("unsupported DOR_JEV_REQUEST_SHAPE %q: want openrouter-decisions or systemone (or leave it unset)", shape)
+		}
+		ts := models.Jev.TypeSafe
+		base := firstEnv("DOR_JEV_BASE_URL", "TYPESAFE_BASE_URL")
+		if base == "" {
+			base = ts.BaseURL
+		}
+		return jevSelection{
+			Host:          "typesafe",
+			Key:           key,
+			BaseURL:       base,
+			Path:          envOr("DOR_JEV_PATH", ts.Path),
+			Model:         ts.Model,
+			Price:         ts.Price,
+			CostFromPrice: true,
+		}, nil
+	}
+	return jevSelection{}, nil
+}
+
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func firstEnv(names ...string) string {

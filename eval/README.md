@@ -95,9 +95,13 @@ With keys in the environment it runs live:
 
 | Key | Backend |
 | --- | --- |
-| `OPENROUTER_API_KEY` | jev through OpenRouter (the supported path) |
+| `OPENROUTER_API_KEY` | jev through OpenRouter (the default path) |
+| `TYPESAFE_API_KEY` | jev direct on `https://api.typesafe.ai/v1/systemone` with `jev-1.14.0`, using the `jev.typesafe` block in `config/models.yaml`; `DOR_JEV_BASE_URL`/`TYPESAFE_BASE_URL` and `DOR_JEV_PATH` override the endpoint |
 | `ANTHROPIC_API_KEY` | Claude Haiku for the baseline (`DOR_CLAUDE_BASE_URL` overrides the endpoint for compatible fakes) |
-| `TYPESAFE_API_KEY` | **not supported alone**: it needs `DOR_JEV_BASE_URL`, `DOR_JEV_PATH` and `DOR_JEV_REQUEST_SHAPE=openrouter-decisions`, and the direct `/v1/systemone` shape is not implemented. The CLI fails early with a clear message. |
+
+`OPENROUTER_API_KEY` wins when both jev keys are set. `DOR_JEV_REQUEST_SHAPE`
+is optional: unset, `openrouter-decisions` and `systemone` are accepted, and
+anything else fails before any call.
 
 If only one key is present, that backend runs live and the other runs as a
 mock; the report marks it as a mixed run. If none is present, both are mocks and
@@ -127,8 +131,10 @@ attempted removals, including aborted updates and CAS retries. The same in-memor
 fully live runs. Its token buckets are enlarged for the batch run;
 `eval_usd` is the binding limit. A live backend that returns no usable answers
 makes the command exit non-zero after writing the report. Claude cost is estimated from the
-price schedule in `config/models.yaml` (marked provisional); jev cost comes from
-`usage.cost`.
+price schedule in `config/models.yaml` (marked provisional). OpenRouter jev
+cost comes from `usage.cost`; TypeSafe direct returns no cost, so it is priced
+from tokens at `jev.typesafe.price`. The preflight uses the selected host's
+price.
 
 A live run writes selected thresholds to `config/thresholds.yaml` unless
 `-write-thresholds=false`. It always sets `provisional: true`, the label source,

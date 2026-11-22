@@ -8,9 +8,10 @@ deployment pipeline.
 
 ```bash
 make dev                       # Postgres :5433 + TEI :8090
-make build                     # bin/dor, bin/probe, bin/replayer
-./bin/dor run --agents=all     # embedded NATS :4222, gateway :8080, admin :8091
+make run                       # build + run all agents; embedded NATS :4222, gateway :8080, admin :8091
 ```
+
+`make run` loads `.env` when present; copy `.env.example` to `.env` for keys.
 
 Open <http://127.0.0.1:8080/ops>. The same page is also served by the admin
 listener at <http://127.0.0.1:8091/ops>, which is useful in split mode where a

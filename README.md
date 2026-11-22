@@ -7,12 +7,26 @@ cluster and link news stories; a SolidJS + MapLibre web app shows them on a 3D g
 
 ```bash
 make dev                 # Postgres/pgvector :5433 + TEI :8090, waits for healthy
-make build               # bin/dor, bin/probe, bin/replayer
-./bin/dor run --agents=all
+make run                 # build and run every agent; loads .env when present
 curl -i localhost:8091/healthz
 curl -s localhost:8091/metrics | grep dor_agent
 open http://127.0.0.1:8080/ops   # Supervisor, agents, budgets, sources and actions
 ```
+
+`make run AGENTS=classify,plot` runs a subset of the agents.
+
+### Keys and model backends
+
+Copy `.env.example` to `.env`; `make run`, `make eval` and `make replay` load it
+when present (the binaries do not read it themselves). Every key is optional:
+without them the affected features fall back to their deterministic paths.
+
+- `TYPESAFE_API_KEY` sends jev to `https://api.typesafe.ai/v1/systemone`
+  (`jev-1.14.0`). `OPENROUTER_API_KEY` sends it to OpenRouter instead and wins
+  when both are set.
+- `DOR_LLM_BACKENDS=claude-cli,codex-cli` runs the Claude features on the
+  logged-in Claude / ChatGPT subscriptions, with fallback between them; `api`
+  uses `ANTHROPIC_API_KEY` and is the default when that key is set.
 
 Publish a test message to the sample echo agent (`echo.in` → `echo.out`):
 

@@ -8,9 +8,9 @@ import (
 
 // EstimateRun estimates live cost from the actual request and job builders, so
 // a paid run is checked against eval_usd before the first call. It counts only
-// items that have labels.
-func EstimateRun(ds *Dataset, models config.Models) (jevUSD, claudeUSD float64, calls int) {
-	jevPrice := models.Jev.Price
+// items that have labels. jevPrice is the price of the jev host that will run
+// live (OpenRouter or TypeSafe); a mock jev backend passes the zero Price.
+func EstimateRun(ds *Dataset, models config.Models, jevPrice config.Price) (jevUSD, claudeUSD float64, calls int) {
 	claudePrice := models.Claude.Price[models.Claude.HaikuModel]
 	addJev := func(req decide.Request) {
 		jevUSD += jevPrice.Cost(decide.EstimateRequestTokens(req), 0)

@@ -56,6 +56,7 @@ before implementation.
 | `make dev-down` | stop compose services, keep volumes |
 | `make dev-reset` | stop and delete compose volumes |
 | `make build` | build `bin/dor`, `bin/probe` and `bin/replayer` |
+| `make run` | build, load `.env` if present, then run `dor` with all agents (`AGENTS=classify,plot` selects a subset) |
 | `make replay` | replay the latest recorded day at 10× (`DOR_RECORD_DIR`, `DAY`, `RATE`) |
 | `make test` | `go test ./...` |
 | `make test-race` | `go test -race ./...` |

@@ -1182,6 +1182,11 @@ export function App() {
         setConnection("offline");
         console.error(`data worker: ${event.message}`);
       };
+      // Seed filters/prompts before start so the first socket greeting
+      // carries them ahead of Hello and the resume snapshot is projected
+      // with the app's real prompt set.
+      worker.postMessage({ type: "filters", filters: filters() });
+      worker.postMessage({ type: "prompts", prompts: prompts() });
       worker.postMessage({
         type: "start",
         mode:
@@ -1191,8 +1196,6 @@ export function App() {
               ? "mock"
               : "live",
       });
-      worker.postMessage({ type: "filters", filters: filters() });
-      worker.postMessage({ type: "prompts", prompts: prompts() });
       const frame = (): void => {
         if (disposed) return;
         if (workerFrameReady && liveGlobe?.isReady) {

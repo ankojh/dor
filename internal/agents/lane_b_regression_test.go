@@ -22,6 +22,36 @@ import (
 // Regression coverage for lane B of the final combined review. Each test
 // asserts the accepted post-fix behaviour, not the original defect.
 
+// legacyWriteHook injects a newer accepted observation at the exact write that
+// the old unconditional legacy `Put` used. New code writes with CAS; the hook
+// fires on Create/Update/Put so it covers both implementations.
+type legacyWriteHook struct {
+	jetstream.KeyValue
+	once   sync.Once
+	before func()
+}
+
+func (k *legacyWriteHook) fire(key string) {
+	if key == relationStoryKey("legacy-a") {
+		k.once.Do(k.before)
+	}
+}
+
+func (k *legacyWriteHook) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	k.fire(key)
+	return k.KeyValue.Put(ctx, key, value)
+}
+
+func (k *legacyWriteHook) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	k.fire(key)
+	return k.KeyValue.Create(ctx, key, value, opts...)
+}
+
+func (k *legacyWriteHook) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	k.fire(key)
+	return k.KeyValue.Update(ctx, key, value, revision)
+}
+
 type regressionCapture struct{ state []byte }
 
 func (d *regressionCapture) Decide(_ context.Context, req decide.Request) (decide.Response, error) {
@@ -203,10 +233,10 @@ func TestRelationLegacyRestorePreservesNewerRecord(t *testing.T) {
 	}
 	latest := proto.Clone(a).(*dorv1.Story)
 	latest.Title = "newest accepted content"
-	// The fast process accepts newer content while the slow one is still about
-	// to scan legacy stories.
-	regressionObserve(t, fast, latest, 100)
-
+	// The fast process accepts newer content after the slow process has
+	// scanned rel.s but before its legacy write lands. The hook fires on the
+	// old unconditional Put and on the new CAS Create/Update.
+	slow.kv = &legacyWriteHook{KeyValue: slow.kv, before: func() { regressionObserve(t, fast, latest, 100) }}
 	slow.restore(ctx)
 
 	rec := loadRelationStoryRecord(t, ctx, b, a.Id)

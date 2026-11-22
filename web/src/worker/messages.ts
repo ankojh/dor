@@ -133,6 +133,7 @@ export type WireFilters = {
 export type WorkerCommand =
   | { type: "start"; mode: "live" | "mock" | "perf" }
   | { type: "frame" }
+  | { type: "refresh" }
   | { type: "focus"; storyId: string }
   | { type: "filters"; filters: WireFilters }
   | { type: "prompts"; prompts: string[] };

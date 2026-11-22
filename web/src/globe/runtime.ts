@@ -21,6 +21,7 @@ import {
   type StorySummary,
 } from "./live-data";
 import { greatCirclePoint } from "./mercator";
+import { shouldIgnoreGlobeKeys } from "../keyboard";
 import { buildLabelsOnlyStyle } from "./style/dor-labels";
 import type { HudFocus } from "../worker/fake/protocol";
 
@@ -96,6 +97,8 @@ type RuntimeOptions = {
   onFocus?: (focus: FocusDetails | null) => void;
   onLinkClick?: (link: LinkInfo) => void;
   onView?: (view: GlobeView) => void;
+  /** Fired after a lost WebGL context is rebuilt (request authoritative data). */
+  onContextRestored?: () => void;
 };
 
 type AggregateFeature = {
@@ -137,10 +140,10 @@ export class LiveGlobe {
   private focused: FocusDetails | null = null;
   private ready = false;
   private pending: WorkerInit | null = null;
-  private lastPick: number | null = null;
-  private lastPickAt = 0;
-  private lastPickPoint: { x: number; y: number } | null = null;
   private destroyed = false;
+  private contextLost = false;
+  private readonly storyDimState = new Map<number, number>();
+  private readonly linkDimState = new Map<number, number>();
   private secondDegree = false;
   private edgeMarkers: EdgeMarker[] = [];
   private labelsVisible = true;
@@ -155,8 +158,8 @@ export class LiveGlobe {
   private lastFrameAt = 0;
   private goodSince = 0;
   private frameHandle: number | null = null;
-  private idleHandle: number | null = null;
-  private lastInteractionAt = Date.now();
+  private restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private restoreAttempts = 0;
 
   constructor(container: HTMLElement, options: RuntimeOptions = {}) {
     this.options = options;
@@ -179,6 +182,10 @@ export class LiveGlobe {
       renderWorldCopies: true,
     });
     this.camera = new CameraController(this.map);
+    // The app owns ↑/↓ (walk the wire) and Esc (clear focus); MapLibre's
+    // canvas keyboard handler would pan the camera on the same keys and mark
+    // them defaultPrevented before the window-level handler sees them.
+    this.map.keyboard.disable();
     this.map.addControl(new ScaleControl({ unit: "metric", maxWidth: 110 }), "bottom-right");
     this.labels = new StoryLabels(this.map);
     this.map.on("load", () => this.onLoad());
@@ -199,12 +206,9 @@ export class LiveGlobe {
       }
     });
     this.installInteractions();
+    this.map.on("webglcontextlost", this.onContextLost);
+    this.map.on("webglcontextrestored", this.onContextRestored);
     this.frameHandle = requestAnimationFrame(this.sampleFrame);
-    this.idleHandle = window.setInterval(() => {
-      if (this.destroyed || this.focused || this.map.isMoving()) return;
-      if (Date.now() - this.lastInteractionAt < 30_000) return;
-      this.map.panBy([0.012, 0], { duration: 0 });
-    }, 1000);
   }
 
   private onLoad(): void {
@@ -376,26 +380,15 @@ export class LiveGlobe {
   }
 
   private installInteractions(): void {
-    const remember = (event: { point: { x: number; y: number }; originalEvent?: unknown }) => {
-      if (!event.originalEvent) return;
-      this.lastPick = this.layer.pickNow(event.point.x, event.point.y);
-      this.lastPickAt = performance.now();
-      this.lastPickPoint = { x: event.point.x, y: event.point.y };
-    };
-    this.map.on("mousedown", remember);
-    this.map.on("touchstart", remember);
-    for (const eventName of [
-      "mousedown",
-      "touchstart",
-      "wheel",
-      "dragstart",
-      "zoomstart",
-    ] as const) {
-      this.map.on(eventName, () => {
-        this.lastInteractionAt = Date.now();
-      });
-    }
     this.map.on("click", (event) => {
+      if (this.contextLost) return;
+      // Dots first: an arc crossing a dot must not steal the dot's click.
+      const pick = this.layer.pickNow(event.point.x, event.point.y);
+      if (pick?.kind === "story") {
+        const entry = this.data?.stories[pick.index];
+        if (entry) this.focusStoryId(entry.story.id);
+        return;
+      }
       if (this.map.getLayer(LINK_LABEL_LAYER)) {
         const hit = this.map.queryRenderedFeatures(event.point, { layers: [LINK_LABEL_LAYER] })[0];
         if (hit) {
@@ -405,32 +398,114 @@ export class LiveGlobe {
           return;
         }
       }
-      const now = performance.now();
-      const cached =
-        this.lastPick !== null &&
-        this.lastPickPoint !== null &&
-        now - this.lastPickAt < 1000 &&
-        Math.hypot(this.lastPickPoint.x - event.point.x, this.lastPickPoint.y - event.point.y) < 8;
-      const arc = this.findArcAt(event.point.x, event.point.y);
-      if (arc !== null) {
-        const info = this.linkInfo(arc);
-        if (info) {
-          this.options.onLinkClick?.(info);
-          return;
-        }
-      }
-      const picked = cached ? this.lastPick : this.layer.pickNow(event.point.x, event.point.y);
-      if (picked !== null && picked >= 0) {
-        const entry = this.data?.stories[picked];
-        if (entry) this.focusStoryId(entry.story.id);
+      if (pick?.kind === "link") {
+        const info = this.linkInfo(pick.index);
+        if (info) this.options.onLinkClick?.(info);
       }
     });
     window.addEventListener("keydown", this.onKeyDown);
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") this.clearFocus();
+    // Esc is a globe shortcut only when the user is not typing and no dialog
+    // or popover owns the keyboard (typing "q"/Esc in the prompt box must not
+    // clear the focused story).
+    if (event.key !== "Escape") return;
+    if (shouldIgnoreGlobeKeys(event, document)) return;
+    this.clearFocus();
   };
+
+  private readonly onContextLost = (): void => {
+    // MapLibre destroys the style (and our custom layer) on loss. Keep the
+    // runtime data; the layer retains its init for the restore path.
+    this.contextLost = true;
+    this.layer.handleContextLost();
+    this.map.getContainer().classList.add("gl-context-lost");
+    this.emit();
+  };
+
+  private readonly onContextRestored = (): void => {
+    this.contextLost = false;
+    this.map.getContainer().classList.remove("gl-context-lost");
+    // Ask for authoritative data first; the layer rebuild can wait for the
+    // restored style to become serializable.
+    this.options.onContextRestored?.();
+    this.restoreLayer();
+    this.emit();
+  };
+
+  /**
+   * Re-add the custom layer after MapLibre restores the style. Custom layers
+   * cannot be serialized, so MapLibre drops them from the restored style; the
+   * layer's onAdd rebuilds its programs and buffers from the retained init.
+   */
+  private restoreLayer(): void {
+    if (this.destroyed || !this.ready || !this.data) return;
+    let style: ReturnType<MapLibreMap["getStyle"]> | undefined;
+    try {
+      style = this.map.getStyle();
+    } catch {
+      style = undefined;
+    }
+    // A style restored from a lost context is not serializable until its
+    // sources finish loading; retry instead of throwing on the first frame.
+    if (!style) {
+      this.scheduleLayerRestore();
+      return;
+    }
+    const firstSymbol = (style.layers ?? []).find((candidate) => candidate.type === "symbol")?.id;
+    try {
+      this.addAreaLayer(firstSymbol);
+      if (!this.map.getLayer(this.layer.id)) this.map.addLayer(this.layer, firstSymbol);
+      this.labels.add();
+      this.addAnnotations();
+    } catch (error) {
+      console.warn(`globe: layer restore failed (${String(error)})`);
+      this.scheduleLayerRestore();
+      return;
+    }
+    this.restoreAttempts = 0;
+    this.layer.setLinesVisible(this.linesVisible);
+    this.layer.setTethersVisible(this.tethersVisible);
+    this.layer.setHeatVisible(this.heatVisible);
+    this.layer.setQuality(this.quality);
+    this.layer.setStrengthFloor(this.floor);
+    const nowSec = (Date.now() - this.data.init.epochMs) / 1000;
+    if (this.mirror) {
+      const snapshot = this.mirror.snapshot(nowSec);
+      this.layer.writeFocus(snapshot.storyChanges, snapshot.linkChanges, this.focused !== null);
+    }
+    this.reapplyMatchState();
+    if (this.focused && this.tethersVisible) {
+      const tethers = buildLiveTethers(this.focused.live);
+      this.layer.applyTethers(tethers.segments, tethers.rings);
+    } else {
+      this.layer.applyTethers([], []);
+    }
+    this.map.triggerRepaint();
+  }
+
+  private scheduleLayerRestore(): void {
+    if (this.restoreTimer !== null || this.destroyed) return;
+    if (this.restoreAttempts >= 50) return;
+    this.restoreAttempts += 1;
+    this.restoreTimer = setTimeout(() => {
+      this.restoreTimer = null;
+      this.restoreLayer();
+    }, 100);
+  }
+
+  private reapplyMatchState(): void {
+    if (!this.ready || this.storyDimState.size === 0) return;
+    const storyIndices = Uint16Array.from(this.storyDimState.keys());
+    const storyDims = Uint8Array.from(this.storyDimState.values());
+    const linkIndices = Uint16Array.from(this.linkDimState.keys());
+    const linkDims = Uint8Array.from(this.linkDimState.values());
+    this.layer.updateMatches(
+      { indices: storyIndices, dimmed: storyDims },
+      { indices: linkIndices, dimmed: linkDims },
+    );
+  }
 
   private onMoveEnd(): void {
     if (this.annotationsDirty) {
@@ -465,6 +540,8 @@ export class LiveGlobe {
     };
     this.activeStoryCount = summaries.filter(Boolean).length;
     this.activeLinkCount = init.linkCount;
+    this.storyDimState.clear();
+    this.linkDimState.clear();
     this.updateTop(init.topStories);
     this.layer.setInit(init);
     this.initCount++;
@@ -561,6 +638,10 @@ export class LiveGlobe {
       mirror.applyStream(patch.stream);
       this.layer.stream(patch.stream);
       this.layer.updateMatches(patch.storyStates, patch.linkStates);
+      for (let i = 0; i < patch.storyStates.indices.length; i++)
+        this.storyDimState.set(patch.storyStates.indices[i]!, patch.storyStates.dimmed[i]!);
+      for (let i = 0; i < patch.linkStates.indices.length; i++)
+        this.linkDimState.set(patch.linkStates.indices[i]!, patch.linkStates.dimmed[i]!);
       this.rippleCount += patch.stream.ripples.length;
       this.patchCount++;
       this.activeStoryCount = patch.storyCount;
@@ -614,6 +695,8 @@ export class LiveGlobe {
       focusLatencyMs: this.focusLatencyMs,
       focusedStoryId: this.focusId,
       focusState: index === undefined ? null : this.layer.storyAnimation(index),
+      picks: this.layer.stats,
+      contextLost: this.contextLost,
     };
   }
 
@@ -626,8 +709,10 @@ export class LiveGlobe {
     }
     const index = data.storyById.get(storyId);
     if (index === undefined) return;
+    // Re-selecting the same story (an adjacent wire row of the same story)
+    // must not refly the camera or re-activate the panel.
+    if (this.focusId === storyId && this.focused) return;
     this.focusId = storyId;
-    this.lastInteractionAt = Date.now();
     this.focusStartedAt = performance.now();
     this.applyFocus(index, true);
   }
@@ -819,27 +904,6 @@ export class LiveGlobe {
         };
       });
     source.setData({ type: "FeatureCollection", features });
-  }
-
-  private findArcAt(x: number, y: number): number | null {
-    const data = this.data;
-    if (!data || !this.linesVisible) return null;
-    let best: number | null = null;
-    let bestDistance = 7;
-    for (let index = 0; index < data.init.linkCount; index++) {
-      if ((data.init.links.strength[index] ?? 0) < this.floor) continue;
-      const a = data.stories[data.init.links.a[index]!];
-      const b = data.stories[data.init.links.b[index]!];
-      if (!a || !b) continue;
-      const start = this.map.project([a.lng, a.lat]);
-      const end = this.map.project([b.lng, b.lat]);
-      const distance = distanceToSegment(x, y, start.x, start.y, end.x, end.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = index;
-      }
-    }
-    return best;
   }
 
   private updateDistanceRings(): void {
@@ -1206,27 +1270,13 @@ export class LiveGlobe {
   destroy(): void {
     this.destroyed = true;
     if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
-    if (this.idleHandle !== null) clearInterval(this.idleHandle);
+    if (this.restoreTimer !== null) clearTimeout(this.restoreTimer);
     window.removeEventListener("keydown", this.onKeyDown);
+    this.map.off("webglcontextlost", this.onContextLost);
+    this.map.off("webglcontextrestored", this.onContextRestored);
     this.perf.destroy();
     this.map.remove();
   }
-}
-
-function distanceToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const length = dx * dx + dy * dy;
-  if (length === 0) return Math.hypot(px - ax, py - ay);
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
 function destinationPoint(

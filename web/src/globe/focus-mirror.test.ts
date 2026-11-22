@@ -122,3 +122,46 @@ describe("FocusMirror", () => {
     void world;
   });
 });
+
+describe("FocusMirror.snapshot after a context restore", () => {
+  it("is empty when nothing is lit", () => {
+    const { mirror } = makeMirror();
+    expect(mirror.snapshot(1234)).toEqual({ storyChanges: [], linkChanges: [] });
+  });
+
+  it("re-sends every lit story and link with its current state", () => {
+    const { mirror, neighbours } = makeMirror();
+    const index = busiest(neighbours);
+    mirror.focus(index, true, 1000);
+    expect(mirror.litStoryCount).toBeGreaterThan(0);
+    expect(mirror.litLinkCount).toBeGreaterThan(0);
+
+    const snapshot = mirror.snapshot(2000);
+
+    // Exactly one change per lit byte, re-asserting the current state.
+    expect(snapshot.storyChanges).toHaveLength(mirror.litStoryCount);
+    expect(snapshot.linkChanges).toHaveLength(mirror.litLinkCount);
+    for (const change of snapshot.storyChanges) {
+      expect(change.at).toBe(2000);
+      expect(change.state).toBe(mirror.storyStateOf(change.index));
+      expect(change.prev).toBe(change.state);
+      expect(mirror.isLit(change.index)).toBe(true);
+    }
+    for (const change of snapshot.linkChanges) {
+      expect(change.at).toBe(2000);
+      expect(change.state).toBe(mirror.linkStateOf(change.index));
+      expect(change.prev).toBe(change.state);
+    }
+    const storyIndices = snapshot.storyChanges.map((change) => change.index);
+    expect(new Set(storyIndices)).toEqual(new Set(mirror.litStoryIndices));
+  });
+
+  it("is empty again after the focus is cleared", () => {
+    const { mirror, neighbours } = makeMirror();
+    mirror.focus(busiest(neighbours), true, 1000);
+    expect(mirror.snapshot(2000).storyChanges.length).toBeGreaterThan(0);
+
+    mirror.focus(null, false, 3000);
+    expect(mirror.snapshot(4000)).toEqual({ storyChanges: [], linkChanges: [] });
+  });
+});

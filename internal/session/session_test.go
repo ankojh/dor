@@ -22,6 +22,27 @@ func sessionTestSigner(t *testing.T) *Signer {
 	return s
 }
 
+func assertSessionUncacheable(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	vary := strings.Join(w.Header().Values("Vary"), ", ")
+	if !strings.Contains(vary, "Cookie") {
+		t.Fatalf("Vary = %q, want Cookie", vary)
+	}
+}
+
+// flipLast always changes the final character, including a trailing zero.
+func flipLast(value string) string {
+	last := value[len(value)-1]
+	replacement := byte('0')
+	if last == '0' {
+		replacement = '1'
+	}
+	return value[:len(value)-1] + string(replacement)
+}
+
 func TestIssueVerifyRoundTrip(t *testing.T) {
 	s := sessionTestSigner(t)
 	id, token, err := s.Issue()
@@ -50,15 +71,6 @@ func TestVerifyRejectsTamperedAndMalformedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	flipLast := func(value string) string {
-		last := value[len(value)-1]
-		replacement := byte('0')
-		if last == '0' {
-			replacement = '1'
-		}
-		return value[:len(value)-1] + string(replacement)
-	}
-
 	cases := []struct {
 		name  string
 		token string
@@ -98,6 +110,7 @@ func TestMiddlewareIssuesSignedHttpOnlyCookieAndContextID(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", w.Code)
 	}
+	assertSessionUncacheable(t, w)
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("Set-Cookie count = %d, want 1", len(cookies))
@@ -140,6 +153,7 @@ func TestMiddlewareKeepsValidCookieAndReplacesTamperedCookie(t *testing.T) {
 	valid.AddCookie(&http.Cookie{Name: CookieName, Value: token})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, valid)
+	assertSessionUncacheable(t, w)
 	if len(w.Result().Cookies()) != 0 {
 		t.Fatalf("valid cookie was reissued: %v", w.Result().Cookies())
 	}
@@ -147,11 +161,12 @@ func TestMiddlewareKeepsValidCookieAndReplacesTamperedCookie(t *testing.T) {
 		t.Fatalf("context ids = %v, want [%q]", seen, id)
 	}
 
-	tampered := token[:len(token)-1] + "0"
+	tampered := flipLast(token)
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/session", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: tampered})
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
+	assertSessionUncacheable(t, w)
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("tampered cookie did not produce a replacement: %v", cookies)

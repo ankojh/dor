@@ -101,6 +101,50 @@ func listHits(t *testing.T, srv *Server, cookie *http.Cookie, query string) []hi
 	return payload.Hits
 }
 
+func assertUncacheable(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	vary := strings.Join(w.Header().Values("Vary"), ", ")
+	if !strings.Contains(vary, "Cookie") {
+		t.Fatalf("Vary = %q, want Cookie", vary)
+	}
+}
+
+func TestSessionAndAlertReadsAreUncacheable(t *testing.T) {
+	srv, _ := newGuardTestServer(t, nil)
+	cookie, _ := issueSession(t, srv)
+	created := createOwnedAlert(t, srv, cookie)
+
+	// A newly issued session must not be cached or replayed to another client.
+	w := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://localhost/api/session", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/session status = %d", w.Code)
+	}
+	assertUncacheable(t, w)
+	if len(w.Result().Cookies()) == 0 {
+		t.Fatal("GET /api/session did not issue a session")
+	}
+
+	// An existing session's owner-scoped reads must not be cached either.
+	w = serveGatewayJSON(t, srv, http.MethodGet, "/api/alerts", "", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list alerts status = %d", w.Code)
+	}
+	assertUncacheable(t, w)
+	if len(w.Result().Cookies()) != 0 {
+		t.Fatalf("valid session was reissued: %v", w.Result().Cookies())
+	}
+
+	w = serveGatewayJSON(t, srv, http.MethodGet, "/api/alerts/hits?alert_id="+created.ID, "", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list hits status = %d", w.Code)
+	}
+	assertUncacheable(t, w)
+}
+
 func TestAlertsAreScopedToTheCreatingSession(t *testing.T) {
 	srv, store := newGuardTestServer(t, nil)
 	cookieA, ownerA := issueSession(t, srv)

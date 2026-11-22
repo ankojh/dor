@@ -165,6 +165,11 @@ func (s *Signer) Cookie(token string, secure bool) *http.Cookie {
 // id in the request context. A missing or tampered cookie gets a fresh id.
 func (s *Signer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every response through this middleware can set or depend on the
+		// session cookie. A shared cache must not replay A's Set-Cookie or
+		// owner-scoped body to B (RFC 9111 §7.3).
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Add("Vary", "Cookie")
 		id, token, ok := s.FromRequest(r)
 		issued := !ok
 		if issued {

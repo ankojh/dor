@@ -11,6 +11,11 @@ export type WireItemLike = {
   row: WireRow;
   key: string;
   receivedAt: number;
+  /**
+   * True for cold-start snapshot rows. They are history, not arrivals, so the
+   * rolling rate must ignore them; otherwise every load or reconnect spikes.
+   */
+  hydrated?: boolean;
 };
 
 /** Provenance fields F1·2 adds to WireRow. Zero values mean unknown. */
@@ -35,9 +40,9 @@ export const RATE_WINDOW_MS = 60_000;
 const RATE_BUCKETS = 5;
 
 /**
- * Effective publish time. A source that reports local time as UTC (seen as
- * 22:52 at 14:58 UTC) cannot produce a row in the future: the client clamps it
- * to the moment the article reached the wire.
+ * Effective publish time. The server clamps a future source clock at ingest;
+ * this is only a backstop for rows stored before that fix (seen as 22:52 at
+ * 14:58 UTC). A normal server value is already in the past and is untouched.
  */
 export function wirePublishMs(row: WireRow, receivedAt: number): number {
   const seconds = Number(row.at);
@@ -55,23 +60,29 @@ export function sortWireItems<T extends WireItemLike>(items: readonly T[]): T[] 
   });
 }
 
-/** Articles whose effective publish time falls inside the last rolling minute. */
+/**
+ * Articles that arrived live in the last rolling minute. Publish time is not
+ * arrival time: a real feed reaches the wire 1–10 minutes after publication
+ * (poll interval, normalize, embed, cluster), so counting publish times shows
+ * "— / min" on a healthy stream. Cold-start snapshot rows are excluded.
+ */
 export function rollingMinuteRate(items: readonly WireItemLike[], nowMs: number): number {
   const cutoff = nowMs - RATE_WINDOW_MS;
   let count = 0;
   for (const item of items) {
-    const at = wirePublishMs(item.row, item.receivedAt);
-    if (at >= cutoff && at <= nowMs) count++;
+    if (item.hydrated) continue;
+    if (item.receivedAt >= cutoff && item.receivedAt <= nowMs) count++;
   }
   return count;
 }
 
-/** Five 12 s buckets across the same rolling minute, as bar heights (12–100). */
+/** Five 12 s arrival buckets across the same rolling minute (12–100). */
 export function rollingMinuteBars(items: readonly WireItemLike[], nowMs: number): number[] {
   const cutoff = nowMs - RATE_WINDOW_MS;
   const buckets = new Array<number>(RATE_BUCKETS).fill(0);
   for (const item of items) {
-    const at = wirePublishMs(item.row, item.receivedAt);
+    if (item.hydrated) continue;
+    const at = item.receivedAt;
     if (at < cutoff || at > nowMs) continue;
     const bucket = Math.min(
       RATE_BUCKETS - 1,
@@ -144,26 +155,28 @@ export type WireMetadataProvenance = {
 };
 
 /**
- * Reads F1·2's append-only provenance fields through one seam. Missing fields
- * decode as unknown, so rows from an older backend stay unmarked.
+ * Reads F1·2's provenance fields through one seam. Category is approximate
+ * only when the rule backend classified it (matching the story panel);
+ * `degraded` is a combined category-or-place flag and must not be read as
+ * category-degraded. Place is approximate when `place_degraded` is set.
  */
 export function wireMetadataProvenance(row: WireRow): WireMetadataProvenance {
   const meta = row as WireRow & WireProvenanceFields;
   const categoryBackend = (meta.categoryBackend ?? "").trim();
   const confidence = Number(meta.categoryConfidence ?? 0);
   const placeBackend = (meta.placeBackend ?? "").trim();
-  const category = meta.degraded === true || categoryBackend.toLowerCase() === "rule";
+  const category = categoryBackend.toLowerCase() === "rule";
   const place = meta.placeDegraded === true;
   const parts: string[] = [];
   if (category) {
-    let text = categoryBackend ? `Category from ${categoryBackend}` : "Category approximate";
+    let text = "Category approximated by the rule classifier";
     if (confidence > 0) text += ` (${Math.round(confidence * 100)}% confidence)`;
     parts.push(text);
   }
   if (place) {
-    parts.push(placeBackend ? `Place from ${placeBackend}` : "Place approximate");
+    parts.push(placeBackend ? `Place approximated from ${placeBackend}` : "Place approximated");
   }
-  if (meta.fallback === true || meta.placeFallback === true) {
+  if (parts.length > 0 && (meta.fallback === true || meta.placeFallback === true)) {
     parts.push("Fallback path used");
   }
   return {

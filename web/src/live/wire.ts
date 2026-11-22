@@ -12,8 +12,8 @@ type WireExtra = {
   lon?: number;
   located?: boolean;
   approxPrompts?: string[];
-  // F1·2 provenance: append-only and zero means unknown, so a partial update
-  // must never erase a known degraded marker.
+  // F1·2 provenance: only a row carrying a story id is authoritative and may
+  // clear an old marker; a partial article.clean row must not erase one.
   degraded?: boolean;
   fallback?: boolean;
   categoryBackend?: string;
@@ -50,15 +50,29 @@ export function mergeWireRow(existing: WireRow, incoming: WireRow): WireRow {
     newExtra.approxPrompts && newExtra.approxPrompts.length > 0
       ? newExtra.approxPrompts
       : oldExtra.approxPrompts;
-  extra.degraded = newExtra.degraded || oldExtra.degraded;
-  extra.fallback = newExtra.fallback || oldExtra.fallback;
-  extra.categoryBackend = newExtra.categoryBackend || oldExtra.categoryBackend;
-  extra.categoryConfidence =
-    newExtra.categoryConfidence !== undefined && newExtra.categoryConfidence !== 0
-      ? newExtra.categoryConfidence
-      : oldExtra.categoryConfidence;
-  extra.placeBackend = newExtra.placeBackend || oldExtra.placeBackend;
-  extra.placeDegraded = newExtra.placeDegraded || oldExtra.placeDegraded;
-  extra.placeFallback = newExtra.placeFallback || oldExtra.placeFallback;
+  // A row carrying a story id mirrors the publisher's complete story row: its
+  // provenance is authoritative, so an upgrade from rule to model can clear a
+  // stale approx marker. Only partial article.clean rows (no story id) keep
+  // the OR rule that stops zero values from erasing known provenance.
+  if (incoming.storyId) {
+    extra.degraded = newExtra.degraded ?? false;
+    extra.fallback = newExtra.fallback ?? false;
+    extra.categoryBackend = newExtra.categoryBackend ?? "";
+    extra.categoryConfidence = newExtra.categoryConfidence ?? 0;
+    extra.placeBackend = newExtra.placeBackend ?? "";
+    extra.placeDegraded = newExtra.placeDegraded ?? false;
+    extra.placeFallback = newExtra.placeFallback ?? false;
+  } else {
+    extra.degraded = newExtra.degraded || oldExtra.degraded;
+    extra.fallback = newExtra.fallback || oldExtra.fallback;
+    extra.categoryBackend = newExtra.categoryBackend || oldExtra.categoryBackend;
+    extra.categoryConfidence =
+      newExtra.categoryConfidence !== undefined && newExtra.categoryConfidence !== 0
+        ? newExtra.categoryConfidence
+        : oldExtra.categoryConfidence;
+    extra.placeBackend = newExtra.placeBackend || oldExtra.placeBackend;
+    extra.placeDegraded = newExtra.placeDegraded || oldExtra.placeDegraded;
+    extra.placeFallback = newExtra.placeFallback || oldExtra.placeFallback;
+  }
   return merged;
 }

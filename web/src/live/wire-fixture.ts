@@ -89,12 +89,21 @@ function row(index: number, at: number, future = false): WireRow {
   const unlocated = index % 6 === 0;
   const countryOnly = !unlocated && index % 11 === 5;
   const joined = index % 3 === 0;
+  // Real feed shapes: USGS and GDELT place strings are full sentences.
+  const longPlace =
+    !unlocated && !countryOnly
+      ? index % 13 === 7
+        ? "12 km SSW of Hualien City, Taiwan"
+        : index % 17 === 9
+          ? "Berlin, Berlin, Germany"
+          : ""
+      : "";
   const rebuilt = {
     articleId: `fixture-article-${future ? "future-" : ""}${index}`,
     storyId: index % 3 === 2 ? "" : story.id,
     title: TITLES[index % TITLES.length]!,
     source,
-    place: unlocated ? city.name : countryOnly ? "" : city.name,
+    place: unlocated ? city.name : countryOnly ? "" : longPlace || city.name,
     category: city.category,
     at: BigInt(at),
     join: joined ? 1 : 0,

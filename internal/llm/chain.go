@@ -87,7 +87,7 @@ func (c *Chain) Close() error {
 // Complete runs the job on the first backend that answers.
 func (c *Chain) Complete(ctx context.Context, job Job) (Result, error) {
 	var errs []error
-	tried := 0
+	tried, tooSlow := 0, 0
 	for i, b := range c.backends {
 		if c.cooling(i) {
 			continue
@@ -101,6 +101,11 @@ func (c *Chain) Complete(ctx context.Context, job Job) (Result, error) {
 		if ctx.Err() != nil {
 			return res, err
 		}
+		if errors.Is(err, ErrCLITooSlow) {
+			// Expected for every short-deadline job; not worth a log line.
+			tooSlow++
+			continue
+		}
 		errs = append(errs, fmt.Errorf("%s: %w", b.Name, err))
 		var stop *StopError
 		if errors.As(err, &stop) || errors.Is(err, ErrBudget) {
@@ -112,6 +117,11 @@ func (c *Chain) Complete(ctx context.Context, job Job) (Result, error) {
 	}
 	if tried == 0 {
 		return Result{}, ErrNoBackend
+	}
+	if len(errs) == 0 && tooSlow > 0 {
+		// Every backend that was tried declined the deadline: callers treat
+		// this as "no model for this job", not as a failure.
+		return Result{}, ErrCLITooSlow
 	}
 	return Result{}, errors.Join(errs...)
 }

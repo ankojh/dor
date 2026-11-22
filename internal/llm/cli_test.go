@@ -432,6 +432,119 @@ func TestCLIBudgetDenial(t *testing.T) {
 	}
 }
 
+// newDeadlineTestCLI builds a CLI backend with an explicit MinDeadline (0
+// keeps the default) and the given budget and runner.
+func newDeadlineTestCLI(t *testing.T, minDeadline time.Duration, b Budget, run CommandRunner) *CLIClient {
+	t.Helper()
+	c, err := NewCLI(CLIConfig{Kind: CLIClaude, HaikuModel: "small", OpusModel: "big",
+		MinDeadline: minDeadline, Budget: b, Run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestCLIMinDeadlineDeclinesShortDeadline(t *testing.T) {
+	fb := &fakeBudget{}
+	ran := false
+	c := newDeadlineTestCLI(t, 0, fb, func(context.Context, Command) ([]byte, []byte, error) {
+		ran = true
+		return []byte(claudeOK), nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+
+	res, err := c.Complete(ctx, cliJob())
+	if !errors.Is(err, ErrCLITooSlow) {
+		t.Fatalf("err = %v, want ErrCLITooSlow", err)
+	}
+	if ran {
+		t.Error("the command runner ran despite the short deadline")
+	}
+	if len(fb.checks) != 0 {
+		t.Errorf("budget checks = %d, want none before a process starts", len(fb.checks))
+	}
+	if len(fb.records) != 0 {
+		t.Errorf("budget records = %d, want none", len(fb.records))
+	}
+	if res.Text != "" || res.Attempts != 0 {
+		t.Errorf("res = %+v, want the zero result", res)
+	}
+}
+
+func TestCLIMinDeadlineRunsAboveThreshold(t *testing.T) {
+	fb := &fakeBudget{}
+	ran := false
+	c := newDeadlineTestCLI(t, 0, fb, func(context.Context, Command) ([]byte, []byte, error) {
+		ran = true
+		return []byte(claudeOK), nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := c.Complete(ctx, cliJob()); err != nil {
+		t.Fatalf("err = %v, want a normal run", err)
+	}
+	if !ran {
+		t.Error("the command runner did not run")
+	}
+	if len(fb.checks) != 1 {
+		t.Errorf("budget checks = %d, want 1", len(fb.checks))
+	}
+}
+
+func TestCLIMinDeadlineCustomThreshold(t *testing.T) {
+	ran := 0
+	c := newDeadlineTestCLI(t, 2*time.Second, nil, func(context.Context, Command) ([]byte, []byte, error) {
+		ran++
+		return []byte(claudeOK), nil, nil
+	})
+
+	short, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if _, err := c.Complete(short, cliJob()); !errors.Is(err, ErrCLITooSlow) {
+		t.Errorf("short deadline err = %v, want ErrCLITooSlow", err)
+	}
+	if ran != 0 {
+		t.Errorf("runner ran %d times below the custom MinDeadline", ran)
+	}
+
+	long, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Complete(long, cliJob()); err != nil {
+		t.Errorf("long deadline err = %v, want a normal run", err)
+	}
+	if ran != 1 {
+		t.Errorf("runner ran %d times above the custom MinDeadline, want 1", ran)
+	}
+}
+
+func TestCLIMinDeadlineDefault(t *testing.T) {
+	ran := 0
+	c := newDeadlineTestCLI(t, 0, nil, func(context.Context, Command) ([]byte, []byte, error) {
+		ran++
+		return []byte(claudeOK), nil, nil
+	})
+	if c.cfg.MinDeadline != 10*time.Second {
+		t.Fatalf("default MinDeadline = %v, want 10s", c.cfg.MinDeadline)
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	if _, err := c.Complete(short, cliJob()); !errors.Is(err, ErrCLITooSlow) {
+		t.Errorf("9s deadline err = %v, want ErrCLITooSlow", err)
+	}
+	long, cancel := context.WithTimeout(context.Background(), 11*time.Second)
+	defer cancel()
+	if _, err := c.Complete(long, cliJob()); err != nil {
+		t.Errorf("11s deadline err = %v, want a normal run", err)
+	}
+	if ran != 1 {
+		t.Errorf("runner ran %d times, want only the 11s job", ran)
+	}
+}
+
 func TestCLIBudgetRecordsZeroUsageOnFailure(t *testing.T) {
 	fb := &fakeBudget{}
 	boom := errors.New("exit status 1")

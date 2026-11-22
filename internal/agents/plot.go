@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -191,7 +192,11 @@ func (p *plotter) fromClaude(ctx context.Context, article *dorv1.Article, candid
 	})
 	res, err := p.deps.Enricher.Complete(callCtx, job)
 	if err != nil {
-		p.log.Warn("plot: claude fallback failed", "article_id", article.Id, "err", err)
+		// A subscription CLI cannot answer inside this deadline and declines
+		// before starting; that is the configured setup, not a failure.
+		if !errors.Is(err, llm.ErrCLITooSlow) {
+			p.log.Warn("plot: claude fallback failed", "article_id", article.Id, "err", err)
+		}
 		return nil, false
 	}
 	var enrichment llm.Enrichment

@@ -52,6 +52,11 @@ type CLIConfig struct {
 	Timeout time.Duration
 	// Concurrency caps processes in flight. Default 2.
 	Concurrency int
+	// MinDeadline is the least time a job's context must have left. A CLI
+	// takes seconds to start and answer, so a job with a shorter deadline
+	// (the 1.8 s per-article enricher fallback) is declined with ErrCLITooSlow
+	// before a process starts. Default 10 s.
+	MinDeadline time.Duration
 	// Budget enables admission control for CLI calls. Nil means no checks,
 	// which keeps tests simple.
 	Budget Budget
@@ -84,6 +89,10 @@ type CLIClient struct {
 // ErrCLIOutput is returned when the CLI ran but produced no usable answer.
 var ErrCLIOutput = errors.New("llm: cli returned no structured output")
 
+// ErrCLITooSlow is returned without starting a process when the job's
+// deadline is shorter than the backend's MinDeadline.
+var ErrCLITooSlow = errors.New("llm: job deadline is too short for a cli backend")
+
 // NewCLI validates the config and checks the binary is on PATH.
 func NewCLI(cfg CLIConfig) (*CLIClient, error) {
 	switch cfg.Kind {
@@ -109,6 +118,9 @@ func NewCLI(cfg CLIConfig) (*CLIClient, error) {
 	}
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 2
+	}
+	if cfg.MinDeadline <= 0 {
+		cfg.MinDeadline = 10 * time.Second
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -149,6 +161,9 @@ func (c *CLIClient) Complete(ctx context.Context, job Job) (Result, error) {
 	}
 	if err := ValidateSchema(job.Schema); err != nil {
 		return Result{}, err
+	}
+	if deadline, ok := ctx.Deadline(); ok && deadline.Sub(c.now()) < c.cfg.MinDeadline {
+		return Result{}, ErrCLITooSlow
 	}
 	model := c.cfg.HaikuModel
 	if job.Tier == TierOpus {

@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -109,7 +110,11 @@ func (c *classifier) fromClaude(ctx context.Context, article *dorv1.Article, lan
 		Source:   article.GetSourceId(),
 	}))
 	if err != nil {
-		c.log.Warn("classify: claude fallback failed", "article_id", article.Id, "err", err)
+		// A subscription CLI cannot answer inside this deadline and declines
+		// before starting; that is the configured setup, not a failure.
+		if !errors.Is(err, llm.ErrCLITooSlow) {
+			c.log.Warn("classify: claude fallback failed", "article_id", article.Id, "err", err)
+		}
 		return nil, false
 	}
 	var enrichment llm.Enrichment

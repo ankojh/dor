@@ -303,7 +303,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		if !canonical && count < 2 && !p.CountryID {
 			return 0
 		}
-		return 70 + boolScore(qualified, 20) + jurisdictionScore(p)
+		return 70 + boolScore(textQualified, 30) + boolScore(hintQualified, 10) + jurisdictionScore(p)
 	}
 	if countryName {
 		return 35
@@ -311,8 +311,11 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	if p.CountryID {
 		return 34
 	}
-	if qualified {
-		return 60 + jurisdictionScore(p)
+	if textQualified {
+		return 65 + jurisdictionScore(p)
+	}
+	if hintQualified {
+		return 55 + jurisdictionScore(p)
 	}
 	if ambiguous {
 		return 0

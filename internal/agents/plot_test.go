@@ -942,6 +942,32 @@ func TestFullCacheSportsContextNeedsIndependentGeographicEvidence(t *testing.T) 
 	}
 }
 
+func TestFullCacheExplicitParisQualifierOutranksConflictingCountryHint(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	cases := []struct {
+		name, dateline, hint, country string
+	}{
+		{"Paris Texas over France hint", "Paris, Texas", "FR", "US"},
+		{"Paris France over US hint", "Paris, France", "US", "FR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, ok := g.Lookup("Paris", tc.country)
+			if !ok || want.CountryID || strings.EqualFold(want.Feature, "ADM1") {
+				t.Fatalf("full cache must contain Paris city in %s: %+v found=%v", tc.country, want, ok)
+			}
+			placed := p.place(context.Background(), &dorv1.Article{
+				Id: "paris-qualifier-" + tc.country, Title: "Officials Announce a Plan in Paris",
+				Dateline: tc.dateline, Hints: &dorv1.RawHints{Country: tc.hint},
+			})
+			if len(placed.Locations) == 0 || placed.Locations[0].PlaceId != want.ID || placed.Locations[0].Precision != dorv1.Precision_PRECISION_CITY {
+				t.Fatalf("explicit %s qualification must outrank conflicting %s country hint: got %+v; want %s at CITY precision", tc.country, tc.hint, placed.Locations, want.ID)
+			}
+		})
+	}
+}
+
 func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
 	g := loadFullCacheForPlotTests(t)
 	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}

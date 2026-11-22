@@ -16,8 +16,11 @@ dominates foreign homonyms by at least five to one. A region's own same-named
 seat is the same jurisdiction, not a foreign homonym. Person, club, commodity,
 common-word and demonym evidence guards still apply. Countries can be actors
 and possessives without a locative. Punctuated canonical abbreviations
-(St./Ste./Ft./Mt./initials) remain supported. Unresolved equal-quality
-cross-country multiword homonyms abstain and block their contained fragments.
+(St./Ste./Ft./Mt./initials) remain supported. An equal-quality cross-country
+multiword homonym resolves only to the exact canonical name of a capital or
+administrative seat that dominates the foreign candidate five to one (Los
+Angeles); otherwise it abstains and blocks its contained fragments (Santa
+Cruz, San Jose, bare Santo Domingo).
 
 The new-point admission threshold is not evidence that an existing canonical
 point is false. A valid canonical title witness that passes the explicit

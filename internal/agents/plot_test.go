@@ -968,6 +968,70 @@ func TestFullCacheExplicitParisQualifierOutranksConflictingCountryHint(t *testin
 	}
 }
 
+func TestFullCacheMajorHomonymLocativesAndCrossCountryAbstentions(t *testing.T) {
+	g := loadFullCacheForPlotTests(t)
+	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}
+	tests := []struct {
+		name, title, lede, dateline, wantID, wantCountry string
+		wantNone                                         bool
+	}{
+		{"Los Angeles Palisades fire headline", "Man found guilty of starting Palisades fire in Los Angeles", "The fire ravaged neighborhoods across Los Angeles.", "", "5368361", "US", false},
+		{"Los Angeles Palisades fire retrial headline", "Suspect in Los Angeles’ deadly Palisades fire convicted of arson at retrial", "The case returned to court after a previous trial.", "", "5368361", "US", false},
+		// Bare Santo Domingo abstains: DO 3492908 is only about 4.8x the
+		// competing commonly named Ecuador city 3651297, below the 5:1 rule.
+		{"unqualified Santo Domingo", "Protesters gather in Santo Domingo", "Thousands marched near government offices.", "", "", "", true},
+		{"Buenos Aires", "Thousands march in Buenos Aires", "The demonstration began after a policy announcement.", "", "3435910", "AR", false},
+		{"San Antonio Texas", "Flooding closes roads in San Antonio", "Emergency crews urged drivers to avoid flooded streets.", "", "4726206", "US", false},
+		{"unqualified San Jose", "Fire crews respond in San Jose", "Emergency personnel were sent to the scene.", "", "", "", true},
+		{"San Jose California", "Fire crews respond in San Jose, California", "Emergency personnel were sent to the scene.", "San Jose, California", "5392171", "US", false},
+		{"San Jose Costa Rica", "Fire crews respond in San José, Costa Rica", "Emergency personnel were sent to the scene.", "San José, Costa Rica", "3621849", "CR", false},
+		{"unqualified San Fernando", "Officials meet in San Fernando", "The talks continued after a closed session.", "", "", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			placed := p.place(context.Background(), &dorv1.Article{
+				Id: "major-homonym-" + tc.name, Title: tc.title, Lede: tc.lede, Dateline: tc.dateline,
+			})
+			if tc.wantNone {
+				if len(placed.Locations) != 0 {
+					t.Fatalf("unqualified cross-country homonym must abstain, got %+v", placed.Locations)
+				}
+				return
+			}
+			if len(placed.Locations) == 0 {
+				t.Fatalf("explicit event/city evidence should resolve: %+v", placed)
+			}
+			loc := placed.Locations[0]
+			place, ok := g.ByID(loc.PlaceId)
+			if !ok || place.ID != tc.wantID || place.CountryCode != tc.wantCountry || loc.Precision != dorv1.Precision_PRECISION_CITY {
+				t.Fatalf("expected canonical city %s/%s at CITY precision, got %+v (known=%v place=%+v)", tc.wantID, tc.wantCountry, loc, ok, place)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, title, hintCountry string
+	}{
+		{"Dominican Republic qualifier", "Protesters gather in Santo Domingo, Dominican Republic", ""},
+		{"Dominican Republic country hint", "Protesters gather in Santo Domingo", "DO"},
+	} {
+		t.Run("santo_domingo_"+tc.name, func(t *testing.T) {
+			article := &dorv1.Article{Id: "santo-domingo-" + tc.name, Title: tc.title}
+			if tc.hintCountry != "" {
+				article.Hints = &dorv1.RawHints{Country: tc.hintCountry}
+			}
+			placed := p.place(context.Background(), article)
+			if len(placed.Locations) == 0 {
+				t.Fatalf("qualified or hinted Santo Domingo should resolve to Dominican Republic: %+v", placed)
+			}
+			loc := placed.Locations[0]
+			place, ok := g.ByID(loc.PlaceId)
+			if !ok || place.ID != "3492908" || place.CountryCode != "DO" || loc.Precision != dorv1.Precision_PRECISION_CITY {
+				t.Fatalf("Santo Domingo must resolve to canonical DO city 3492908 at CITY precision: %+v (known=%v place=%+v)", loc, ok, place)
+			}
+		})
+	}
+}
+
 func TestFullCacheCountryWordsAndDemonymsNeedGeographicEvidence(t *testing.T) {
 	g := loadFullCacheForPlotTests(t)
 	p := &plotter{deps: Deps{Gazetteer: g}, log: testLogger()}

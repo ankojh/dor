@@ -55,7 +55,7 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 				// colliding loser here would make the repair retain its old dot.
 				m := atSpan[0]
 				for _, other := range atSpan[1:] {
-					if n > 1 && other.quality == m.quality && other.place.CountryCode != m.place.CountryCode {
+					if n > 1 && other.quality == m.quality && other.place.CountryCode != m.place.CountryCode && !g.dominatesHomonym(m.place, other.place, phrase) {
 						// Population cannot choose an unresolved cross-country
 						// multiword homonym. Block contained fragments too.
 						m.place = Place{}
@@ -418,6 +418,20 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 		return true
 	}
 	return (p.Feature == "ADM1" || p.Feature == "PPLC" || strings.HasPrefix(p.Feature, "PPLA")) && population >= 5*largestOther
+}
+
+// A multiword homonym resolves only to the exact canonical name of a capital
+// or administrative seat that dominates the foreign candidate five to one, as
+// majorPlaceSupported requires for single words. Aliases never qualify.
+func (g *Gazetteer) dominatesHomonym(p, other Place, phrase string) bool {
+	if p.RegionAlias != "" || expandedPlaceName(p.Name) != expandedPlaceName(phrase) {
+		return false
+	}
+	if p.Feature != "ADM1" && p.Feature != "PPLC" && !strings.HasPrefix(p.Feature, "PPLA") {
+		return false
+	}
+	population, otherPopulation := g.majorPopulation(p), g.majorPopulation(other)
+	return population >= 50000 && otherPopulation > 0 && population >= 5*otherPopulation
 }
 
 // Named organizations are not literal city evidence. A following City Council

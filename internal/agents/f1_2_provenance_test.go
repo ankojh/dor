@@ -178,6 +178,30 @@ func TestF12ApplyJoinProvenance(t *testing.T) {
 		}
 	})
 
+	t.Run("displayed category keeps its own provenance", func(t *testing.T) {
+		now := time.Now()
+		a1 := &dorv1.Article{Id: "a1", SourceId: "s1", Title: "Floods hit region"}
+		place := &dorv1.PlacedArticle{Article: a1, Backend: "gazetteer"}
+		class1 := &dorv1.ClassifiedArticle{Article: a1, Category: dorv1.Category_CATEGORY_DISASTER, Confidence: 0.6, Backend: "rule", Degraded: true, Fallback: true}
+		st := c.buildStory(a1, place, class1.Category, nil, nil, now)
+		c.applyJoinProvenance(st, place, class1, a1)
+
+		a2 := &dorv1.Article{Id: "a2", SourceId: "s2", Title: "Army deployed"}
+		class2 := &dorv1.ClassifiedArticle{Article: a2, Category: dorv1.Category_CATEGORY_CONFLICT, Confidence: 0.85, Backend: "jev", Accepted: true}
+		st = c.mergeStory(st, a2, place, class2.Category, nil, nil, now)
+		c.applyJoinProvenance(st, place, class2, a2)
+
+		if st.Story.Category != dorv1.Category_CATEGORY_DISASTER {
+			t.Fatalf("story category = %v, want the first non-OTHER DISASTER", st.Story.Category)
+		}
+		if st.CategoryBackend != "rule" || st.CategoryConfidence != 0.6 || !st.CategoryDegraded {
+			t.Fatalf("displayed DISASTER provenance = (%q,%v,degraded=%v), want rule/0.6/degraded", st.CategoryBackend, st.CategoryConfidence, st.CategoryDegraded)
+		}
+		if !st.Story.Degraded {
+			t.Fatal("story.Degraded = false; the displayed category is still a rule guess")
+		}
+	})
+
 	t.Run("place backend rank prefers jev", func(t *testing.T) {
 		st := newStory()
 		c.applyJoinProvenance(st, &dorv1.PlacedArticle{Backend: "gazetteer"}, nil, &dorv1.Article{})

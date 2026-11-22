@@ -110,7 +110,7 @@ func TestF12EditorTitleAndBriefProvenanceSurviveClusterUpsert(t *testing.T) {
 
 	if err := st.UpsertStoryTexts(ctx, []StoryTextRecord{{
 		ID: storyID, Title: "Neutral editor title", TitleSource: "editor",
-		Brief: "A model-written brief.", BriefSource: "generated",
+		Brief: "A model-written brief.", BriefSource: "generated", Model: "claude-opus",
 	}}); err != nil {
 		t.Fatalf("write editor text: %v", err)
 	}
@@ -123,14 +123,14 @@ func TestF12EditorTitleAndBriefProvenanceSurviveClusterUpsert(t *testing.T) {
 		t.Fatalf("re-upsert story: %v", err)
 	}
 
-	var title, titleSource, brief, briefSource, categoryBackend, placeBackend string
+	var title, titleSource, brief, briefSource, briefModel, categoryBackend, placeBackend string
 	var confidence float32
 	var degraded, placeDegraded bool
 	if err := st.Pool().QueryRow(ctx, `
-SELECT title, title_source, brief, brief_source, category_backend, cat_conf,
+SELECT title, title_source, brief, brief_source, brief_model, category_backend, cat_conf,
        degraded, place_backend, place_degraded
 FROM stories WHERE id=$1`, storyID).Scan(
-		&title, &titleSource, &brief, &briefSource, &categoryBackend, &confidence,
+		&title, &titleSource, &brief, &briefSource, &briefModel, &categoryBackend, &confidence,
 		&degraded, &placeBackend, &placeDegraded,
 	); err != nil {
 		t.Fatalf("read story: %v", err)
@@ -138,8 +138,8 @@ FROM stories WHERE id=$1`, storyID).Scan(
 	if title != "Neutral editor title" || titleSource != "editor" {
 		t.Fatalf("title = (%q, %q), want editor title preserved", title, titleSource)
 	}
-	if brief != "A model-written brief." || briefSource != "generated" {
-		t.Fatalf("brief = (%q, %q), want generated brief preserved", brief, briefSource)
+	if brief != "A model-written brief." || briefSource != "generated" || briefModel != "claude-opus" {
+		t.Fatalf("brief = (%q, %q, model=%q), want generated brief preserved", brief, briefSource, briefModel)
 	}
 	if categoryBackend != "rule" || confidence <= 0 || !degraded || placeBackend != "gazetteer" || !placeDegraded {
 		t.Fatalf("provenance = (%q, %v, %v, %q, %v)", categoryBackend, confidence, degraded, placeBackend, placeDegraded)

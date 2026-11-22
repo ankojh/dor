@@ -372,7 +372,7 @@ func datelineMatches(dateline string, c geo.Place) bool {
 	if n == "" {
 		return false
 	}
-	return strings.Contains(" "+d+" ", " "+n+" ")
+	return d == n || strings.HasPrefix(n, d+" ") || strings.HasPrefix(d, n+" ")
 }
 
 func normalizeWords(s string) string {
@@ -442,6 +442,9 @@ func (p *plotter) validateLocations(res *dorv1.PlacedArticle, countryHint string
 }
 
 func (p *plotter) datelineMatches(dateline string, c geo.Place) bool {
+	if datelineMatches(dateline, c) {
+		return true
+	}
 	if p.deps.Gazetteer != nil {
 		for _, match := range p.deps.Gazetteer.Candidates("", "", dateline, c.CountryCode, 100) {
 			if match.ID == c.ID {

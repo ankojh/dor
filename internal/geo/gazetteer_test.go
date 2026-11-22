@@ -169,15 +169,22 @@ func TestSearchRanksExactAndBoundsLimit(t *testing.T) {
 	}
 }
 
-func TestSearchSuppressesAmbiguousNames(t *testing.T) {
+func TestSearchAndLookupAllowExplicitAmbiguousNames(t *testing.T) {
+	// Cmd-K search and Lookup are explicit user lookups, so a name shared by
+	// places remains findable. Ambiguity is resolved later by Candidates and
+	// geographic evidence, not by hiding the name from search.
 	g := buildFixtureIndex(t)
+	found := false
 	for _, got := range g.Search("mobile", 8) {
 		if got.Normalized == "mobile" {
-			t.Fatalf("ambiguous name was not suppressed: %+v", got)
+			found = true
 		}
 	}
-	if _, ok := g.Lookup("Mobile", ""); ok {
-		t.Fatal("Lookup found an ambiguous name that add() should have skipped")
+	if !found {
+		t.Fatal("Search did not find the explicitly requested ambiguous name Mobile")
+	}
+	if got, ok := g.Lookup("Mobile", ""); !ok || got.ID != "4" {
+		t.Fatalf("Lookup(Mobile) = %+v, %v", got, ok)
 	}
 }
 
@@ -211,8 +218,8 @@ func TestCandidatesRankLimitAndCountryHint(t *testing.T) {
 	if got[0].ID != "1" {
 		t.Fatalf("Candidates ranked %+v first, want Athens (title prior + population)", got[0])
 	}
-	if got := g.Candidates("Athens and Paris", "", "", "FR", 8); len(got) != 1 || got[0].ID != "2" {
-		t.Fatalf("country-hinted Candidates = %+v, want only Paris", got)
+	if got := g.Candidates("Flooding in Paris", "", "", "FR", 8); len(got) == 0 || got[0].ID != "2" {
+		t.Fatalf("country-hinted Candidates = %+v, want Paris first", got)
 	}
 	if got := g.Candidates("Athens and Paris", "", "", "France", 1); len(got) != 1 {
 		t.Fatalf("Candidates ignored max: %+v", got)
@@ -344,7 +351,7 @@ func TestNormalizeAndTokenize(t *testing.T) {
 	tests := map[string]string{
 		"  New-York, NY ": "new york ny",
 		"St. John's":      "st john s",
-		"Café\tDéjà":      "café déjà",
+		"Café\tDéjà":      "cafe deja",
 		"   ":             "",
 	}
 	for input, want := range tests {

@@ -54,6 +54,10 @@ const (
 	// Alert deliveries and receipts must survive outages longer than live-state TTL.
 	KVBucketAlertDelivery = "alert_delivery"
 	KVAlertDeliveryTTL    = 0
+	// Session holds the anonymous-owner signing secret; it must survive
+	// restarts so saved alerts remain reachable by their browser session.
+	KVBucketSession    = "session"
+	KVBucketSessionTTL = 0
 
 	KVSeenTTL            = 48 * time.Hour
 	KVJoinsTTL           = 30 * time.Second
@@ -389,6 +393,7 @@ func kvBuckets() []kvSpec {
 		{KVBucketAlertDelivery, KVAlertDeliveryTTL},
 		{KVBucketSourceHealth, KVSourceHealthTTL},
 		{KVBucketEvalPending, KVEvalPendingTTL},
+		{KVBucketSession, KVBucketSessionTTL},
 	}
 }
 

@@ -48,6 +48,9 @@ type hub struct {
 	snapRetryAt  time.Time
 	snapFailures int
 	readSnapshot func(context.Context) (*dorv1.Snapshot, error) // injectable KV read
+	// alertOwner resolves a saved alert's anonymous owner. Alert deltas are
+	// private; an empty owner is visible to nobody.
+	alertOwner func(string) string
 }
 
 func newHub(b *bus.Bus, log *slog.Logger) *hub {
@@ -147,9 +150,11 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 		}
 	}
 	// Prompt scores and prompt strings belong to the client that set that
-	// prompt. Even a client with no filters receives a projected batch when
-	// another client's prompt data is present.
+	// prompt, and alert hits belong to the session that saved the alert. Even
+	// a client with no filters receives a projected batch when either kind of
+	// private data is present.
 	hasPrivate := batchHasPrivateWire(batch)
+	hasAlert := batchHasAlert(batch)
 
 	h.observeBatchLocked(batch)
 	for _, d := range batch.Deltas {
@@ -171,9 +176,9 @@ func (h *hub) addBatch(batch *dorv1.DeltaBatch) {
 			continue
 		}
 		payload := data
-		if hasWire {
-			if f := c.filterState(); f.active() || hasPrivate {
-				filtered := filterDeltaBatch(batch, f, h.stories)
+		if hasWire || hasAlert {
+			if f := c.filterState(); f.active() || hasPrivate || hasAlert {
+				filtered := filterDeltaBatch(batch, f, h.stories, c.sessionID, h.alertOwner)
 				if filtered == nil {
 					continue
 				}
@@ -299,8 +304,8 @@ func (h *hub) resumeContext(ctx context.Context, c *client, lastSeq uint64, reas
 				for start := 0; start < len(deltas); start += replayChunk {
 					end := min(start+replayChunk, len(deltas))
 					chunk := &dorv1.DeltaBatch{Deltas: deltas[start:end]}
-					if f := c.filterState(); f.active() || batchHasPrivateWire(chunk) {
-						chunk = filterDeltaBatch(chunk, f, h.stories)
+					if f := c.filterState(); f.active() || batchHasPrivateWire(chunk) || batchHasAlert(chunk) {
+						chunk = filterDeltaBatch(chunk, f, h.stories, c.sessionID, h.alertOwner)
 					}
 					if chunk != nil {
 						encode(&dorv1.ServerMessage{Body: &dorv1.ServerMessage_Deltas{Deltas: chunk}})

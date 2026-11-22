@@ -51,12 +51,13 @@ type PromptSink interface {
 // goroutine. Reads and writes are independent so a slow reader cannot stall
 // the hub, and a slow writer is disconnected rather than buffered forever.
 type client struct {
-	hub     *hub
-	text    TextService
-	matcher PromptSink
-	id      string
-	conn    *websocket.Conn
-	log     *slog.Logger
+	hub       *hub
+	text      TextService
+	matcher   PromptSink
+	id        string
+	sessionID string
+	conn      *websocket.Conn
+	log       *slog.Logger
 
 	send         chan []byte
 	closed       atomic.Bool
@@ -76,6 +77,16 @@ type client struct {
 	focus      string
 	filters    *dorv1.SetFilters
 	prompts    *dorv1.SetPrompts
+
+	// Prompt updates are state, not work: a throttled update is kept as the
+	// latest desired set and applied when a token returns. Clears bypass the
+	// limiter entirely so removing the last prompt is never dropped.
+	promptKick     chan struct{}
+	promptDone     chan struct{}
+	promptApplyMu  sync.Mutex
+	pendingPrompts []string
+	pendingVersion uint64
+	promptVersion  uint64
 }
 
 func newClient(h *hub, text TextService, prompts PromptSink, conn *websocket.Conn, log *slog.Logger) *client {
@@ -94,6 +105,8 @@ func newClient(h *hub, text TextService, prompts PromptSink, conn *websocket.Con
 		inRefill:   now,
 		textTokens: textBurst,
 		textRefill: now,
+		promptKick: make(chan struct{}, 1),
+		promptDone: make(chan struct{}),
 	}
 }
 
@@ -115,6 +128,12 @@ func (c *client) run(parent context.Context) {
 	c.ctx = ctx
 	defer func() {
 		cancel()
+		// Let an in-flight coalesced prompt update finish before clearing, so
+		// a disconnect cannot leave the matcher with a zombie prompt set.
+		select {
+		case <-c.promptDone:
+		case <-time.After(time.Second):
+		}
 		c.hub.removeClient(c)
 		if c.matcher != nil {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -125,6 +144,7 @@ func (c *client) run(parent context.Context) {
 	}()
 
 	go c.writeLoop(ctx)
+	go c.promptLoop(ctx)
 	for {
 		typ, data, err := c.conn.Read(ctx)
 		if err != nil {
@@ -172,6 +192,10 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 			c.log.Debug("gateway: hello throttled", "client", c.id)
 			return
 		}
+		// The worker sends prompts before Hello. If a coalesced update is
+		// still waiting for a token, apply it now so the resumed snapshot is
+		// projected with this client's real prompt set.
+		c.flushPendingPrompts(ctx)
 		last := uint64(0)
 		if body.Hello != nil {
 			last = body.Hello.LastSeq
@@ -187,20 +211,30 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 		c.filters = body.SetFilters
 		c.mu.Unlock()
 	case *dorv1.ClientMessage_SetPrompts:
-		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) {
-			c.log.Debug("gateway: set_prompts throttled", "client", c.id)
-			return
-		}
 		prompts := []string(nil)
 		if body.SetPrompts != nil {
 			prompts = boundPrompts(body.SetPrompts.Prompts)
 		}
-		c.mu.Lock()
-		c.prompts = &dorv1.SetPrompts{Prompts: prompts}
-		c.mu.Unlock()
-		if c.matcher != nil {
-			c.matcher.SetClientPrompts(ctx, c.id, prompts)
+		if len(prompts) == 0 {
+			// Removing the last prompt must always reach the matcher, even
+			// after the connection has spent its admission budget.
+			c.applyPrompts(ctx, prompts, 0, true)
+			return
 		}
+		if c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) {
+			c.applyPrompts(ctx, prompts, 0, true)
+			return
+		}
+		// Rate-limited: remember only the latest desired state and let the
+		// prompt loop apply it when a token returns.
+		c.mu.Lock()
+		c.pendingPrompts = prompts
+		// Versions must span immediate applies and queued updates; a plain
+		// counter on pending alone would look older than the last apply.
+		c.pendingVersion = max(c.promptVersion, c.pendingVersion) + 1
+		c.mu.Unlock()
+		c.kickPrompts()
+		c.log.Debug("gateway: set_prompts coalesced", "client", c.id)
 	case *dorv1.ClientMessage_Focus:
 		if !c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) ||
 			!c.take(&c.textTokens, &c.textRefill, textRate, textBurst) {
@@ -246,6 +280,107 @@ func (c *client) handle(ctx context.Context, msg *dorv1.ClientMessage) {
 				links++
 				c.text.PrefetchLink(a, b)
 			}
+		}
+	}
+}
+
+// applyPrompts replaces the client's prompt view immediately and forwards it
+// to the matcher. A force apply (an immediate update, a clear, or a Hello
+// flush) supersedes any pending coalesced update and wins over an older loop
+// apply; a queued apply re-checks its version under the same lock.
+func (c *client) applyPrompts(ctx context.Context, prompts []string, version uint64, force bool) {
+	c.promptApplyMu.Lock()
+	defer c.promptApplyMu.Unlock()
+	c.mu.Lock()
+	if force {
+		version = max(c.promptVersion, c.pendingVersion) + 1
+	} else if c.promptVersion >= version || c.pendingVersion > version {
+		c.mu.Unlock()
+		return
+	}
+	c.prompts = &dorv1.SetPrompts{Prompts: prompts}
+	c.promptVersion = version
+	c.pendingPrompts = nil
+	c.mu.Unlock()
+	if c.matcher != nil {
+		c.matcher.SetClientPrompts(ctx, c.id, prompts)
+	}
+}
+
+func (c *client) kickPrompts() {
+	select {
+	case c.promptKick <- struct{}{}:
+	default:
+	}
+}
+
+// flushPendingPrompts applies the latest queued prompt state synchronously.
+// Hello uses it to make the resume snapshot consistent with the client's
+// prompts even if the prompt update arrived while the bucket was empty.
+func (c *client) flushPendingPrompts(ctx context.Context) {
+	c.mu.Lock()
+	prompts := c.pendingPrompts
+	c.pendingPrompts = nil
+	c.mu.Unlock()
+	if prompts != nil {
+		c.applyPrompts(ctx, prompts, 0, true)
+	}
+}
+
+// promptLoop applies the latest coalesced prompt update once admission budget
+// returns. It exits with the connection.
+func (c *client) promptLoop(ctx context.Context) {
+	defer close(c.promptDone)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.promptKick:
+		}
+		for {
+			c.mu.Lock()
+			prompts := c.pendingPrompts
+			version := c.pendingVersion
+			c.pendingPrompts = nil
+			c.mu.Unlock()
+			if prompts == nil {
+				break
+			}
+			if !c.waitInbound(ctx) {
+				return
+			}
+			// A newer pending update or an immediate clear supersedes this
+			// one; take the newest state on the next iteration.
+			c.mu.Lock()
+			stale := c.promptVersion >= version || c.pendingVersion > version
+			c.mu.Unlock()
+			if stale {
+				continue
+			}
+			c.applyPrompts(ctx, prompts, version, false)
+		}
+	}
+}
+
+// waitInbound blocks until one inbound token is available or ctx ends.
+func (c *client) waitInbound(ctx context.Context) bool {
+	for {
+		if c.take(&c.inTokens, &c.inRefill, inboundRate, inboundBurst) {
+			return true
+		}
+		c.mu.Lock()
+		need := 1 - c.inTokens
+		c.mu.Unlock()
+		wait := time.Duration(need / inboundRate * float64(time.Second))
+		if wait < 5*time.Millisecond {
+			wait = 5 * time.Millisecond
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
 		}
 	}
 }

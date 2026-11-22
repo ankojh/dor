@@ -144,21 +144,21 @@ func NewClient(opts ClientOptions) *Client {
 			if req.URL.Scheme == "http" && last.URL.Scheme == "https" {
 				return errors.New("fetch: refusing https->http redirect")
 			}
-			if req.URL.Host != last.URL.Host {
-				// A cross-host redirect needs its own robots and host budget.
-				if c.robots != nil {
-					decision, err := c.robots.Check(req.Context(), req.URL)
-					if err != nil {
-						return err
-					}
-					if !decision.Allowed {
-						return fmt.Errorf("%w: %s (%s)", ErrRobotsDisallowed, req.URL.Path, decision.Reason)
-					}
+			// Every redirect target needs its own robots decision, including a
+			// same-host redirect to a disallowed path. A cross-host redirect
+			// also spends that host's separate budget.
+			if c.robots != nil {
+				decision, err := c.robots.Check(req.Context(), req.URL)
+				if err != nil {
+					return err
 				}
-				if c.budget != nil {
-					if err := c.budget.Take(req.Context(), req.URL.Host); err != nil {
-						return err
-					}
+				if !decision.Allowed {
+					return fmt.Errorf("%w: %s (%s)", ErrRobotsDisallowed, req.URL.Path, decision.Reason)
+				}
+			}
+			if req.URL.Host != last.URL.Host && c.budget != nil {
+				if err := c.budget.Take(req.Context(), req.URL.Host); err != nil {
+					return err
 				}
 			}
 			return nil

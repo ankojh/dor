@@ -481,7 +481,7 @@ func runCommand(args []string) error {
 		if len(originPatterns) == 0 {
 			originPatterns = gateway.DefaultOrigins
 		}
-		origins := httpguard.NewAllowlist(originPatterns)
+		origins := httpguard.NewAllowlist(originPatterns).WithHosts(httpguard.HostFromAddr(cfg.adminAddr))
 		admin = &http.Server{
 			Addr:              cfg.adminAddr,
 			Handler:           origins.Middleware(adminHandler(b, runner, metrics, opsHTTP)),

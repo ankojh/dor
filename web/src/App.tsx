@@ -241,6 +241,22 @@ const EMPTY_FILTERS: WireFilters = {
 
 const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
+/** Establish the anonymous alert session before the WebSocket or alert reads. */
+let sessionBootstrap: Promise<void> | null = null;
+function ensureSession(): Promise<void> {
+  if (!sessionBootstrap) {
+    sessionBootstrap = fetch(`${API_BASE}/api/session`, {
+      credentials: "include",
+      cache: "no-store",
+    })
+      .then(() => undefined)
+      .catch(() => {
+        sessionBootstrap = null;
+      });
+  }
+  return sessionBootstrap;
+}
+
 export function App() {
   let mapContainer!: HTMLDivElement;
   let scrollElement!: HTMLDivElement;
@@ -737,7 +753,9 @@ export function App() {
     }
     setStoryText({ loading: true, available: false });
     try {
-      const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`);
+      const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
+        credentials: "include",
+      });
       const payload = (await response.json()) as {
         available?: boolean;
         brief?: string;
@@ -769,7 +787,9 @@ export function App() {
       return;
     }
     try {
-      const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}`);
+      const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}`, {
+        credentials: "include",
+      });
       if (!response.ok) {
         setStoryDetails(null);
         return;
@@ -784,6 +804,7 @@ export function App() {
 
   const apiJson = async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(`${API_BASE}${path}`, {
+      credentials: "include",
       headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
       ...init,
     });
@@ -992,6 +1013,7 @@ export function App() {
     try {
       const response = await fetch(
         `${API_BASE}/api/text?link_a=${encodeURIComponent(link.aId)}&link_b=${encodeURIComponent(link.bId)}`,
+        { credentials: "include" },
       );
       const payload = (await response.json()) as {
         available?: boolean;
@@ -1102,6 +1124,11 @@ export function App() {
     void (async () => {
       await afterShellPaint(loadAbort.signal);
       if (disposed) return;
+      // Saved alerts and their live hits are scoped to this anonymous
+      // session. Establish it before reading alerts or opening the socket.
+      await ensureSession();
+      if (disposed) return;
+      void loadAlerts();
       const { LiveGlobe } = await import("./globe/runtime");
       if (disposed) return;
       liveGlobe = new LiveGlobe(mapContainer, {
@@ -1183,7 +1210,6 @@ export function App() {
     });
 
     clockTimer = setInterval(() => setNow(Date.now()), 1000);
-    void loadAlerts();
 
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;

@@ -25,18 +25,112 @@ import (
 // always allowed, mirroring the WebSocket accept rule.
 type Allowlist struct {
 	patterns []string
+	hosts    []string
 }
 
-// NewAllowlist builds an allowlist from comma-separated-pattern style entries.
-// Empty entries are ignored.
+// NewAllowlist builds an allowlist from host-pattern entries. Empty entries
+// are ignored. The default loopback hostnames are always trusted, and each
+// pattern contributes its host part to the trusted Host set.
 func NewAllowlist(patterns []string) *Allowlist {
 	clean := make([]string, 0, len(patterns))
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
 	for _, pattern := range patterns {
 		if pattern = strings.ToLower(strings.TrimSpace(pattern)); pattern != "" {
 			clean = append(clean, pattern)
+			if host := patternHost(pattern); host != "" {
+				hosts = append(hosts, host)
+			}
 		}
 	}
-	return &Allowlist{patterns: clean}
+	return &Allowlist{patterns: clean, hosts: uniqueHosts(hosts)}
+}
+
+// WithHosts adds trusted listener/deployment hostnames. It is used for the
+// bound listener address so a configured hostname works even when it is not
+// also an origin pattern.
+func (a *Allowlist) WithHosts(hosts ...string) *Allowlist {
+	for _, host := range hosts {
+		if host = canonicalHost(host); host != "" {
+			a.hosts = append(a.hosts, host)
+		}
+	}
+	a.hosts = uniqueHosts(a.hosts)
+	return a
+}
+
+// HostAllowed reports whether the request Host names a trusted listener or
+// deployment host. It runs before the Origin check, so a hostile Host cannot
+// use a matching Origin or a no-Origin same-origin request to bypass the
+// allowlist (DNS rebinding).
+func (a *Allowlist) HostAllowed(hostPort string) bool {
+	host := canonicalHost(hostPort)
+	if host == "" {
+		return false
+	}
+	for _, trusted := range a.hosts {
+		if trusted == host {
+			return true
+		}
+		if matched, err := path.Match(trusted, host); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+// HostFromAddr extracts the hostname from a listen address for WithHosts.
+// Wildcard addresses add no name; deployments using one must configure their
+// public hostname in the origin list.
+func HostFromAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return canonicalHost(host)
+	}
+	return canonicalHost(addr)
+}
+
+func patternHost(pattern string) string {
+	if strings.Contains(pattern, "://") {
+		if u, err := url.Parse(pattern); err == nil {
+			return canonicalHost(u.Host)
+		}
+		return ""
+	}
+	return canonicalHost(pattern)
+}
+
+func canonicalHost(hostPort string) string {
+	hostPort = strings.TrimSpace(hostPort)
+	if hostPort == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(hostPort); err == nil {
+		hostPort = host
+	}
+	hostPort = strings.Trim(hostPort, "[]")
+	hostPort = strings.TrimSuffix(strings.ToLower(hostPort), ".")
+	switch hostPort {
+	case "", "0.0.0.0", "::", "*":
+		return ""
+	}
+	return hostPort
+}
+
+func uniqueHosts(hosts []string) []string {
+	out := make([]string, 0, len(hosts))
+	seen := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		host = canonicalHost(host)
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	return out
 }
 
 // Allows reports whether the Origin header is acceptable for a request to
@@ -82,6 +176,10 @@ func originURL(origin string) (*url.URL, error) {
 // origins, and echoes only the matching origin. It never emits a wildcard.
 func (a *Allowlist) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.HostAllowed(r.Host) {
+			Deny(w, http.StatusForbidden, "host not allowed")
+			return
+		}
 		w.Header().Add("Vary", "Origin")
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin != "" {
@@ -90,6 +188,7 @@ func (a *Allowlist) Middleware(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		crossSite := strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site")
 		// A CORS call from an explicitly allowed origin is legitimate even
@@ -245,8 +344,20 @@ func (l *Limiter) evictLocked(now time.Time) {
 
 // Middleware rejects requests over the limit with 429 and Retry-After.
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
+	return l.MiddlewareKey(nil, next)
+}
+
+// MiddlewareKey is Middleware with a caller-supplied bucket key. A nil key
+// falls back to the remote host.
+func (l *Limiter) MiddlewareKey(key func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.Allow(ClientKey(r.RemoteAddr)) {
+		k := ClientKey(r.RemoteAddr)
+		if key != nil {
+			if custom := key(r); custom != "" {
+				k = custom
+			}
+		}
+		if !l.Allow(k) {
 			w.Header().Set("Retry-After", "60")
 			Deny(w, http.StatusTooManyRequests, "too many requests; retry shortly")
 			return

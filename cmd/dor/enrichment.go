@@ -174,7 +174,9 @@ func isOpenRouterEndpoint(raw string) bool {
 	if err != nil {
 		return false
 	}
-	host := strings.ToLower(u.Hostname())
+	// A terminal DNS dot and mixed case name the same host; TLS hostname
+	// verification accepts both, so a provider check must too.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
 }
 

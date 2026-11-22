@@ -65,6 +65,20 @@ func batchHasPrivateWire(batch *dorv1.DeltaBatch) bool {
 	return false
 }
 
+// batchHasAlert reports whether a batch carries a saved-alert delta. Alert
+// hits include the alert prompt and are private to the owning session.
+func batchHasAlert(batch *dorv1.DeltaBatch) bool {
+	if batch == nil {
+		return false
+	}
+	for _, delta := range batch.Deltas {
+		if delta.GetAlert() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // snapshotHasPrivateWire reports whether a snapshot's recent wire carries
 // per-client prompt data.
 func snapshotHasPrivateWire(snap *dorv1.Snapshot) bool {
@@ -257,16 +271,28 @@ func withinRadius(lat, lon, rowLat, rowLon, radiusKm float64) bool {
 	return earthKm*2*math.Atan2(math.Sqrt(a), math.Sqrt(1-a)) <= radiusKm
 }
 
-// filterDeltaBatch returns a copy with wire rows that do not match removed and
-// prompt scores projected to the client's prompts. Non-wire deltas always
+// filterDeltaBatch returns a copy with wire rows that do not match removed,
+// prompt scores projected to the client's prompts, and alert deltas kept only
+// when the client's session owns the alert. Non-wire/non-alert deltas always
 // pass; a batch with nothing left returns nil.
-func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string]*dorv1.Story) *dorv1.DeltaBatch {
+func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string]*dorv1.Story, sessionID string, alertOwner func(string) string) *dorv1.DeltaBatch {
 	if batch == nil || len(batch.Deltas) == 0 {
 		return nil
 	}
 	out := make([]*dorv1.Delta, 0, len(batch.Deltas))
 	for _, delta := range batch.Deltas {
 		if delta == nil {
+			continue
+		}
+		if hit := delta.GetAlert(); hit != nil {
+			// Fail closed: an unknown owner, an unowned legacy alert, or a
+			// missing resolver delivers the hit to nobody.
+			if sessionID == "" || alertOwner == nil {
+				continue
+			}
+			if owner := alertOwner(hit.AlertId); owner != "" && owner == sessionID {
+				out = append(out, delta)
+			}
 			continue
 		}
 		wire := delta.GetWire()

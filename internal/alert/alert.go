@@ -28,7 +28,10 @@ var ErrNotFound = errors.New("alert: not found")
 
 // Alert is one saved prompt alert.
 type Alert struct {
-	ID            string    `json:"id"`
+	ID string `json:"id"`
+	// Owner is the anonymous session that created the alert. An empty owner
+	// is legacy/unowned and is visible to no REST or WebSocket client.
+	Owner         string    `json:"owner,omitempty"`
 	Prompt        string    `json:"prompt"`
 	MinSources    int       `json:"min_sources"`
 	Region        string    `json:"region"`
@@ -318,6 +321,22 @@ func (s *Store) List(ctx context.Context) []Alert {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
+}
+
+// ListOwned returns one anonymous session's alerts. An empty owner owns
+// nothing, so legacy rows without an owner stay private.
+func (s *Store) ListOwned(ctx context.Context, owner string) []Alert {
+	if owner == "" {
+		return nil
+	}
+	all := s.List(ctx)
+	out := make([]Alert, 0, len(all))
+	for _, a := range all {
+		if a.Owner == owner {
+			out = append(out, a)
+		}
+	}
 	return out
 }
 

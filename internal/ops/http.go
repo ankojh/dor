@@ -62,6 +62,10 @@ type HTTP struct {
 	controlLimit *httpguard.Limiter
 	reportLimit  *httpguard.Limiter
 	opsSecret    [32]byte
+	// Key optionally keys admission by a caller identity (the gateway's
+	// anonymous session). Nil keeps the per-IP default, which is also what
+	// the admin listener uses because it has no session middleware.
+	Key func(*http.Request) string
 }
 
 // NewHTTP builds the backend ops surface.
@@ -89,8 +93,8 @@ func NewHTTP(b *bus.Bus, supervisor *Supervisor, log *slog.Logger) *HTTP {
 func (h *HTTP) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ops", h.handlePage)
 	mux.HandleFunc("GET /api/ops", h.handleSnapshot)
-	mux.Handle("POST /api/ops/control", h.controlLimit.Middleware(http.HandlerFunc(h.handleControl)))
-	mux.Handle("POST /api/report-wrong-link", h.reportLimit.Middleware(http.HandlerFunc(h.handleWrongLink)))
+	mux.Handle("POST /api/ops/control", h.controlLimit.MiddlewareKey(h.Key, http.HandlerFunc(h.handleControl)))
+	mux.Handle("POST /api/report-wrong-link", h.reportLimit.MiddlewareKey(h.Key, http.HandlerFunc(h.handleWrongLink)))
 	mux.HandleFunc("GET /api/report/wrong-link", h.handleWrongLinkList)
 }
 

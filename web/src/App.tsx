@@ -17,6 +17,7 @@ import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
 import { connectionLabel, connectionStatusCopy } from "./live/connection";
 import { mergeWireRow } from "./live/wire";
+import { arrivalBars, arrivalRate } from "./live/wire-arrivals";
 import { matchesSourceFilter, sourceFilterIds } from "./live/source-names";
 import { nextTabStop } from "./ui/focus";
 import { channelLabel } from "./ui/labels";
@@ -24,8 +25,6 @@ import { groupLinksByStrength } from "./ui/links";
 import { nextSearchIndex } from "./ui/search";
 import { sheetSwipeDirection } from "./ui/sheet-gesture";
 import {
-  rollingMinuteBars,
-  rollingMinuteRate,
   sortWireItems,
   wireJoin,
   wireMetadataProvenance,
@@ -432,6 +431,7 @@ export function App() {
   const [globe, setGlobe] = createSignal<GlobeState>(EMPTY_GLOBE);
   const [focus, setFocus] = createSignal<FocusDetails | null>(null);
   const [wireRows, setWireRows] = createSignal<WireItem[]>([]);
+  const [wireArrivals, setWireArrivals] = createSignal<number[]>([]);
   const [pendingNew, setPendingNew] = createSignal(0);
   // Live story titles and source counts for wire join lines. A version signal
   // makes the map reactive without copying thousands of entries per patch.
@@ -762,9 +762,9 @@ export function App() {
     overscan: 10,
   });
 
-  const rate = createMemo(() => rollingMinuteRate(wireRows(), now()));
+  const rate = createMemo(() => arrivalRate(wireArrivals(), now()));
 
-  const rateBars = createMemo(() => rollingMinuteBars(wireRows(), now()));
+  const rateBars = createMemo(() => arrivalBars(wireArrivals(), now()));
 
   const timeline = createMemo(() => {
     const payload = histogram();
@@ -1452,6 +1452,7 @@ export function App() {
         if (message.recentWire.length) enqueueWire(message.recentWire, true);
         break;
       case "patch":
+        setWireArrivals(message.wireArrivals ?? []);
         workerBounds = message.bounds;
         setLastSeq(message.seq);
         rememberStoryContexts(message.summaries);

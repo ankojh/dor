@@ -12,6 +12,7 @@ import { categoryColor, encodeArc } from "../globe/encoding";
 import { lngLatToMercator, splitMercator } from "../globe/mercator";
 import { RippleRingBuffer } from "../globe/ripples";
 import { mergeWireRow } from "../live/wire";
+import { WireArrivals } from "../live/wire-arrivals";
 import type { AdjacencyArrays, FakeInit, StreamPatch } from "./fake/protocol";
 import type {
   LinkPatch,
@@ -59,6 +60,7 @@ export class LiveState {
   readonly stories = new Map<string, Story>();
   readonly links = new Map<string, Link>();
   readonly wire = new Map<string, WireRow>();
+  private readonly arrivals = new WireArrivals();
   private storySlots = new Map<string, number>();
   private linkSlots = new Map<string, number>();
   private freeStories: number[] = [];
@@ -126,7 +128,10 @@ export class LiveState {
     this.entries = data.stories;
     this.storySlots = data.storyById;
     this.linkSlots = data.linkByKey;
-    for (const row of recentWire) this.remember(row);
+    for (const row of recentWire) {
+      this.arrivals.accept(rowKey(row), Date.now(), true);
+      this.remember(row);
+    }
     this.dirtyWire.clear();
     this.topology = false;
     this.refreshMatches();
@@ -189,6 +194,7 @@ export class LiveState {
         this.removeLink(linkKey(delta.body.value.a, delta.body.value.b));
         break;
       case "wire": {
+        this.arrivals.accept(rowKey(delta.body.value), Date.now(), false);
         const row = this.remember(delta.body.value);
         this.rippleRows.set(rowKey(row), row);
         while (this.rippleRows.size > WIRE_LIMIT)
@@ -709,6 +715,7 @@ export class LiveState {
       ...(adjacency ? { adjacency: structuredClone(adjacency) } : {}),
       topStories: Uint16Array.from(top.map((entry) => entry.index)),
       wire: [...this.dirtyWire.values()],
+      wireArrivals: this.arrivals.recent(now),
       alerts: this.alerts,
       bounds: {
         stories: this.stories.size,

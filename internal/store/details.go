@@ -132,7 +132,8 @@ ORDER BY role, weight DESC`, id)
 	}
 	articleRows, err := s.pool.Query(ctx, `
 SELECT id, source_id, title, url, published_at, lang
-FROM articles WHERE story_id=$1
+FROM articles a WHERE story_id=$1
+  AND NOT EXISTS (SELECT 1 FROM wire_time_suppression s WHERE s.article_id = a.id)
 ORDER BY published_at DESC LIMIT $2`, id, limit+1)
 	if err != nil {
 		return StoryDetail{}, fmt.Errorf("store: story articles %s: %w", id, err)
@@ -223,7 +224,8 @@ func (s *Store) GetArticlesByIDs(ctx context.Context, ids []string) ([]StoryArti
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT id, source_id, title, url, published_at, lang
-FROM articles WHERE id = ANY($1)`, ids)
+FROM articles a WHERE id = ANY($1)
+  AND NOT EXISTS (SELECT 1 FROM wire_time_suppression s WHERE s.article_id = a.id)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("store: articles: %w", err)
 	}

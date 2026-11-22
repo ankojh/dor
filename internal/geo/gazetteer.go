@@ -281,17 +281,18 @@ func (g *Gazetteer) add(p Place) {
 	if g == nil || len(p.Normalized) < 3 || !ValidCoordinates(p.Lat, p.Lon) {
 		return
 	}
-	if g != nil && p.CountryCode != "" && p.AdminCode != "" && strings.HasPrefix(p.Feature, "PPL") {
-		if g.regionPopulation == nil {
-			g.regionPopulation = make(map[string]int64)
-		}
-		key := p.CountryCode + "." + p.AdminCode
-		g.regionPopulation[key] = max(g.regionPopulation[key], p.Population)
-	}
 	for _, existing := range g.byName[p.Normalized] {
 		if existing.ID == p.ID {
 			return
 		}
+	}
+	// Only the canonical row contributes population; alternate-name entries are
+	// separate index copies of the same city and would multiply the total.
+	if p.CountryCode != "" && p.AdminCode != "" && strings.HasPrefix(p.Feature, "PPL") && p.Normalized == normalize(p.Name) {
+		if g.regionPopulation == nil {
+			g.regionPopulation = make(map[string]int64)
+		}
+		g.regionPopulation[p.CountryCode+"."+p.AdminCode] += p.Population
 	}
 	g.byName[p.Normalized] = append(g.byName[p.Normalized], p)
 	g.byID[p.ID] = p
@@ -928,7 +929,7 @@ func ambiguousNames() map[string]struct{} {
 		"march", "april", "may", "june", "august", "paradise", "surprise", "temple",
 		"christian", "sale", "deal", "bury", "live", "rivers", "river", "coast",
 		"upper", "lower", "eastern", "western", "northern", "southern", "capital",
-		"toyota", "google", "lula", "international", "delta", "stat", "africa", "asia", "europe",
+		"toyota", "google", "lula", "international", "delta", "stat", "africa", "asia", "europe", "paramount", "spring", "sparks", "derby", "manhattan", "roman", "commonwealth",
 		"jackson", "michael", "hamilton", "lincoln", "austin", "florence",
 		"charlotte", "phoenix", "taylor", "chelsea", "mercedes", "batman",
 		// Common words and personal names also used as ADM1 labels.

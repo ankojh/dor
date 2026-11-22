@@ -29,7 +29,7 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 	byID := map[string]Place{}
 	for _, e := range evidence {
 		for _, candidate := range g.matchedPlaces(e.Lede, e.Title, e.Dateline, "") {
-			if old, ok := byID[candidate.ID]; !ok || betterPlace(candidate, old) {
+			if old, ok := byID[candidate.ID]; !ok || g.betterPlace(candidate, old) {
 				byID[candidate.ID] = candidate
 			}
 		}
@@ -37,7 +37,7 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 	for _, candidate := range byID {
 		admitted = append(admitted, candidate)
 	}
-	sort.Slice(admitted, func(i, j int) bool { return betterPlace(admitted[i], admitted[j]) })
+	sort.Slice(admitted, func(i, j int) bool { return g.betterPlace(admitted[i], admitted[j]) })
 	best, _ := DeterministicPrimary(admitted)
 	if known {
 		var sameSpan []Place
@@ -89,6 +89,15 @@ func (g *Gazetteer) RepairLocation(loc StoredLocation, evidence []TextEvidence) 
 	if known && supported {
 		p.Lat, p.Lon = float64(float32(p.Lat)), float64(float32(p.Lon))
 		return RepairDecision{Reason: reason, Replacement: &p, Precision: min(loc.Precision, PrecisionOf(p)), ReviewReason: reviewReason}
+	}
+	if best.ID != "" {
+		// A different-country town/region needs explicit evidence to become a
+		// replacement; otherwise a natural-feature phrase such as "St. Louis
+		// River" would silently move the dot to Saint-Louis, Senegal.
+		if known && p.CountryCode != "" && best.CountryCode != "" && best.CountryCode != p.CountryCode && !best.CountryID &&
+			expandedPlaceName(best.Name) == expandedPlaceName(p.Name) && best.Score < 55 {
+			best = Place{}
+		}
 	}
 	if best.ID != "" {
 		best.Lat, best.Lon = float64(float32(best.Lat)), float64(float32(best.Lon))

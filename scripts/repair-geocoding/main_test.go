@@ -81,7 +81,7 @@ func TestParseOptionsRequiresExplicitWriteAuthorization(t *testing.T) {
 
 func TestRunReportRejectsMissingDatasetBeforeDatabaseConnect(t *testing.T) {
 	empty := t.TempDir()
-	err := runReport(context.Background(), "postgres://not-reached", empty, false, "", "")
+	err := runReport(context.Background(), "postgres://not-reached", empty, false, "", "", "")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "cities15000.txt") {
 		t.Fatalf("missing local GeoNames dataset should fail before connecting to database, got %v", err)
 	}
@@ -103,20 +103,20 @@ func TestRepairDatabaseFlow(t *testing.T) {
 		t.Fatal("live database name must never pass the apply gate")
 	}
 
-	proposed, err := repair(ctx, conn, g, false)
+	proposed, err := repair(ctx, conn, g, false, nil)
 	if err != nil {
 		t.Fatalf("dry-run repair: %v", err)
 	}
 	if proposed.Status != "proposed" || proposed.Committed || proposed.Tables["story_locations"].Flagged != 1 || proposed.Tables["article_locations"].Flagged != 2 {
 		t.Fatalf("dry run must report proposals without claiming commit: %+v", proposed)
 	}
-	repeatedProposal, err := repair(ctx, conn, g, false)
+	repeatedProposal, err := repair(ctx, conn, g, false, nil)
 	if err != nil || repeatedProposal.Bundle.RunID != proposed.Bundle.RunID {
 		t.Fatalf("identical DB proposal must have deterministic run identity: first=%q second=%q err=%v", proposed.Bundle.RunID, repeatedProposal.Bundle.RunID, err)
 	}
 	assertOriginalRepairRows(t, ctx, conn)
 
-	committed, err := repair(ctx, conn, g, true)
+	committed, err := repair(ctx, conn, g, true, nil)
 	if err != nil {
 		t.Fatalf("apply repair: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRepairDatabaseFlow(t *testing.T) {
 		t.Fatalf("persisted audit does not describe successful SQL commit: %+v", persisted)
 	}
 
-	second, err := repair(ctx, conn, g, true)
+	second, err := repair(ctx, conn, g, true, nil)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestRepairCommitFailureRollsBackAndReturnsNoCommittedAudit(t *testing.T) {
 	defer cancel()
 	conn, g := prepareRepairDB(t, ctx, dsn)
 	defer conn.Close(ctx)
-	result, err := repair(ctx, failCommitStarter{Conn: conn}, g, true)
+	result, err := repair(ctx, failCommitStarter{Conn: conn}, g, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected commit failure") {
 		t.Fatalf("repair should surface commit failure, result=%+v err=%v", result, err)
 	}
@@ -193,7 +193,7 @@ func TestRepairCommitFailureRollsBackAndReturnsNoCommittedAudit(t *testing.T) {
 	assertOriginalRepairRows(t, ctx, conn)
 }
 
-func TestRepairAuditReportsPreservedAmbiguousCanonicalLocations(t *testing.T) {
+func TestRepairAuditDefaultsReviewCandidatesToRemovalWithExplicitKeep(t *testing.T) {
 	dsn := repairTestDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -211,55 +211,94 @@ func TestRepairAuditReportsPreservedAmbiguousCanonicalLocations(t *testing.T) {
 		}
 	}
 
-	audit, err := repair(ctx, conn, g, false)
+	audit, err := repair(ctx, conn, g, false, nil)
 	if err != nil {
 		t.Fatalf("dry-run ambiguous-location audit: %v", err)
 	}
 	if audit.Tables["story_locations"].NeedsReview != 1 || audit.Tables["article_locations"].NeedsReview != 1 {
-		t.Fatalf("ambiguous canonical locations must increment needs_review without proposing deletion: story=%+v article=%+v", audit.Tables["story_locations"], audit.Tables["article_locations"])
+		t.Fatalf("ambiguous canonical locations must increment needs_review: story=%+v article=%+v", audit.Tables["story_locations"], audit.Tables["article_locations"])
 	}
-	for _, want := range []struct{ table, owner string }{{"story_locations", "story-review"}, {"article_locations", "article-review"}} {
-		found := false
-		for _, review := range audit.Reviews {
-			if review.Table == want.table && review.Owner == want.owner {
-				found = true
-				if review.PlaceID != "hyderabad-pk" || review.Reason != "canonical_title_requires_disambiguation" {
-					t.Errorf("unexpected review record for %s/%s: %+v", want.table, want.owner, review)
-				}
-			}
+	if audit.Tables["story_locations"].ReviewRemovals != 1 || audit.Tables["article_locations"].ReviewRemovals != 1 {
+		t.Fatalf("default review policy must propose removal: story=%+v article=%+v", audit.Tables["story_locations"], audit.Tables["article_locations"])
+	}
+	if len(audit.Reviews) != 0 {
+		t.Fatalf("no review rows are kept without an explicit allowlist: %+v", audit.Reviews)
+	}
+	wantReview := map[string]bool{"story_locations|story-review|hyderabad-pk": true, "article_locations|article-review|hyderabad-pk": true}
+	for _, review := range audit.ReviewRemovals {
+		if !wantReview[review.Table+"|"+review.Owner+"|"+review.PlaceID] {
+			t.Errorf("unexpected review removal: %+v", review)
 		}
-		if !found {
-			t.Errorf("missing structured review for %s/%s: %+v", want.table, want.owner, audit.Reviews)
+		if review.Reason != "canonical_title_requires_disambiguation" {
+			t.Errorf("unexpected review removal reason: %+v", review)
 		}
 	}
+	changes := map[string]bool{}
 	for _, change := range audit.Changes {
-		if change.Owner == "story-review" || change.Owner == "article-review" {
-			t.Errorf("review-only location must not appear as a destructive/replot change: %+v", change)
+		if change.Owner != "story-review" && change.Owner != "article-review" {
+			continue
 		}
+		if change.Reason != "review_required" || change.Replacement != nil {
+			t.Errorf("review candidate must be a review_required removal: %+v", change)
+		}
+		changes[change.Table+"|"+change.Owner] = true
 	}
+	if !changes["story_locations|story-review"] || !changes["article_locations|article-review"] {
+		t.Errorf("review removals must appear as destructive changes: %+v", audit.Changes)
+	}
+	inBundle := map[string]bool{}
 	for _, story := range audit.Bundle.Stories {
-		if story.ID == "story-review" {
-			t.Errorf("review-only story must not be placed in deletion/replacement bundle: %+v", story)
-		}
+		inBundle["story_locations|"+story.ID] = true
 	}
 	for _, article := range audit.Bundle.Articles {
-		if article.ID == "article-review" {
-			t.Errorf("review-only article must not be placed in deletion/replacement bundle: %+v", article)
+		inBundle["article_locations|"+article.ID] = true
+	}
+	if !inBundle["story_locations|story-review"] || !inBundle["article_locations|article-review"] {
+		t.Errorf("review removals must be in the bundle: %+v", inBundle)
+	}
+	assertReviewRows(t, ctx, conn, 1)
+
+	kept, err := repair(ctx, conn, g, false, wantReview)
+	if err != nil {
+		t.Fatalf("dry-run with explicit review allowlist: %v", err)
+	}
+	if len(kept.Reviews) != 2 || len(kept.ReviewRemovals) != 0 {
+		t.Fatalf("explicit allowlist must keep review rows and skip review removals: reviews=%+v removals=%+v", kept.Reviews, kept.ReviewRemovals)
+	}
+	for _, change := range kept.Changes {
+		if change.Owner == "story-review" || change.Owner == "article-review" {
+			t.Errorf("kept review row must not be a destructive change: %+v", change)
 		}
 	}
+	assertReviewRows(t, ctx, conn, 1)
+
+	committed, err := repair(ctx, conn, g, true, nil)
+	if err != nil {
+		t.Fatalf("apply default review removals: %v", err)
+	}
+	if !committed.Committed || committed.Tables["story_locations"].ReviewRemovals != 1 || committed.Tables["article_locations"].ReviewRemovals != 1 {
+		t.Fatalf("apply must commit review removals: %+v", committed)
+	}
+	assertReviewRows(t, ctx, conn, 0)
+	var primary string
+	if err := conn.QueryRow(ctx, `SELECT primary_loc FROM public.stories WHERE id='story-review'`).Scan(&primary); err != nil || primary != "" {
+		t.Fatalf("review removal must clear the story primary: primary=%q err=%v", primary, err)
+	}
+}
+
+func assertReviewRows(t *testing.T, ctx context.Context, conn *pgx.Conn, want int) {
+	t.Helper()
 	for _, table := range []string{"story_locations", "article_locations"} {
 		ownerCol := "story_id"
+		owner := "story-review"
 		if table == "article_locations" {
 			ownerCol = "article_id"
+			owner = "article-review"
 		}
 		var count int
 		query := `SELECT count(*) FROM public.` + table + ` WHERE ` + ownerCol + `=$1 AND place_id='hyderabad-pk'`
-		owner := "story-review"
-		if table == "article_locations" {
-			owner = "article-review"
-		}
-		if err := conn.QueryRow(ctx, query, owner).Scan(&count); err != nil || count != 1 {
-			t.Errorf("dry-run must leave the reviewed canonical location present in %s: count=%d err=%v", table, count, err)
+		if err := conn.QueryRow(ctx, query, owner).Scan(&count); err != nil || count != want {
+			t.Errorf("expected %d reviewed row(s) in %s, got %d err=%v", want, table, count, err)
 		}
 	}
 }

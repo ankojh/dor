@@ -10,6 +10,7 @@ type mention struct {
 	place      Place
 	start, end int
 	quality    int
+	qualified  bool
 }
 
 // matchedPlaces admits geographic spans, not arbitrary aliases anywhere in the
@@ -41,19 +42,46 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 						continue
 					}
 					p.Normalized = phrase
-					p.Score = float64(quality) + math.Log10(float64(p.Population)+10)/10
+					p.Score = float64(quality) + math.Log10(float64(g.majorPopulation(p))+10)/10
 					if fieldIndex == 1 {
 						p.Score += 2
 					}
-					atSpan = append(atSpan, mention{p, i, i + n, quality})
+					qualified := independentQualifier(p, words, i, n, fieldIndex == 0) || (hint != "" && p.CountryCode == hint)
+					atSpan = append(atSpan, mention{p, i, i + n, quality, qualified})
 				}
 				if len(atSpan) == 0 {
 					continue
 				}
-				sort.Slice(atSpan, func(i, j int) bool { return betterPlace(atSpan[i].place, atSpan[j].place) })
+				sort.Slice(atSpan, func(i, j int) bool { return g.betterPlace(atSpan[i].place, atSpan[j].place) })
 				// A span has one supported deterministic interpretation. Keeping a
 				// colliding loser here would make the repair retain its old dot.
 				m := atSpan[0]
+				// A region's own city is the more precise answer: the same seat, the
+				// national capital, or any city inside that region.
+				for _, other := range atSpan[1:] {
+					if m.place.Feature != "ADM1" {
+						break
+					}
+					if g.sameSeatRegion(other.place, m.place) || cityInRegion(other.place, m.place) ||
+						(!m.qualified && g.nationalCapital(other.place)) {
+						m = other
+						break
+					}
+				}
+				if n == 1 {
+					// A first-level region dominates a same-named foreign town. Without
+					// this, "in Florida" or "in Ontario" loses the state/province to a
+					// small namesake. An explicitly qualified town keeps its own meaning.
+					for _, other := range atSpan[1:] {
+						if other.place.CountryCode == m.place.CountryCode {
+							continue
+						}
+						if !m.qualified && g.regionDominates(other.place, m.place) {
+							m = other
+							break
+						}
+					}
+				}
 				for _, other := range atSpan[1:] {
 					if n > 1 && other.quality == m.quality && other.place.CountryCode != m.place.CountryCode && !g.dominatesHomonym(m.place, other.place, phrase) {
 						// Population cannot choose an unresolved cross-country
@@ -78,7 +106,7 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 			if m.place.ID == "" {
 				continue
 			}
-			if old, ok := found[m.place.ID]; !ok || betterPlace(m.place, old) {
+			if old, ok := found[m.place.ID]; !ok || g.betterPlace(m.place, old) {
 				found[m.place.ID] = m.place
 			}
 		}
@@ -87,7 +115,29 @@ func (g *Gazetteer) matchedPlaces(text, title, dateline, countryHint string) []P
 	for _, p := range found {
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool { return betterPlace(out[i], out[j]) })
+	// If the title names both a region and a city inside it, the city is the
+	// precise event location (St. Louis, Missouri; Atlanta, Georgia). Keep the
+	// region when no city inside it was admitted (Bihar Bridge).
+	if len(out) > 1 {
+		filtered := out[:0]
+		for i, p := range out {
+			if p.Feature == "ADM1" {
+				replaced := false
+				for j, other := range out {
+					if i != j && cityInRegion(other, p) {
+						replaced = true
+						break
+					}
+				}
+				if replaced {
+					continue
+				}
+			}
+			filtered = append(filtered, p)
+		}
+		out = filtered
+	}
+	sort.Slice(out, func(i, j int) bool { return g.betterPlace(out[i], out[j]) })
 	return out
 }
 
@@ -121,14 +171,113 @@ func validPlaceSpan(words []token, start, count int) bool {
 	return true
 }
 
-func betterPlace(a, b Place) bool {
+func (g *Gazetteer) betterPlace(a, b Place) bool {
 	if a.Score != b.Score {
 		return a.Score > b.Score
 	}
-	if a.Population != b.Population {
-		return a.Population > b.Population
+	ap, bp := g.majorPopulation(a), g.majorPopulation(b)
+	if ap != bp {
+		return ap > bp
 	}
 	return a.ID < b.ID
+}
+
+// A first-level region dominates a same-named foreign town when its populated
+// area is at least five times larger. This keeps "in Florida/Ontario/Delaware/
+// Oregon" on the state/province while still allowing an explicitly qualified
+// foreign town.
+func (g *Gazetteer) regionDominates(region, other Place) bool {
+	if region.Feature != "ADM1" || other.Feature == "ADM1" {
+		return false
+	}
+	population, otherPopulation := g.majorPopulation(region), g.majorPopulation(other)
+	return population >= 50000 && otherPopulation > 0 && population >= 5*otherPopulation
+}
+
+// capitalLetterOnlyReject narrows the bare single-word city path. It is used
+// only for non-capital seats that are accepted on capitalization plus
+// population. Proper-name compounds (Buffalo Bills, Orlando Bloom), acronyms
+// in mixed-case prose (NEMA), a longer unknown name's connector (Agusan del
+// Sur) and common-word/proper-name heads do not become city dots.
+func capitalLetterOnlyReject(words []token, start, count int, p Place) bool {
+	if count != 1 {
+		return false
+	}
+	raw := words[start].raw
+	if len(raw) >= 2 && len(raw) <= 4 && raw == strings.ToUpper(raw) && mixedCaseText(words) {
+		return true
+	}
+	if start > 0 && !strings.ContainsAny(words[start].sep, "\n.;:!?") {
+		previous := words[start-1]
+		if strings.Contains(" del de da das do dos van von der den of the el la los las ", " "+previous.norm+" ") {
+			return true
+		}
+		if previous.norm == "s" && strings.ContainsAny(previous.sep, "'’") {
+			return true
+		}
+	}
+	end := start + count
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") {
+		return false
+	}
+	next := words[end].norm
+	if next == normalize(p.Country) || next == normalize(p.Admin) || adminTypeNoun(next) || jurisdictionNoun(next) {
+		return false
+	}
+	return !(actorHead(next) || geographicHeadWord(next) || civicHead(next))
+}
+
+func properCompoundHead(words []token, start, count int, p Place) bool {
+	end := start + count
+	if end >= len(words) || strings.ContainsAny(words[end].sep, "\n.;:!?") || !capitalized(words[end].raw) {
+		return false
+	}
+	next := words[end].norm
+	if next == normalize(p.Country) || next == normalize(p.Admin) || adminTypeNoun(next) || jurisdictionNoun(next) {
+		return false
+	}
+	return !(actorHead(next) || geographicHeadWord(next) || civicHead(next))
+}
+
+func cityInRegion(city, region Place) bool {
+	return city.CountryCode != "" && city.CountryCode == region.CountryCode && city.Feature != "ADM1" &&
+		city.AdminCode != "" && city.AdminCode == region.AdminCode
+}
+
+func (g *Gazetteer) nationalCapital(p Place) bool {
+	country, ok := g.countries[p.CountryCode]
+	if !ok || country.Capital == "" || p.Feature != "PPLC" && p.Feature != "PPLG" {
+		return false
+	}
+	return normalize(country.Capital) == normalize(p.Name)
+}
+
+func (g *Gazetteer) dominatesCity(region Place) bool {
+	for _, other := range g.byName[normalize(region.Name)] {
+		if other.ID == region.ID || other.Feature == "ADM1" || other.RegionAlias != "" {
+			continue
+		}
+		if sameJurisdiction(region, other) || g.sameSeatRegion(region, other) || g.sameSeatRegion(other, region) {
+			continue
+		}
+		if g.regionDominates(region, other) {
+			return true
+		}
+	}
+	return false
+}
+
+func mixedCaseText(words []token) bool {
+	for _, w := range words {
+		if w.raw != strings.ToUpper(w.raw) {
+			return true
+		}
+	}
+	return false
+}
+
+func civicHead(word string) bool {
+	return strings.Contains(" health ministry department agency airport traffic weather temperature climate hospital hospitals school schools road roads metro transit election elections voters candidates court courts high ", " "+word+" ")
 }
 
 // Qualifiers must be outside the matched name; a city must never receive a
@@ -192,7 +341,7 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 0
 	}
 	if end := start + count; end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && incompatibleFeatureSuffix(p, words[end].norm) &&
-		!(p.Feature == "ADM1" && g.majorPlaceSupported(p)) &&
+		!(p.Feature == "ADM1" && (g.majorPlaceSupported(p) || g.majorPopulation(p) >= 50000)) &&
 		!(historical && (strings.HasPrefix(p.Feature, "PPLA") && containerSuffix(words[end].norm) ||
 			words[end].norm == "park" && p.Population >= 50000 ||
 			words[end].norm == "bridge" && g.majorPlaceSupported(p) && !givenNames[phrase] && !familyNames[phrase] ||
@@ -301,12 +450,12 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 	if ambiguous && !(textQualified || hintQualified && (dateline || locative)) {
 		return 0
 	}
-	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || g.majorPlaceSupported(p))
+	major := canonical && count == 1 && g.majorPopulation(p) >= 50000 && (historical || (seatLike(p) && g.majorPlaceSupported(p)))
 	if historical && canonical {
 		return 31
 	}
 	if canonical && p.Feature == "ADM1" && count == 1 && !g.uniqueRegionName(p) && !major &&
-		!(textQualified || dateline || locative || typedRegion) {
+		!(textQualified || dateline || locative || typedRegion || geographicHead && !contextualName && g.dominatesCity(p)) {
 		return 0
 	}
 	if dateline {
@@ -322,6 +471,9 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 34
 	}
 	if textQualified {
+		if !historical && p.Feature != "ADM1" && p.Feature != "PPLC" && p.Feature != "PPLG" && properCompoundHead(words, start, count, p) {
+			return 0
+		}
 		return 65 + jurisdictionScore(p)
 	}
 	if hintQualified {
@@ -337,6 +489,9 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 		return 40
 	}
 	if major && p.Feature != "ADM1" {
+		if !historical && !textQualified && !dateline && !locative && p.Feature != "PPLC" && p.Feature != "PPLG" && capitalLetterOnlyReject(words, start, count, p) {
+			return 0
+		}
 		return 33
 	}
 	if canonical && p.Feature == "ADM1" && count == 1 {
@@ -352,8 +507,8 @@ func (g *Gazetteer) geographicEvidenceFor(p Place, phrase string, words []token,
 
 // Curated common given/family names: they are lexical ambiguity classes, not
 // headline phrases. Adjacent personal-name structure must not become a city.
-var givenNames = nameVocabulary(`aaron adam austin adrian ahmed ahmad ali amran andi anwar ariel alan alex alexander alfred alice amanda amy andrew andi anna anne anthony arthur barbara ben benjamin bernard bill bob brian carl carlos charles charlotte cheryl christopher daniel david dennis denzel diana diane darwin donna donald dorothy edward ella emily eric eugene evan francis frank florence fred frederick george gerald harold harry hassan hasan hussein hussain helen henry hugh irene irving isaac jack jacob james jane jason jean jeff jeffrey jennifer jeremy jerry jim joan joe john jon jonathan jose joseph joshua joyce judith julie justin karen kathleen kathryn kelly kenneth kevin laura lawrence leo leonard leslie lewis linda lois louis louise luis lynn marco margaret maria marie marilyn mark martha martin mary matthew michael nancy natalie nicholas nicole norman oliver oscar patrick paul paula peter philip pria priya raymond rebecca richard robert roger ronald rose roy ruth sam samuel santiago sandra sarah scott sharon shawn shirley simon stephen steven susan thomas timothy tom valerie victoria vincent virginia vladimir walter wayne william yahaya`)
-var familyNames = nameVocabulary(`smith johnson williams brown jones garcia miller davis rodriguez martinez hernandez lopez gonzalez wilson anderson thomas taylor moore jackson martin lee perez thompson white harris sanchez clark ramirez lewis robinson walker young allen king wright scott torres nguyen hill flores green adams nelson baker hall rivera campbell mitchell carter roberts gomez phillips evans turner diaz parker cruz edwards collins reyes stewart morris morales murphy cook rogers ortiz morgan cooper peterson reed kelly howard kim ward watson brooks wood bennett gray hughes price myers ross foster perry russell bell butler barnes fisher jordan alexander hamilton graham west hayes ford marshall kennedy clinton lincoln washington bolton rubio shevchenko bello langley lima hilton beckham giuffre berry hollen orden gogh adesanya`)
+var givenNames = nameVocabulary(`aaron adam austin sergio nigel adrian ahmed ahmad ali amran andi anwar ariel alan alex alexander alfred alice amanda amy andrew andi anna anne anthony arthur barbara ben benjamin bernard bill bob brian carl carlos charles charlotte cheryl christopher daniel david dennis denzel diana diane darwin donna donald dorothy edward ella emily eric eugene evan francis frank florence fred frederick george gerald harold harry hassan hasan hussein hussain helen henry hugh irene irving isaac jack jacob james jane jason jean jeff jeffrey jennifer jeremy jerry jim joan joe john jon jonathan jose joseph joshua joyce judith julie justin karen kathleen kathryn kelly kenneth kevin laura lawrence leo leonard leslie lewis linda lois louis louise luis lynn marco margaret maria marie marilyn mark martha martin mary matthew michael nancy natalie nicholas nicole norman oliver oscar patrick paul paula peter philip pria priya raymond rebecca richard robert roger ronald rose roy ruth sam samuel santiago sandra sarah scott sharon shawn shirley simon stephen steven susan thomas timothy tom valerie victoria vincent virginia vladimir walter wayne william yahaya`)
+var familyNames = nameVocabulary(`smith johnson williams brown jones garcia miller davis rodriguez martinez hernandez lopez gonzalez wilson anderson thomas taylor moore jackson martin lee perez thompson white harris sanchez clark ramirez lewis robinson walker young allen king wright scott torres nguyen hill flores green adams nelson baker hall rivera campbell mitchell carter roberts gomez phillips evans turner diaz parker cruz edwards collins reyes stewart morris morales murphy cook rogers ortiz morgan cooper peterson reed kelly howard kim ward watson brooks wood bennett gray hughes price myers ross foster perry russell bell butler barnes fisher jordan alexander hamilton graham west hayes ford marshall kennedy clinton lincoln washington bolton rubio shevchenko massa farage holmes sweeney bloom warren bello langley lima hilton beckham giuffre berry hollen orden gogh adesanya`)
 
 func nameVocabulary(words string) map[string]bool {
 	out := map[string]bool{}
@@ -385,7 +540,11 @@ func geographicHead(words []token, start, count int) bool {
 	if end < len(words) && words[end].norm == "s" && strings.ContainsAny(words[end].sep, "'’") {
 		end++
 	}
-	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && strings.Contains(" mayor governor residents population economy municipal municipality council cbd streets hospitals schools province region state prefecture marathon olympics olympic open summit conference expo ", " "+words[end].norm+" ")
+	return end < len(words) && !strings.ContainsAny(words[end].sep, "\n.;:!?") && geographicHeadWord(words[end].norm)
+}
+
+func geographicHeadWord(word string) bool {
+	return strings.Contains(" mayor mayoral governor residents population economy municipal municipality council cbd streets hospitals schools province region state prefecture marathon olympics olympic open summit conference expo candidates voters election ", " "+word+" ")
 }
 
 func adminTypeNoun(word string) bool {
@@ -431,14 +590,33 @@ func sameJurisdiction(a, b Place) bool {
 // even when GeoNames gives the city and the ADM1 row different codes (for
 // example Taipei city 1668341 and admin:TW.03). Counting that seat as a foreign
 // homonym is what removed valid capital dots such as Taipei.
-func sameSeatRegion(a, b Place) bool {
-	if a.CountryCode == "" || a.CountryCode != b.CountryCode || b.Feature != "ADM1" {
+func (g *Gazetteer) sameSeatRegion(a, b Place) bool {
+	if a.CountryCode == "" || a.CountryCode != b.CountryCode || b.Feature != "ADM1" || !seatLike(a) {
 		return false
 	}
-	if !seatLike(a) {
+	if expandedPlaceName(a.Name) != expandedPlaceName(b.Name) {
 		return false
 	}
-	return expandedPlaceName(a.Name) == expandedPlaceName(b.Name)
+	if a.AdminCode != "" && a.AdminCode == b.AdminCode {
+		return true
+	}
+	if normalize(a.Admin) == normalize(b.Name) {
+		return true
+	}
+	// A national capital may stand in for the same-named region when it is not
+	// dwarfed by that region (this keeps Washington DC from equating to
+	// Washington State, while keeping Taipei/La Paz as their own seats).
+	if !strings.HasPrefix(a.Feature, "PPLA") {
+		if a.Feature == "PPLC" {
+			regionPopulation := g.majorPopulation(b)
+			// A same-named region with no indexed urban population cannot
+			// contradict the national capital's identity as its seat
+			// (Taipei/TW.03).
+			return a.Population > 0 && (regionPopulation == 0 || a.Population >= regionPopulation)
+		}
+		return false
+	}
+	return false
 }
 
 func (g *Gazetteer) majorPopulation(p Place) int64 {
@@ -460,7 +638,12 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 	conflict := false
 	for _, other := range g.byName[normalize(p.Name)] {
 		if other.RegionAlias != "" || expandedPlaceName(other.Name) != expandedPlaceName(p.Name) || other.ID == p.ID ||
-			sameJurisdiction(p, other) || sameSeatRegion(p, other) || sameSeatRegion(other, p) {
+			sameJurisdiction(p, other) || g.sameSeatRegion(p, other) || g.sameSeatRegion(other, p) {
+			continue
+		}
+		if other.Feature == "ADM1" && g.nationalCapital(p) && other.AdminCode != p.AdminCode {
+			// A national capital and a same-named first-level region are different
+			// jurisdictions (Buenos Aires city/province, Taipei, Washington DC/WA).
 			continue
 		}
 		conflict = true
@@ -471,7 +654,7 @@ func (g *Gazetteer) majorPlaceSupported(p Place) bool {
 		largestOther = max(largestOther, otherPopulation)
 	}
 	if !conflict {
-		return true
+		return seatLike(p)
 	}
 	return (p.Feature == "ADM1" || seatLike(p)) && population >= 5*largestOther
 }
@@ -686,7 +869,7 @@ func (g *Gazetteer) uniqueRegionName(p Place) bool {
 		if other.RegionAlias != "" || normalize(other.Name) != normalize(p.Name) || other.ID == p.ID {
 			continue
 		}
-		if sameJurisdiction(p, other) || sameSeatRegion(p, other) || sameSeatRegion(other, p) {
+		if sameJurisdiction(p, other) || g.sameSeatRegion(p, other) || g.sameSeatRegion(other, p) {
 			continue
 		}
 		return false

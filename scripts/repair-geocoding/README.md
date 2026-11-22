@@ -9,12 +9,18 @@ requires all three existing GeoNames files; it never downloads a replacement
 dataset. The exact source files are identified by SHA-256 in the audit/bundle.
 
 Automatic matching excludes no-data region aliases that point at country
-capitals; those aliases remain available to explicit lookup. A canonical
-single-word city needs geographic syntax, or at least 50,000 population and
-geographic uniqueness. A capital/administrative seat may also qualify when it
-dominates foreign homonyms by at least five to one. A region's own same-named
-seat is the same jurisdiction, not a foreign homonym. Person, club, commodity,
-common-word and demonym evidence guards still apply. Countries can be actors
+capitals; those aliases remain available to explicit lookup. Capital-letter-only
+acceptance is limited to capital/administrative seats (PPLC/PPLG/PPLA*); a
+proper-name compound ("Buffalo Bills", "Manhattan Project"), an acronym in
+mixed-case prose, a longer unknown name's connector ("Agusan del Sur") or a
+common word/name does not become a bare city dot. A seat may also qualify when
+it dominates foreign homonyms by at least five to one. A first-level region
+uses its populated-area population for ranking and dominates a same-named small
+town five to one ("in Florida", "in Ontario"). A region's own same-named seat is
+the same jurisdiction when the admin code/name matches, or when a national
+capital is not dwarfed by the region; Washington DC and Washington State are
+not the same seat. Person, club, commodity, common-word and demonym evidence
+guards still apply. Countries can be actors
 and possessives without a locative. Punctuated canonical abbreviations
 (St./Ste./Ft./Mt./initials) remain supported. An equal-quality cross-country
 multiword homonym resolves only to the exact canonical name of a capital or
@@ -24,21 +30,24 @@ Cruz, San Jose, bare Santo Domingo).
 
 The new-point admission threshold is not evidence that an existing canonical
 point is false. A valid canonical title witness that passes the explicit
-rejection guards is retained when disambiguation remains uncertain. In
-historical repair only, a title that names the canonical place inside a
-containing jurisdiction or route context ("X region", "X Valley", "X–Y Road
-section") also counts as a witness, so it is retained for review rather than
-destructively removed. Natural-feature, organization, person and common-word
-uses are still rejected, and new-point plotting stays strict. The audit
-records `needs_review` counts and complete `reviews` entries instead of an
-unsupported deletion. This exception requires a valid coordinate already
-within 1 km of that canonical point; invalid or geographically mismatched
-coordinates need regular geographic evidence, never an ambiguous rescue. Stronger contradictory country/admin evidence still
-replots it; invalid coordinates and unsupported precision are still corrected.
-These unresolved retained points are not certified as accurate. They require
-separate review and do not appear as destructive changes in the bundle. A
-zero-change second run may still have `needs_review` entries; idempotency is not
-geographic completion or permission to serve the proposal live.
+rejection guards is a **review candidate**. In historical repair only, a title
+that names the canonical place inside a containing jurisdiction or route
+context ("X region", "X Valley", "X–Y Road section") also counts as a witness,
+so it is reviewed rather than silently deleted. Natural-feature, organization,
+person and common-word uses are still rejected, and new-point plotting stays
+strict. This exception requires a valid coordinate already within 1 km of that
+canonical point; invalid or geographically mismatched coordinates need regular
+geographic evidence, never an ambiguous rescue. Stronger contradictory
+country/admin evidence still replots it; invalid coordinates and unsupported
+precision are still corrected.
+
+**Review candidates are removals by default.** They are emitted as
+`review_required` changes and included in the bundle. Most are false dots
+(people, clubs, brands, common words). Keeping one requires an explicit,
+reviewed `--review-allowlist` entry of `table|owner|place_id`; only allowlisted
+rows appear in `reviews` and remain untouched. A zero-change second run after
+the default apply has no review candidates left. Idempotency is not geographic
+completion or permission to serve the proposal live.
 
 ## Audit and explicit apply
 
@@ -62,6 +71,10 @@ go run ./scripts/repair-geocoding --geonames-dir /path/to/geonames \
   --apply --allow-db dor_f1_1_review --report /absolute/path/committed.json
 ```
 
+To keep specific reviewed rows, add
+`--review-allowlist /absolute/path/review-keep.txt`, where each non-comment
+line is `table|owner|place_id`. Without it, every review candidate is removed.
+
 The connected server's `current_database()` must exactly match `--allow-db`.
 The live database `dor` is always refused, even when explicitly allowed. This
 standalone command has no coordinated cutover gate; a DB-only live apply must
@@ -69,7 +82,9 @@ not bypass the future hot-state reconciliation.
 
 Apply uses one serializable transaction with location/story table locks. It
 deletes all rejected rows before inserting replacements, coalesces duplicate
-votes with the strongest weight, and fixes `stories.primary_loc`. Before
+votes with the strongest weight, keeps one dot per place per story/article, and
+fixes `stories.primary_loc`. If a replacement place already remains under
+another role, the replaced row is dropped instead of adding a duplicate role. Before
 commit it reads the complete after arrays and primary selections back from SQL
 and checks them against the plan. An unconfirmed commit emits no committed audit; inspect the database before
 retrying because a lost connection can leave the outcome unknown.

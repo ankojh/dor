@@ -17,7 +17,8 @@ type LocationRepairBundle = geo.LocationRepairBundle
 
 type ownerKey struct{ table, id string }
 
-func key(row location) ownerKey { return ownerKey{row.Table, row.Owner} }
+func key(row location) ownerKey            { return ownerKey{row.Table, row.Owner} }
+func voteKey(id string, role int16) string { return fmt.Sprintf("%s/%d", id, role) }
 func vote(row location) geo.LocationVote {
 	v := geo.LocationVote{PlaceID: row.PlaceID, Name: row.Name, Lat: row.Lat, Lon: row.Lon, Precision: row.Precision, Role: row.Role}
 	if row.Table == "article_locations" {
@@ -55,22 +56,32 @@ func locationHash(votes []geo.LocationVote, primary string) string {
 }
 func plannedRows(before []location, changes []change) map[ownerKey][]geo.LocationVote {
 	rows := map[ownerKey]map[string]geo.LocationVote{}
-	rowKey := func(id string, role int16) string { return fmt.Sprintf("%s/%d", id, role) }
 	for _, row := range before {
 		k := key(row)
 		if rows[k] == nil {
 			rows[k] = map[string]geo.LocationVote{}
 		}
-		rows[k][rowKey(row.PlaceID, row.Role)] = vote(row)
+		rows[k][voteKey(row.PlaceID, row.Role)] = vote(row)
 	}
 	for _, c := range changes {
-		delete(rows[key(c.row)], rowKey(c.row.PlaceID, c.row.Role))
+		delete(rows[key(c.row)], voteKey(c.row.PlaceID, c.row.Role))
 	}
 	for _, c := range changes {
 		if c.decision.Replacement == nil {
 			continue
 		}
 		p := c.decision.Replacement
+		owner := key(c.row)
+		duplicate := false
+		for _, existing := range rows[owner] {
+			if existing.PlaceID == p.ID {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
 		r := c.row
 		r.PlaceID, r.Lat, r.Lon, r.Precision = p.ID, p.Lat, p.Lon, int16(c.decision.Precision)
 		if p.Name != "" {
@@ -78,12 +89,12 @@ func plannedRows(before []location, changes []change) map[ownerKey][]geo.Locatio
 		}
 		k := key(r)
 		v := vote(r)
-		old, ok := rows[k][rowKey(r.PlaceID, r.Role)]
+		old, ok := rows[k][voteKey(r.PlaceID, r.Role)]
 		if ok {
 			v.Weight = max(v.Weight, old.Weight)
 			v.Confidence = max(v.Confidence, old.Confidence)
 		}
-		rows[k][rowKey(r.PlaceID, r.Role)] = v
+		rows[k][voteKey(r.PlaceID, r.Role)] = v
 	}
 	out := map[ownerKey][]geo.LocationVote{}
 	for k, values := range rows {

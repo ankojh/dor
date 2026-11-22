@@ -25,13 +25,14 @@ type location struct {
 	Evidence                    []geo.TextEvidence
 }
 type counts struct {
-	Scanned     int            `json:"scanned"`
-	Flagged     int            `json:"flagged"`
-	Replotted   int            `json:"replotted"`
-	Downgraded  int            `json:"downgraded"`
-	Removed     int            `json:"removed"`
-	NeedsReview int            `json:"needs_review"`
-	Reasons     map[string]int `json:"reasons"`
+	Scanned        int            `json:"scanned"`
+	Flagged        int            `json:"flagged"`
+	Replotted      int            `json:"replotted"`
+	Downgraded     int            `json:"downgraded"`
+	Removed        int            `json:"removed"`
+	NeedsReview    int            `json:"needs_review"`
+	ReviewRemovals int            `json:"review_removals"`
+	Reasons        map[string]int `json:"reasons"`
 }
 type change struct {
 	row      location
@@ -54,16 +55,17 @@ type auditReview struct {
 	Reason  string `json:"reason"`
 }
 type report struct {
-	Status    string               `json:"status"`
-	Committed bool                 `json:"committed"`
-	Tables    map[string]*counts   `json:"tables"`
-	Changes   []auditChange        `json:"changes"`
-	Reviews   []auditReview        `json:"reviews"`
-	Bundle    LocationRepairBundle `json:"bundle"`
+	Status         string               `json:"status"`
+	Committed      bool                 `json:"committed"`
+	Tables         map[string]*counts   `json:"tables"`
+	Changes        []auditChange        `json:"changes"`
+	Reviews        []auditReview        `json:"reviews"`
+	ReviewRemovals []auditReview        `json:"review_removals"`
+	Bundle         LocationRepairBundle `json:"bundle"`
 }
 type options struct {
-	dsn, dir, reportPath, allowDB string
-	apply                         bool
+	dsn, dir, reportPath, allowDB, reviewAllowlist string
+	apply                                          bool
 }
 
 func parseOptions(args []string) (options, error) {
@@ -74,6 +76,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.reportPath, "report", "", "atomic JSON audit and repair bundle output")
 	fs.BoolVar(&o.apply, "apply", false, "explicitly commit isolated-copy Postgres repairs")
 	fs.StringVar(&o.allowDB, "allow-db", "", "required exact isolated database name for --apply (live dor is refused)")
+	fs.StringVar(&o.reviewAllowlist, "review-allowlist", "", "optional table|owner|place_id lines to keep review candidates instead of removing them")
 	dry := fs.Bool("dry-run", true, "read-only proposed audit (default)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -92,6 +95,33 @@ func parseOptions(args []string) (options, error) {
 	}
 	return o, nil
 }
+
+// loadReviewAllowlist reads explicit table|owner|place_id lines. Every entry is
+// reviewed maintenance input; an empty or missing file removes all review
+// candidates by default.
+func loadReviewAllowlist(path string) (map[string]bool, error) {
+	allow := map[string]bool{}
+	if path == "" {
+		return allow, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read review allowlist: %w", err)
+	}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) != 3 || parts[0] != "story_locations" && parts[0] != "article_locations" || parts[1] == "" || parts[2] == "" {
+			return nil, fmt.Errorf("review allowlist line %d must be table|owner|place_id with a supported table", lineNo+1)
+		}
+		allow[parts[0]+"|"+parts[1]+"|"+parts[2]] = true
+	}
+	return allow, nil
+}
+
 func main() {
 	o, err := parseOptions(os.Args[1:])
 	if err != nil {
@@ -100,12 +130,16 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := runReport(ctx, o.dsn, o.dir, o.apply, o.reportPath, o.allowDB); err != nil {
+	if err := runReport(ctx, o.dsn, o.dir, o.apply, o.reportPath, o.allowDB, o.reviewAllowlist); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
-func runReport(ctx context.Context, dsn, dir string, apply bool, path, allowDB string) error {
+func runReport(ctx context.Context, dsn, dir string, apply bool, path, allowDB, reviewAllowlist string) error {
+	allowKeep, err := loadReviewAllowlist(reviewAllowlist)
+	if err != nil {
+		return err
+	}
 	g, err := geo.LoadExisting(ctx, dir, slog.Default())
 	if err != nil {
 		return err
@@ -120,7 +154,7 @@ func runReport(ctx context.Context, dsn, dir string, apply bool, path, allowDB s
 			return err
 		}
 	}
-	r, err := repair(ctx, conn, g, apply)
+	r, err := repair(ctx, conn, g, apply, allowKeep)
 	if err != nil {
 		return err
 	}
@@ -186,7 +220,7 @@ type transactionStarter interface {
 	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
-func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply bool) (report, error) {
+func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply bool, allowKeep map[string]bool) (report, error) {
 	mode := pgx.ReadOnly
 	if apply {
 		mode = pgx.ReadWrite
@@ -205,7 +239,7 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 	if err != nil {
 		return report{}, err
 	}
-	r := report{Status: "proposed", Tables: map[string]*counts{}}
+	r := report{Status: "proposed", Tables: map[string]*counts{}, Reviews: []auditReview{}, ReviewRemovals: []auditReview{}}
 	for _, table := range []string{"story_locations", "article_locations"} {
 		r.Tables[table] = &counts{Reasons: map[string]int{}}
 	}
@@ -215,8 +249,18 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 		c.Scanned++
 		d := g.RepairLocation(geo.StoredLocation{PlaceID: row.PlaceID, Lat: row.Lat, Lon: row.Lon, Precision: geo.Resolution(row.Precision)}, row.Evidence)
 		if d.ReviewReason != "" {
+			review := auditReview{row.Table, row.Owner, row.PlaceID, row.Name, d.ReviewReason}
 			c.NeedsReview++
-			r.Reviews = append(r.Reviews, auditReview{row.Table, row.Owner, row.PlaceID, row.Name, d.ReviewReason})
+			keepKey := row.Table + "|" + row.Owner + "|" + row.PlaceID
+			if allowKeep[keepKey] {
+				r.Reviews = append(r.Reviews, review)
+				continue
+			}
+			// Default policy: a review candidate is a proposed removal. Keeping a
+			// row requires an explicit, reviewed allowlist entry.
+			r.ReviewRemovals = append(r.ReviewRemovals, review)
+			c.ReviewRemovals++
+			d = geo.RepairDecision{Reason: "review_required"}
 		}
 		if d.Reason == "" {
 			continue
@@ -246,10 +290,43 @@ func repair(ctx context.Context, db transactionStarter, g *geo.Gazetteer, apply 
 			return report{}, err
 		}
 	}
+	// Keep one dot per place per owner. If a replacement place already remains
+	// under another role, drop the replaced row instead of adding a duplicate.
+	deleted := map[ownerKey]map[string]bool{}
 	for _, c := range changes {
+		k := key(c.row)
+		if deleted[k] == nil {
+			deleted[k] = map[string]bool{}
+		}
+		deleted[k][voteKey(c.row.PlaceID, c.row.Role)] = true
+	}
+	present := map[ownerKey]map[string]bool{}
+	for _, row := range locations {
+		k := key(row)
+		if deleted[k][voteKey(row.PlaceID, row.Role)] {
+			continue
+		}
+		if present[k] == nil {
+			present[k] = map[string]bool{}
+		}
+		present[k][row.PlaceID] = true
+	}
+	for _, c := range changes {
+		p := c.decision.Replacement
+		if p == nil {
+			continue
+		}
+		k := key(c.row)
+		if present[k] == nil {
+			present[k] = map[string]bool{}
+		}
+		if present[k][p.ID] {
+			continue
+		}
 		if err := applyLocation(ctx, tx, c.row, c.decision); err != nil {
 			return report{}, err
 		}
+		present[k][p.ID] = true
 	}
 	ids := make([]string, 0, len(bundle.Stories))
 	for _, p := range bundle.Stories {

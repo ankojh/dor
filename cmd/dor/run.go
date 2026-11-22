@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -533,6 +534,11 @@ func runCommand(args []string) error {
 	}
 	if err := runner.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("agent shutdown", "err", err)
+	}
+	if closer, ok := enrichmentDeps.Enricher.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			logger.Warn("enricher close", "err", err)
+		}
 	}
 	if exitReason == "admin error" {
 		return errors.New("admin server failed")

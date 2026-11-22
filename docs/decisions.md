@@ -488,11 +488,18 @@ documented $0.042/Mtok. Model pins now accept `x.y.z` because TypeSafe rejects
 `jev-1.14`. Claude features can run on subscriptions instead of an API key:
 `DOR_LLM_BACKENDS` orders `api`, `claude-cli` (`claude -p --json-schema`) and
 `codex-cli` (`codex exec --output-schema`) into a fallback chain
-(`internal/llm/chain.go`). CLI calls skip the dollar budget (they spend
-subscription quota) and are capped by `DOR_LLM_CLI_CONCURRENCY`; a backend that
-fails for an infrastructure reason cools down for 30 s, doubling to 10 min.
-Codex answers come from a different model family than the prompts were tuned
-on and have not been evaluated.
+(`internal/llm/chain.go`). CLI calls still pass the budget manager: they are
+admitted against the `claude-cli`/`codex-cli` token buckets, the daily cap and
+the priority shed order with estimated and recorded cost of zero, so /ops
+counts their tokens; the buckets throttle subscription quota, not dollars, and
+`DOR_LLM_CLI_CONCURRENCY` caps processes in flight. Both CLI tiers default to
+the Haiku model, including the Opus-tier brief and "why" jobs, because Opus
+drains a Pro subscription fast; set `DOR_CLAUDE_CLI_OPUS_MODEL=claude-opus-5-5`
+to restore Opus. For an unattended login, export `CLAUDE_CODE_OAUTH_TOKEN` from
+`claude setup-token` so the claude CLI does not lose its OAuth login about once
+a month. A backend that fails for an infrastructure reason cools down for 30 s,
+doubling to 10 min. Codex answers come from a different model family than the
+prompts were tuned on and have not been evaluated.
 ## Globe renderer (M0·2, 2026-11-20; fixup 1)
 
 **Custom WebGL layer on the MapLibre GL JS v5 globe.** The first decision note

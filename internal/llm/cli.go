@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ankojh/dor/internal/budget"
 )
 
 // CLIKind names a subscription-backed backend: a local agent CLI that is
@@ -29,9 +31,14 @@ const (
 
 // CLIConfig configures a CLI backend.
 //
-// The CLIs spend subscription quota, not API dollars, so the budget manager is
-// not consulted: Concurrency is the only rate control, and Result.CostUSD is
-// zero. A failing or rate-limited CLI is taken out of rotation by Chain.
+// The CLIs spend subscription quota, not API dollars, so they are admitted
+// with EstimatedUSD and CostUSD zero. When Budget is set, every call still
+// passes the limiter: it is reserved against the claude-cli/codex-cli token
+// bucket, which throttles subscription quota rather than dollars, and the
+// daily cap and priority shed order still apply. The daily cap therefore
+// blocks once API spend has filled it, and Priority sheds briefs and "why"
+// under pressure. Concurrency caps processes in flight; a failing or
+// rate-limited CLI is taken out of rotation by Chain.
 type CLIConfig struct {
 	Kind CLIKind
 	// Binary defaults to "claude" or "codex" on PATH.
@@ -45,7 +52,10 @@ type CLIConfig struct {
 	Timeout time.Duration
 	// Concurrency caps processes in flight. Default 2.
 	Concurrency int
-	Logger      *slog.Logger
+	// Budget enables admission control for CLI calls. Nil means no checks,
+	// which keeps tests simple.
+	Budget Budget
+	Logger *slog.Logger
 	// Run is optional; tests replace the process runner.
 	Run CommandRunner
 }
@@ -129,6 +139,9 @@ func NewCLI(cfg CLIConfig) (*CLIClient, error) {
 // Name is the backend name used in logs.
 func (c *CLIClient) Name() string { return string(c.cfg.Kind) }
 
+// Close removes the backend's temporary workdir.
+func (c *CLIClient) Close() error { return os.RemoveAll(c.dir) }
+
 // Complete runs one job through the CLI.
 func (c *CLIClient) Complete(ctx context.Context, job Job) (Result, error) {
 	if strings.TrimSpace(job.System) == "" {
@@ -141,9 +154,6 @@ func (c *CLIClient) Complete(ctx context.Context, job Job) (Result, error) {
 	if job.Tier == TierOpus {
 		model = c.cfg.OpusModel
 	}
-	if c.cfg.Kind == CLIClaude && job.Model != "" {
-		model = job.Model
-	}
 	schemaJSON, err := json.Marshal(SanitizeSchema(job.Schema))
 	if err != nil {
 		return Result{}, fmt.Errorf("llm: encode schema: %w", err)
@@ -155,6 +165,32 @@ func (c *CLIClient) Complete(ctx context.Context, job Job) (Result, error) {
 		return Result{}, ctx.Err()
 	}
 	defer func() { <-c.sem }()
+
+	var reservation *budget.Reservation
+	if c.cfg.Budget != nil {
+		priority := job.Priority
+		if priority == "" {
+			priority = budget.PriorityDefault
+		}
+		estInput := estimateTokens([]byte(job.System)) + estimateTokens([]byte(job.User)) + estimateTokens(schemaJSON)
+		verdict, err := c.cfg.Budget.Check(ctx, budget.Request{
+			API:                   string(c.cfg.Kind),
+			Priority:              priority,
+			EstimatedInputTokens:  estInput,
+			EstimatedOutputTokens: job.MaxTokens,
+			EstimatedUSD:          0,
+		})
+		if err != nil {
+			return Result{}, fmt.Errorf("llm: budget check: %w", err)
+		}
+		if !verdict.Allowed {
+			return Result{}, &BudgetError{Reason: verdict.Reason, API: string(c.cfg.Kind)}
+		}
+		reservation = verdict.Reservation
+		if reservation == nil {
+			return Result{}, errors.New("llm: budget returned no reservation")
+		}
+	}
 
 	start := c.now()
 	runCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
@@ -170,10 +206,23 @@ func (c *CLIClient) Complete(ctx context.Context, job Job) (Result, error) {
 	res.LastAttemptLatency = res.Latency
 	res.Attempts = 1
 	if err != nil {
+		if c.cfg.Budget != nil {
+			_ = c.cfg.Budget.Record(ctx, *reservation, budget.Usage{})
+		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
 		return res, err
+	}
+	if c.cfg.Budget != nil {
+		usage := budget.Usage{
+			CostUSD:      0,
+			InputTokens:  res.Usage.InputTokens,
+			OutputTokens: res.Usage.OutputTokens,
+		}
+		if err := c.cfg.Budget.Record(ctx, *reservation, usage); err != nil {
+			return res, fmt.Errorf("llm: record usage: %w", err)
+		}
 	}
 	res.Schema = job.Schema
 	res.Effort = c.cfg.Effort

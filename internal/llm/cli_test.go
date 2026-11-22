@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ankojh/dor/internal/budget"
 )
 
 func cliJob() Job {
@@ -42,7 +45,7 @@ func newTestCLI(t *testing.T, kind CLIKind, run CommandRunner) *CLIClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(c.dir) })
+	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 
@@ -113,9 +116,16 @@ func TestClaudeCLIModelSelection(t *testing.T) {
 	if _, err := c.Complete(context.Background(), job); err != nil || model != "big" {
 		t.Errorf("opus tier model = %q err=%v", model, err)
 	}
+	// The tier mapping always wins for claude-cli: an explicit Claude id on
+	// the job is never sent, so Opus-tier work cannot be redirected to Haiku.
 	job.Model = "claude-explicit-1-0"
-	if _, err := c.Complete(context.Background(), job); err != nil || model != "claude-explicit-1-0" {
-		t.Errorf("explicit model = %q err=%v", model, err)
+	if _, err := c.Complete(context.Background(), job); err != nil || model != "big" {
+		t.Errorf("explicit model = %q err=%v, want the tier's model %q", model, err, "big")
+	}
+	job = cliJob()
+	job.Tier = TierHaiku
+	if _, err := c.Complete(context.Background(), job); err != nil || model != "small" {
+		t.Errorf("haiku tier model = %q err=%v", model, err)
 	}
 }
 
@@ -225,7 +235,7 @@ func TestCLIConcurrencyCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(c.dir)
+	t.Cleanup(func() { _ = c.Close() })
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Add(1)
@@ -274,5 +284,216 @@ func TestCLICancelledContext(t *testing.T) {
 	go func() { time.Sleep(10 * time.Millisecond); cancel() }()
 	if _, err := c.Complete(ctx, cliJob()); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// newBudgetTestCLI builds a CLI backend with a budget hook and a fake runner.
+func newBudgetTestCLI(t *testing.T, kind CLIKind, b Budget, run CommandRunner) *CLIClient {
+	t.Helper()
+	c, err := NewCLI(CLIConfig{Kind: kind, HaikuModel: "small", OpusModel: "big", Budget: b, Run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// cliBudgetInputTokens is the input estimate Complete sends to the limiter:
+// system, user and the sanitized schema.
+func cliBudgetInputTokens(t *testing.T, job Job) int64 {
+	t.Helper()
+	schemaJSON, err := json.Marshal(SanitizeSchema(job.Schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return estimateTokens([]byte(job.System)) + estimateTokens([]byte(job.User)) + estimateTokens(schemaJSON)
+}
+
+// successRunner returns the fixture output for kind: claudeOK for claude-cli,
+// and the codex events plus a valid answer file for codex-cli.
+func successRunner(t *testing.T, kind CLIKind) CommandRunner {
+	t.Helper()
+	if kind == CLIClaude {
+		return func(context.Context, Command) ([]byte, []byte, error) {
+			return []byte(claudeOK), nil, nil
+		}
+	}
+	return func(_ context.Context, cmd Command) ([]byte, []byte, error) {
+		out := argAfter(cmd.Args, "--output-last-message")
+		if err := os.WriteFile(out, []byte(`{"category":"politics","confidence":0.99}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return []byte(codexEvents), nil, nil
+	}
+}
+
+func TestClaudeCLIBudgetWiring(t *testing.T) {
+	fb := &fakeBudget{}
+	c := newBudgetTestCLI(t, CLIClaude, fb, successRunner(t, CLIClaude))
+	job := cliJob()
+	job.Priority = budget.PriorityWhy
+	if _, err := c.Complete(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	wantInput := cliBudgetInputTokens(t, job)
+	if len(fb.checks) != 1 {
+		t.Fatalf("checks = %d, want 1", len(fb.checks))
+	}
+	chk := fb.checks[0]
+	if chk.API != "claude-cli" || chk.Priority != budget.PriorityWhy ||
+		chk.EstimatedInputTokens != wantInput || chk.EstimatedOutputTokens != job.MaxTokens || chk.EstimatedUSD != 0 {
+		t.Errorf("check = %+v, want api=claude-cli priority=why input=%d output=%d usd=0", chk, wantInput, job.MaxTokens)
+	}
+
+	if len(fb.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(fb.records))
+	}
+	rec := fb.records[0]
+	// The subscription CLI spends quota, not dollars; tokens still count.
+	if rec.Usage.CostUSD != 0 || rec.Usage.InputTokens != 2 || rec.Usage.OutputTokens != 77 {
+		t.Errorf("record = %+v, want cost 0 input 2 output 77", rec.Usage)
+	}
+	if rec.Res.API != "claude-cli" {
+		t.Errorf("reservation api = %q, want claude-cli", rec.Res.API)
+	}
+}
+
+func TestCodexCLIBudgetWiring(t *testing.T) {
+	fb := &fakeBudget{}
+	c := newBudgetTestCLI(t, CLICodex, fb, successRunner(t, CLICodex))
+	job := cliJob()
+	if _, err := c.Complete(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	wantInput := cliBudgetInputTokens(t, job)
+	if len(fb.checks) != 1 {
+		t.Fatalf("checks = %d, want 1", len(fb.checks))
+	}
+	chk := fb.checks[0]
+	if chk.API != "codex-cli" || chk.EstimatedInputTokens != wantInput ||
+		chk.EstimatedOutputTokens != job.MaxTokens || chk.EstimatedUSD != 0 {
+		t.Errorf("check = %+v, want api=codex-cli input=%d output=%d usd=0", chk, wantInput, job.MaxTokens)
+	}
+
+	if len(fb.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(fb.records))
+	}
+	rec := fb.records[0]
+	if rec.Usage.CostUSD != 0 || rec.Usage.InputTokens != 16658 || rec.Usage.OutputTokens != 22 {
+		t.Errorf("record = %+v, want cost 0 input 16658 output 22", rec.Usage)
+	}
+	if rec.Res.API != "codex-cli" {
+		t.Errorf("reservation api = %q, want codex-cli", rec.Res.API)
+	}
+}
+
+func TestCLIBudgetDefaultPriority(t *testing.T) {
+	for _, kind := range []CLIKind{CLIClaude, CLICodex} {
+		t.Run(string(kind), func(t *testing.T) {
+			fb := &fakeBudget{}
+			c := newBudgetTestCLI(t, kind, fb, successRunner(t, kind))
+			job := cliJob() // Priority is empty.
+			if _, err := c.Complete(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			if len(fb.checks) != 1 || fb.checks[0].Priority != budget.PriorityDefault {
+				t.Errorf("checks = %+v, want one check with priority %q", fb.checks, budget.PriorityDefault)
+			}
+		})
+	}
+}
+
+func TestCLIBudgetDenial(t *testing.T) {
+	for _, kind := range []CLIKind{CLIClaude, CLICodex} {
+		t.Run(string(kind), func(t *testing.T) {
+			fb := &fakeBudget{denyFrom: 1, reason: "token-bucket"}
+			ran := false
+			c := newBudgetTestCLI(t, kind, fb, func(context.Context, Command) ([]byte, []byte, error) {
+				ran = true
+				return nil, nil, nil
+			})
+			_, err := c.Complete(context.Background(), cliJob())
+			var be *BudgetError
+			if !errors.Is(err, ErrBudget) || !errors.As(err, &be) {
+				t.Fatalf("err = %v, want a *BudgetError wrapping ErrBudget", err)
+			}
+			if be.API != string(kind) || be.Reason != "token-bucket" {
+				t.Errorf("budget error = %+v", be)
+			}
+			if ran {
+				t.Error("the command runner ran despite the denial")
+			}
+			if len(fb.records) != 0 {
+				t.Errorf("records = %+v, want none on denial", fb.records)
+			}
+		})
+	}
+}
+
+func TestCLIBudgetRecordsZeroUsageOnFailure(t *testing.T) {
+	fb := &fakeBudget{}
+	boom := errors.New("exit status 1")
+	c := newBudgetTestCLI(t, CLIClaude, fb, func(context.Context, Command) ([]byte, []byte, error) {
+		return nil, []byte("stderr text"), boom
+	})
+	_, err := c.Complete(context.Background(), cliJob())
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+	if len(fb.checks) != 1 {
+		t.Errorf("checks = %d, want 1", len(fb.checks))
+	}
+	if len(fb.records) != 1 {
+		t.Fatalf("records = %d, want one refund", len(fb.records))
+	}
+	if fb.records[0].Usage != (budget.Usage{}) {
+		t.Errorf("recorded usage = %+v, want zero", fb.records[0].Usage)
+	}
+}
+
+func TestClaudeCLIOAuthTokenPassthrough(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token-xyz")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-must-be-stripped")
+	var got Command
+	c := newTestCLI(t, CLIClaude, func(_ context.Context, cmd Command) ([]byte, []byte, error) {
+		got = cmd
+		return []byte(claudeOK), nil, nil
+	})
+	if _, err := c.Complete(context.Background(), cliJob()); err != nil {
+		t.Fatal(err)
+	}
+	var oauth int
+	for _, kv := range got.Env {
+		if kv == "CLAUDE_CODE_OAUTH_TOKEN=oauth-token-xyz" {
+			oauth++
+		}
+		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			t.Errorf("ANTHROPIC_API_KEY leaked to the subscription CLI")
+		}
+	}
+	if oauth != 1 {
+		t.Errorf("CLAUDE_CODE_OAUTH_TOKEN entries = %d, want exactly 1", oauth)
+	}
+}
+
+func TestCLICloseRemovesWorkdir(t *testing.T) {
+	c, err := NewCLI(CLIConfig{Kind: CLIClaude, HaikuModel: "small", OpusModel: "big",
+		Run: func(context.Context, Command) ([]byte, []byte, error) { return nil, nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.dir); err != nil {
+		t.Fatalf("workdir missing before Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(c.dir); !os.IsNotExist(err) {
+		t.Errorf("workdir still present after Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("second Close = %v, want nil", err)
 	}
 }

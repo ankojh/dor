@@ -1215,6 +1215,8 @@ export class LiveGlobe {
   }
 
   private readonly onMouseLeave = (): void => {
+    if (this.hoverRaf !== null) cancelAnimationFrame(this.hoverRaf);
+    this.hoverRaf = null;
     this.clearHoverLabel();
   };
 
@@ -1224,12 +1226,9 @@ export class LiveGlobe {
     const point = event.point;
     this.hoverRaf = requestAnimationFrame(() => {
       this.hoverRaf = null;
-      if (!this.focused) return;
-      // Use the same GPU ID pass as click: it honours focus visibility, the
-      // shared zoom cull and occlusion, so every drawn link can reveal its
-      // label, including links below the ambient strength floor.
-      const pick = this.layer.pickNow(point.x, point.y);
-      const index = pick?.kind === "link" ? pick.index : null;
+      if (!this.focused || !this.linesVisible || this.contextLost) return;
+      const indices = this.focused.hud.links.map((link) => link.index).sort((a, b) => a - b);
+      const index = this.layer.hoverFocusedArc(indices, point.x, point.y);
       if (index !== this.hoverLink) this.updateHoverLabel(index);
     });
   };

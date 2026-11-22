@@ -332,6 +332,19 @@ export class CustomGlobeLayer implements CustomLayerInterface {
     return choosePick(null, link);
   }
 
+  /** Hover uses the last drawn projection and CPU mirrors; GPU readback stays click-only. */
+  hoverFocusedArc(indices: readonly number[], x: number, y: number): number | null {
+    if (!this.gl || !this.data || !this.linesVisible || !this.hasFocus || !this.frames) return null;
+    return this.data.hitFocusedArc(indices, this.renderState, x, y, {
+      zoom: this.renderState.zoom,
+      time: this.renderState.time,
+      focusAt: this.focusAt,
+      hasFocus: this.hasFocus,
+      floor: this.floor,
+      dropThematic: this.quality >= 3,
+    });
+  }
+
   private pickPass(
     clientX: number,
     clientY: number,

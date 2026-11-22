@@ -9,7 +9,12 @@ import { TtlLruCache, LatestRequest } from "./text-cache";
 import { LruCache } from "./worker/lru";
 import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
+import { connectionLabel } from "./live/connection";
 import { mergeWireRow } from "./live/wire";
+import { nextTabStop } from "./ui/focus";
+import { channelLabel } from "./ui/labels";
+import { groupLinksByStrength } from "./ui/links";
+import { sheetSwipeDirection } from "./ui/sheet-gesture";
 import {
   rollingMinuteBars,
   rollingMinuteRate,
@@ -451,6 +456,7 @@ export function App() {
   const [storiesOnly, setStoriesOnly] = createSignal(false);
   const [selectedLink, setSelectedLink] = createSignal<LinkInfo | null>(null);
   const [linkWhy, setLinkWhy] = createSignal<LinkWhy | null>(null);
+  const [linkWhyCached, setLinkWhyCached] = createSignal(false);
   const [storyText, setStoryText] = createSignal<StoryText | null>(null);
   const [storyDetails, setStoryDetails] = createSignal<StoryDetails | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
@@ -477,6 +483,8 @@ export function App() {
   >([]);
   const [alertList, setAlertList] = createSignal<AlertRecord[]>([]);
   const [alertsOpen, setAlertsOpen] = createSignal(false);
+  const [sidePanelOpen, setSidePanelOpen] = createSignal(false);
+  const [ntfyCopied, setNtfyCopied] = createSignal<string | null>(null);
   const [alertDraftPrompt, setAlertDraftPrompt] = createSignal("");
   const [alertDraftMinSources, setAlertDraftMinSources] = createSignal(0);
   const [alertDraftRegion, setAlertDraftRegion] = createSignal("");
@@ -523,7 +531,10 @@ export function App() {
   let briefRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let lastHashHref = "";
   let requestedSelection: string | null = null;
-  let touchStartY = 0;
+  let sheetTouchStartY = 0;
+  let alertsDialog!: HTMLDivElement;
+  let alertsReturnFocus: HTMLElement | null = null;
+  let ntfyCopyTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingInitialStory = initialHash.get("story") ?? initialQuery.get("story");
 
   const paused = createMemo(() => pausedByHover() || scrollTop() > 6);
@@ -1281,11 +1292,17 @@ export function App() {
     };
     const cached = whyCache.get(key);
     if (cached) {
-      if (isSelected()) setLinkWhy(cached);
+      if (isSelected()) {
+        setLinkWhyCached(true);
+        setLinkWhy(cached);
+      }
       return;
     }
     const token = whyRequests.next();
-    if (isSelected()) setLinkWhy({ loading: true, available: false });
+    if (isSelected()) {
+      setLinkWhyCached(false);
+      setLinkWhy({ loading: true, available: false });
+    }
     let next: LinkWhy;
     try {
       const response = await fetch(
@@ -1310,12 +1327,16 @@ export function App() {
     else whyCache.set(key, next, BRIEF_RETRY_MS);
     // A late answer for a closed or replaced popover must not overwrite the
     // current one (the review's "why" race).
-    if (whyRequests.isCurrent(token) && isSelected()) setLinkWhy(next);
+    if (whyRequests.isCurrent(token) && isSelected()) {
+      setLinkWhyCached(false);
+      setLinkWhy(next);
+    }
   };
 
   const openLink = (link: LinkInfo): void => {
     setSelectedLink(link);
     setLinkReported(false);
+    setLinkWhyCached(false);
     void loadLinkWhy(link);
   };
 
@@ -1604,6 +1625,7 @@ export function App() {
       if (freshTimer !== null) clearTimeout(freshTimer);
       if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
       if (hashTimer !== null) clearTimeout(hashTimer);
+      if (ntfyCopyTimer !== null) clearTimeout(ntfyCopyTimer);
     });
   });
 
@@ -1656,6 +1678,7 @@ export function App() {
     setFocus(null);
     setSelectedArticle(null);
     setSelectedLink(null);
+    setSidePanelOpen(false);
   };
 
   const goLive = (): void => {
@@ -1698,6 +1721,102 @@ export function App() {
     });
   };
 
+  const liveLabel = createMemo(() => connectionLabel(connection()));
+
+  /** Links grouped by strength, matching board M2's tiers. */
+  const linkTiers = createMemo(() => groupLinksByStrength(focus()?.hud.links ?? []));
+
+  const ntfyAlerts = createMemo(() =>
+    alertList().filter((alert) => Boolean(alert.ntfy_topic) && alert.channels.includes("ntfy")),
+  );
+
+  const copyNtfyTopic = async (topic: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(topic);
+    } catch {
+      return;
+    }
+    setNtfyCopied(topic);
+    if (ntfyCopyTimer !== null) clearTimeout(ntfyCopyTimer);
+    ntfyCopyTimer = setTimeout(() => setNtfyCopied(null), 1600);
+  };
+
+  // At mid widths the story panel is a drawer, so a new focus opens it.
+  let lastFocusedStory: string | null = null;
+  createEffect(() => {
+    const current = focus();
+    if (!current) {
+      lastFocusedStory = null;
+      return;
+    }
+    if (current.storyId !== lastFocusedStory) {
+      lastFocusedStory = current.storyId;
+      setSidePanelOpen(true);
+    }
+  });
+
+  // A modal dialog owns the page: background controls are inert, not just
+  // visually behind the drawer. Runs before the focus-restore effect below.
+  const clearInert = (): void => {
+    for (const child of document.querySelectorAll<HTMLElement>(".app3 > *")) {
+      child.removeAttribute("inert");
+    }
+  };
+  createEffect(() => {
+    const open = alertsOpen();
+    const children = document.querySelectorAll<HTMLElement>(".app3 > *");
+    for (const child of children) {
+      if (child.classList.contains("alerts-drawer")) continue;
+      if (open) child.setAttribute("inert", "");
+      else child.removeAttribute("inert");
+    }
+  });
+  onCleanup(clearInert);
+
+  // Modal focus: remember the opener, move focus in, restore it on close.
+  createEffect(() => {
+    if (alertsOpen()) {
+      const active = document.activeElement;
+      alertsReturnFocus = active instanceof HTMLElement ? active : null;
+      queueMicrotask(() => alertsDialog?.focus());
+    } else if (alertsReturnFocus) {
+      const target = alertsReturnFocus;
+      alertsReturnFocus = null;
+      if (target.isConnected) target.focus();
+    }
+  });
+
+  const dialogFocusables = (): HTMLElement[] => {
+    if (!alertsDialog) return [];
+    const selector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    return [...alertsDialog.querySelectorAll<HTMLElement>(selector)].filter(
+      (element) => element.getAttribute("aria-hidden") !== "true",
+    );
+  };
+
+  const onAlertsKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setAlertsOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const nodes = dialogFocusables();
+    if (nodes.length === 0) {
+      event.preventDefault();
+      alertsDialog?.focus();
+      return;
+    }
+    const active = document.activeElement as HTMLElement | null;
+    const current = active === null ? -1 : nodes.indexOf(active);
+    const next = nextTabStop(nodes.length, current, event.shiftKey);
+    if (next === null) return;
+    event.preventDefault();
+    nodes[next]!.focus();
+  };
+
   return (
     <div class="app3">
       <header class="topbar">
@@ -1705,8 +1824,11 @@ export function App() {
           <span class="mark" />
           <span class="word">DOR</span>
         </div>
-        <span class={`live ${connection() === "online" ? "" : "muted-live"}`}>
-          {connection() === "online" ? "LIVE" : "LIVE"}
+        <span
+          class={`live ${connection() === "online" ? "" : "muted-live"} ${connection()}`}
+          title={`Gateway ${connection()}`}
+        >
+          {liveLabel()}
         </span>
         <label class={`search ${searchFocused() ? "focused" : ""}`}>
           <span aria-hidden="true">⌕</span>
@@ -1837,14 +1959,9 @@ export function App() {
           </For>
         </div>
         <div class="right">
-          <Show when={connection() !== "online"}>
+          <Show when={connection() !== "online" && reconnectIn() !== null}>
             <span class="reconnect" title={health().detail}>
-              {connection() === "connecting"
-                ? "CONNECTING"
-                : connection() === "reconnecting"
-                  ? "RECONNECTING"
-                  : "OFFLINE"}
-              {reconnectIn() !== null ? ` · ${Math.ceil(reconnectIn()! / 1000)}s` : ""}
+              retry {Math.ceil(reconnectIn()! / 1000)}s
             </span>
           </Show>
           <span class={`health ${healthClass(health())}`} title={health().detail}>
@@ -1874,7 +1991,7 @@ export function App() {
         </div>
       </header>
 
-      <aside class={`wire mobile-tab-${mobileTab()}`}>
+      <aside class={`wire mobile-tab-${mobileTab()}`} aria-label="Live wire">
         <div class="mobile-tabs" role="tablist" aria-label="Mobile sections">
           <For each={["wire", "threads", "near", "alerts"] as const}>
             {(tab) => (
@@ -1922,6 +2039,7 @@ export function App() {
             <button
               class="ibtn filter-btn"
               aria-pressed={filterPanelOpen()}
+              aria-label="Filters"
               title="Filters"
               onClick={() => setFilterPanelOpen((open) => !open)}
             >
@@ -2072,7 +2190,7 @@ export function App() {
                 {focus()!.story.title.length > 34
                   ? `${focus()!.story.title.slice(0, 34)}…`
                   : focus()!.story.title}
-                <button class="x" title="Clear focus" onClick={clearFocus}>
+                <button class="x" title="Clear focus" aria-label="Clear focus" onClick={clearFocus}>
                   ×
                 </button>
               </span>
@@ -2129,6 +2247,7 @@ export function App() {
                     <button
                       class="x"
                       title="Remove prompt"
+                      aria-label={`Remove prompt ${prompt}`}
                       onClick={() => updatePrompts(prompts().filter((item) => item !== prompt))}
                     >
                       ×
@@ -2153,6 +2272,7 @@ export function App() {
           onMouseMove={() => setPausedByHover(true)}
           onMouseLeave={() => setPausedByHover(false)}
           onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+          role="region"
           aria-label="Live article wire"
           data-paused={paused()}
           data-hover={pausedByHover()}
@@ -2328,7 +2448,7 @@ export function App() {
           </Show>
         </div>
         <div class="wfoot">
-          <span class="cap">Hover pauses · ↑ ↓ to select</span>
+          <span class="cap desktop-only">Hover pauses · ↑ ↓ to select</span>
           <span class="cap">{lastSeq() > 0 ? `seq ${lastSeq()}` : "newest first"}</span>
         </div>
         <Show when={mobileTab() !== "wire"}>
@@ -2388,7 +2508,12 @@ export function App() {
       </aside>
 
       <main class="stage">
-        <div ref={mapContainer} class="map-host" aria-label="Live globe" />
+        <div
+          ref={mapContainer}
+          class="map-host"
+          role="img"
+          aria-label="Live globe of located stories"
+        />
         <div class="hud-corners" />
         <div class="zoom-rail glass">
           <For
@@ -2435,7 +2560,7 @@ export function App() {
           <span class="cap">{focus() ? "FOCUSED THREAD" : "AMBIENT · NO SELECTION"}</span>
           <Show when={focus()}>
             <button class="back" onClick={clearFocus}>
-              ← GLOBAL VIEW (Esc)
+              ← GLOBAL VIEW <span class="desktop-only">(Esc)</span>
             </button>
           </Show>
           <span class="big">{focus() ? focus()!.story.title : "Global · live"}</span>
@@ -2449,6 +2574,7 @@ export function App() {
           <button
             class="ibtn"
             aria-pressed={globe().secondDegree}
+            aria-label="Second-degree links"
             title="Second-degree links"
             onClick={() => {
               liveGlobe?.setSecondDegree(!globe().secondDegree);
@@ -2458,8 +2584,19 @@ export function App() {
             ⋯
           </button>
           <button
+            class="ibtn panel-toggle"
+            aria-label="Story panel"
+            aria-expanded={sidePanelOpen()}
+            aria-controls="story-panel"
+            title="Story panel"
+            onClick={() => setSidePanelOpen((open) => !open)}
+          >
+            ▤
+          </button>
+          <button
             class="ibtn"
             aria-pressed={layersOpen()}
+            aria-label="Layers"
             title="Layers"
             onClick={() => setLayersOpen((open) => !open)}
           >
@@ -2632,13 +2769,28 @@ export function App() {
           </Show>
         </div>
         <div class="br">
-          <button class="ibtn" title="Zoom in" onClick={() => liveGlobe?.zoomIn()}>
+          <button
+            class="ibtn"
+            title="Zoom in"
+            aria-label="Zoom in"
+            onClick={() => liveGlobe?.zoomIn()}
+          >
             +
           </button>
-          <button class="ibtn" title="Zoom out" onClick={() => liveGlobe?.zoomOut()}>
+          <button
+            class="ibtn"
+            title="Zoom out"
+            aria-label="Zoom out"
+            onClick={() => liveGlobe?.zoomOut()}
+          >
             −
           </button>
-          <button class="ibtn" title="Reset view" onClick={() => liveGlobe?.resetView()}>
+          <button
+            class="ibtn"
+            title="Reset view"
+            aria-label="Reset view"
+            onClick={() => liveGlobe?.resetView()}
+          >
             ◎
           </button>
         </div>
@@ -2648,6 +2800,7 @@ export function App() {
               <button
                 class="rim"
                 title={`Rotate to ${marker.label}`}
+                aria-label={`Rotate to ${marker.label}`}
                 onClick={() => liveGlobe?.flyTo(marker.center, marker.zoom)}
               >
                 {marker.count > 1 ? `+${marker.count} ` : "◂ "}
@@ -2666,7 +2819,11 @@ export function App() {
                 >
                   {typeName(link().type)} · {directionLabel(link())}
                 </span>
-                <button class="text-btn" onClick={() => setSelectedLink(null)}>
+                <button
+                  class="text-btn"
+                  aria-label="Close link details"
+                  onClick={() => setSelectedLink(null)}
+                >
                   ×
                 </button>
               </div>
@@ -2696,7 +2853,7 @@ export function App() {
                     : "Why unavailable for this link yet."}
               </p>
               <div class="arc-popover-foot">
-                <span class="agentk">WHY · agent · cached</span>
+                <span class="agentk">WHY · agent{linkWhyCached() ? " · cached" : ""}</span>
                 <button class="text-btn" onClick={() => void reportWrongLink(link())}>
                   {linkReported() ? "reported" : "report wrong link"}
                 </button>
@@ -2726,7 +2883,21 @@ export function App() {
         </span>
       </main>
 
-      <aside class="side">
+      <aside
+        id="story-panel"
+        class={`side ${sidePanelOpen() ? "side-open" : ""}`}
+        aria-label="Story panel"
+      >
+        <div class="side-panel-bar">
+          <span class="cap">Story panel</span>
+          <button
+            class="text-btn"
+            aria-label="Hide story panel"
+            onClick={() => setSidePanelOpen(false)}
+          >
+            ×
+          </button>
+        </div>
         <Show
           when={focus()}
           fallback={
@@ -2777,7 +2948,11 @@ export function App() {
                     <span class="approx"> · approx</span>
                   </Show>
                 </span>
-                <button class="text-btn" onClick={clearFocus}>
+                <button
+                  class="text-btn"
+                  aria-label="Clear focus and show global view"
+                  onClick={clearFocus}
+                >
                   Global view ×
                 </button>
               </div>
@@ -2891,24 +3066,7 @@ export function App() {
               </Show>
               <Show when={details().hud.links.length > 0}>
                 <div class="sec side-links">
-                  <For
-                    each={[
-                      {
-                        label: "Strongly linked",
-                        links: details().hud.links.filter((link) => link.strength >= 0.75),
-                      },
-                      {
-                        label: "Related",
-                        links: details().hud.links.filter(
-                          (link) => link.strength >= 0.5 && link.strength < 0.75,
-                        ),
-                      },
-                      {
-                        label: "Loosely linked",
-                        links: details().hud.links.filter((link) => link.strength < 0.5),
-                      },
-                    ].filter((tier) => tier.links.length > 0)}
-                  >
+                  <For each={linkTiers()}>
                     {(tier) => (
                       <>
                         <div class="tierh">
@@ -2966,70 +3124,112 @@ export function App() {
       </aside>
 
       <Show when={focus()}>
-        <div
-          class="mobile-story glass"
-          onTouchStart={(event) => {
-            touchStartY = event.touches[0]?.clientY ?? 0;
-          }}
-          onTouchEnd={(event) => {
-            const endY = event.changedTouches[0]?.clientY ?? touchStartY;
-            if (Math.abs(endY - touchStartY) < 48) return;
-            moveSelection(endY < touchStartY ? 1 : -1);
-          }}
-        >
+        <div class="mobile-story glass" role="region" aria-label="Focused story">
+          {/* Only the handle switches stories; the body below scrolls. */}
+          <div
+            class="mobile-story-grab"
+            aria-hidden="true"
+            onTouchStart={(event) => {
+              sheetTouchStartY = event.touches[0]?.clientY ?? 0;
+            }}
+            onTouchEnd={(event) => {
+              const endY = event.changedTouches[0]?.clientY ?? sheetTouchStartY;
+              const direction = sheetSwipeDirection(sheetTouchStartY, endY);
+              if (direction !== 0) moveSelection(direction);
+            }}
+          />
           <div class="mobile-story-head">
+            <button class="text-btn" aria-label="Back to the wire" onClick={clearFocus}>
+              ← Wire
+            </button>
             <span class="cap">Focused story</span>
-            <button class="text-btn" onClick={clearFocus}>
+            <button
+              class="text-btn mobile-story-close"
+              aria-label="Close story"
+              onClick={clearFocus}
+            >
               ×
             </button>
           </div>
-          <h2>{storyText()?.title || focus()!.story.title}</h2>
-          <div class="facts">
-            <span>
-              <b>{focus()!.hud.story.sources}</b> sources
-            </span>
-            <span>
-              <b>{focus()!.hud.links.length}</b> links
-            </span>
-            <span>{focus()!.hud.story.place}</span>
-          </div>
-          <Show
-            when={storyText()?.available}
-            fallback={<p class="brief muted">Brief not available yet.</p>}
-          >
-            <p class="brief">{storyText()!.brief}</p>
-          </Show>
-          <Show when={focus()!.hud.links.length > 0}>
-            <div class="mobile-links">
-              <For each={focus()!.hud.links.slice(0, 3)}>
-                {(link) => (
-                  <button
-                    class="mobile-link"
-                    onClick={() => {
-                      const info = liveGlobe?.linkInfo(link.index);
-                      if (info) openLink(info);
-                    }}
-                  >
-                    <span>
-                      {typeName(link.type)} · {link.place}
-                    </span>
-                    <b>{link.strength.toFixed(2)}</b>
-                  </button>
-                )}
-              </For>
+          <div class="mobile-story-scroll">
+            <h2>{storyText()?.title || focus()!.story.title}</h2>
+            <div class="facts">
+              <span>
+                <b>{focus()!.hud.story.sources}</b> sources
+              </span>
+              <span>
+                <b>{focus()!.hud.links.length}</b> links
+              </span>
+              <span>{focus()!.hud.story.place}</span>
             </div>
-          </Show>
+            <Show
+              when={storyText()?.available}
+              fallback={<p class="brief muted">Brief not available yet.</p>}
+            >
+              <p class="brief">{storyText()!.brief}</p>
+            </Show>
+            <Show when={focus()!.hud.links.length > 0}>
+              <div class="mobile-links">
+                <For each={linkTiers()}>
+                  {(tier) => (
+                    <>
+                      <div class="tierh">
+                        <span class="cap">{tier.label}</span>
+                        <span class="cap">{tier.links.length}</span>
+                      </div>
+                      <For each={tier.links}>
+                        {(link) => (
+                          <button
+                            class="mobile-link"
+                            onClick={() => {
+                              const info = liveGlobe?.linkInfo(link.index);
+                              if (info) openLink(info);
+                            }}
+                          >
+                            <span class="mobile-link-main">
+                              <span class="mobile-link-k">
+                                {typeName(link.type)}{" "}
+                                {link.direction === 1 ? "←" : link.direction === 0 ? "→" : "↔"}{" "}
+                                {link.place}
+                              </span>
+                              <span class="mobile-link-t">{link.title}</span>
+                            </span>
+                            <b>{link.strength.toFixed(2)}</b>
+                          </button>
+                        )}
+                      </For>
+                    </>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+          <span class="mobile-story-swipe">DRAG HANDLE ↕ · NEXT / PREVIOUS</span>
         </div>
       </Show>
 
       <Show when={alertsOpen()}>
-        <div class="alerts-drawer glass" role="dialog" aria-label="Alerts">
+        <div
+          ref={alertsDialog}
+          class="alerts-drawer glass"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="alerts-title"
+          aria-describedby="alerts-desc"
+          tabindex="-1"
+          onKeyDown={onAlertsKeyDown}
+        >
           <div class="alerts-head">
-            <span class="cap">Alerts</span>
-            <button class="text-btn" onClick={() => setAlertsOpen(false)}>
+            <span class="cap" id="alerts-title">
+              Alerts
+            </span>
+            <button class="text-btn" aria-label="Close alerts" onClick={() => setAlertsOpen(false)}>
               ×
             </button>
           </div>
+          <p class="alerts-desc" id="alerts-desc">
+            Prompt alerts fire when a matching story appears. Create, mute or backtest one here.
+          </p>
           <div class="alert-form">
             <label class="filter-field">
               <span>Prompt</span>
@@ -3088,7 +3288,7 @@ export function App() {
                         setAlertDraftChannels([...new Set(channels)]);
                       }}
                     />
-                    {channel}
+                    {channelLabel(channel)}
                   </label>
                 )}
               </For>
@@ -3133,12 +3333,14 @@ export function App() {
                     <div class="alert-title">
                       <b>{alert.prompt}</b>
                       <span class="cap">
-                        {alert.channels.join(" · ")} · strict {alert.strictness.toFixed(2)}
+                        {alert.channels.map(channelLabel).join(" · ")} · strict{" "}
+                        {alert.strictness.toFixed(2)}
                       </span>
                     </div>
                     <div class="alert-item-actions">
                       <button
                         class={`sw2 ${alert.enabled ? "" : "off"}`}
+                        aria-pressed={alert.enabled}
                         aria-label={`${alert.enabled ? "Disable" : "Enable"} alert`}
                         onClick={() => void toggleAlert(alert)}
                       />
@@ -3167,6 +3369,31 @@ export function App() {
               </For>
             </Show>
           </div>
+          <Show when={ntfyAlerts().length > 0}>
+            <div class="ntfy-block">
+              <span class="cap">Phone alerts · ntfy</span>
+              <p>
+                Install the ntfy app on your phone and subscribe to each topic below (use the same
+                ntfy server Dor is configured with). Enable “phone (ntfy)” on an alert to send it
+                there.
+              </p>
+              <For each={ntfyAlerts()}>
+                {(alert) => (
+                  <div class="ntfy-row">
+                    <code>{alert.ntfy_topic}</code>
+                    <button
+                      class="chip"
+                      aria-label={`Copy ntfy topic ${alert.ntfy_topic}`}
+                      onClick={() => void copyNtfyTopic(alert.ntfy_topic!)}
+                    >
+                      {ntfyCopied() === alert.ntfy_topic ? "Copied" : "Copy"}
+                    </button>
+                    <small>{alert.prompt}</small>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
           <div class="push-row">
             <div>
               <span class="cap">Browser push</span>
@@ -3273,6 +3500,7 @@ export function App() {
                     class={`ev ${event.showLabel ? "" : "dotonly"}`}
                     style={`left:${event.left}%;--c:${event.color}`}
                     title={event.title}
+                    aria-label={event.title}
                   >
                     {event.showLabel ? event.label : ""}
                   </button>

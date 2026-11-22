@@ -332,7 +332,15 @@ func runCommand(args []string) error {
 		}()
 	}
 
-	enrichmentDeps, budgetMgr, budgetCfg := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, dbWriter)
+	// dbWriter is a *store.Writer: assigning it directly to an interface when
+	// it is nil would produce a non-nil interface holding a nil pointer, and
+	// the first completed story would panic on EnqueueStory. Keep the sink nil
+	// unless durable writes are actually available.
+	var storySink agents.StorySink
+	if dbWriter != nil {
+		storySink = dbWriter
+	}
+	enrichmentDeps, budgetMgr, budgetCfg := buildEnrichmentDeps(ctx, cfg, b, logger, articleSink, storySink)
 	if dbStore != nil {
 		enrichmentDeps.StoryIndex = dbStore
 	}

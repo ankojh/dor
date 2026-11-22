@@ -83,6 +83,10 @@ type Deps struct {
 	// StoryIndex is the optional pgvector ANN candidate source. Nil uses the
 	// loaded in-memory 48 h story map.
 	StoryIndex StoryIndex
+	// ClusterNow and ClusterHeatHalfLife tune heat cooling. Zero values keep
+	// production defaults; tests use them to observe cooling without waiting.
+	ClusterNow          func() time.Time
+	ClusterHeatHalfLife time.Duration
 
 	// LinkSink is the durable link mirror; nil keeps links in KV only.
 	LinkSink LinkSink

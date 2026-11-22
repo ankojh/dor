@@ -129,8 +129,10 @@ ON CONFLICT (id, created_at) DO UPDATE SET
     published_at = EXCLUDED.published_at,
     lang = EXCLUDED.lang,
     dateline = EXCLUDED.dateline,
-    category = EXCLUDED.category,
-    cat_conf = EXCLUDED.cat_conf,
+    -- A later assignment-only upsert (or a re-delivered clean article) must
+    -- not reset enrichment that another stage already wrote.
+    category = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.category ELSE articles.category END,
+    cat_conf = CASE WHEN EXCLUDED.category <> 0 THEN EXCLUDED.cat_conf ELSE articles.cat_conf END,
     story_id = COALESCE(EXCLUDED.story_id, articles.story_id)`
 	const locationSQL = `
 INSERT INTO article_locations (article_id, place_id, name, lat, lon, precision, role, conf)
@@ -197,16 +199,23 @@ ON CONFLICT (id) DO UPDATE SET
 
 // UpsertStories writes story metadata and replaces its location votes in one
 // transaction. It also stamps story_id on every article in ArticleIDs.
-func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) error {
+//
+// The article rows and the story may be flushed in either order: a story that
+// arrives before its article rows returns article id → story id for those
+// missing rows, so the caller can retry the assignment after the article
+// insert. The story row and its locations are committed either way; a missing
+// assignment is not an error.
+func (s *Store) UpsertStories(ctx context.Context, records []StoryRecord) (map[string]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 	now := time.Now().UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: begin stories batch: %w", err)
+		return nil, fmt.Errorf("store: begin stories batch: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	missing := make(map[string]string)
 	const storySQL = `
 INSERT INTO stories (id, title, brief, category, primary_loc, source_count, heat,
                      centroid, entities, first_seen, updated_at, expires_at)
@@ -253,10 +262,10 @@ ON CONFLICT (id) DO UPDATE SET
 			r.ID, r.Title, r.Brief, r.Category, r.PrimaryLoc, r.SourceCount, r.Heat,
 			formatVector(r.Centroid), entities, r.FirstSeen, r.UpdatedAt, r.ExpiresAt,
 		); err != nil {
-			return fmt.Errorf("store: upsert story %s: %w", r.ID, err)
+			return nil, fmt.Errorf("store: upsert story %s: %w", r.ID, err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM story_locations WHERE story_id = $1`, r.ID); err != nil {
-			return fmt.Errorf("store: clear story locations %s: %w", r.ID, err)
+			return nil, fmt.Errorf("store: clear story locations %s: %w", r.ID, err)
 		}
 		for _, loc := range r.Locations {
 			if _, err := tx.Exec(ctx, `
@@ -264,22 +273,59 @@ INSERT INTO story_locations (story_id, place_id, name, lat, lon, precision, role
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 				r.ID, loc.PlaceID, loc.Name, loc.Lat, loc.Lon, loc.Precision, loc.Role, loc.Weight,
 			); err != nil {
-				return fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
+				return nil, fmt.Errorf("store: story location %s/%s: %w", r.ID, loc.PlaceID, err)
 			}
 		}
 		if len(r.ArticleIDs) > 0 {
-			if _, err := tx.Exec(ctx, `
+			assigned := make(map[string]bool, len(r.ArticleIDs))
+			rows, err := tx.Query(ctx, `
 UPDATE articles SET story_id = $2,
     category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
-WHERE id = ANY($1)`, r.ArticleIDs, r.ID, r.Category); err != nil {
-				return fmt.Errorf("store: assign story %s: %w", r.ID, err)
+WHERE id = ANY($1)
+RETURNING id`, r.ArticleIDs, r.ID, r.Category)
+			if err != nil {
+				return nil, fmt.Errorf("store: assign story %s: %w", r.ID, err)
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("store: assign story %s scan: %w", r.ID, err)
+				}
+				assigned[id] = true
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("store: assign story %s: %w", r.ID, err)
+			}
+			rows.Close()
+			for _, id := range r.ArticleIDs {
+				if !assigned[id] {
+					missing[id] = r.ID
+				}
 			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: commit stories batch: %w", err)
+		return nil, fmt.Errorf("store: commit stories batch: %w", err)
 	}
-	return nil
+	return missing, nil
+}
+
+// AssignStory retries a story assignment that raced ahead of the article row.
+// It is idempotent and returns whether an article row existed.
+func (s *Store) AssignStory(ctx context.Context, articleID, storyID string, category int16) (bool, error) {
+	if articleID == "" || storyID == "" {
+		return false, nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE articles SET story_id = $2,
+    category = CASE WHEN $3::smallint <> 0 THEN $3::smallint ELSE category END
+WHERE id = $1`, articleID, storyID, category)
+	if err != nil {
+		return false, fmt.Errorf("store: assign article %s: %w", articleID, err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func formatVector(v []float32) string {
@@ -301,6 +347,10 @@ func formatVector(v []float32) string {
 // FindStoryCandidates is the pgvector ANN shortlist used by the clusterer.
 // It returns live story ids ordered by cosine distance; the caller still
 // applies time/place/entity guards. An empty vector returns no rows.
+//
+// The query is bounded even when the caller forgets a deadline: the clusterer
+// is the single story writer and must not stall behind Postgres. Callers that
+// need a tighter bound supply their own context deadline.
 func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit int) ([]string, error) {
 	if len(vector) == 0 {
 		return nil, nil
@@ -308,6 +358,8 @@ func (s *Store) FindStoryCandidates(ctx context.Context, vector []float32, limit
 	if limit <= 0 || limit > 64 {
 		limit = 32
 	}
+	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
 	rows, err := s.pool.Query(ctx, `
 SELECT id
 FROM stories

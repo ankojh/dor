@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,14 @@ const (
 	// publisherWireHistory is the bounded cold-start wire history placed in
 	// every snapshot. It is not a replay of old deltas; rows carry no seq.
 	publisherWireHistory = 500
+
+	// Heat cooling and link eviction run from the expiry loop. Quiet stories
+	// cool visibly; a story that reaches its 48 h content TTL drops its links
+	// from the snapshot in the same tick.
+	publisherHeatHalfLife = 6 * time.Hour
+	publisherHeatGrace    = 2 * time.Minute
+	publisherHeatFloor    = 0.05
+	publisherCoolMinDrop  = 0.01
 )
 
 // NewPublisher builds the publisher. Its three consumers bind ENRICH, STORY and ALERT separately; a JetStream
@@ -360,6 +369,13 @@ type publisherCore struct {
 	committedRevisions map[string]uint64
 	scores             map[string]*dorv1.MatchScore
 	placed             map[string]bool
+	// cooledAt is the process-local time Heat was last emitted for a story.
+	// Cooling accumulates against this, not against UpdatedAt, so repeated
+	// ticks do not re-apply the same decay.
+	cooledAt map[string]int64
+	// coolDue bounds the cooling scan rate without taking c.mu. Tests and
+	// callers may invoke coolStories often; the scan itself is periodic.
+	coolDue atomic.Int64
 }
 
 func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
@@ -378,6 +394,7 @@ func newPublisherCore(b *bus.Bus, log *slog.Logger) *publisherCore {
 		committedRevisions: make(map[string]uint64),
 		scores:             make(map[string]*dorv1.MatchScore),
 		placed:             make(map[string]bool),
+		cooledAt:           make(map[string]int64),
 		capacity:           make(chan struct{}),
 	}
 }
@@ -478,25 +495,155 @@ func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) 
 			return
 		case <-ticker.C:
 			c.expireStories(c.now())
+			c.coolStories(c.now())
 		}
 	}
 }
 
+// expireStories drops a story at its 48 h content TTL and cascades every link
+// that touches it. Both the story and its links leave the next snapshot, and
+// connected clients receive an explicit removal delta.
 func (c *publisherCore) expireStories(now time.Time) {
 	c.mu.Lock()
+	// A story may have a newer acknowledged update waiting for (or inside)
+	// the publication batch. Expiry must use the effective content: pending
+	// wins over in-flight wins over committed. Anything else would expire a
+	// story whose fresh input is then acknowledged against an expiry delta.
+	effective := func(id string) int64 {
+		if d := c.pending["story:"+id]; d != nil {
+			if s := d.GetStoryUpsert(); s != nil {
+				return s.UpdatedAt
+			}
+		}
+		if c.inflight != nil {
+			for _, d := range c.inflight.deltas {
+				if s := d.GetStoryUpsert(); s != nil && s.Id == id {
+					return s.UpdatedAt
+				}
+			}
+		}
+		if s := c.stories[id]; s != nil {
+			return s.UpdatedAt
+		}
+		return 0
+	}
 	ids := make([]string, 0)
 	for id, s := range c.stories {
-		if s == nil || s.UpdatedAt <= 0 {
+		if s == nil {
 			continue
 		}
-		if now.Sub(time.Unix(s.UpdatedAt, 0)) >= publisherStoryTTL {
+		updated := effective(id)
+		if updated <= 0 {
+			continue
+		}
+		if now.Sub(time.Unix(updated, 0)) >= publisherStoryTTL {
 			ids = append(ids, id)
 		}
 	}
-	c.mu.Unlock()
-	for _, id := range ids {
-		c.enqueue("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+	if len(ids) == 0 {
+		c.mu.Unlock()
+		return
 	}
+	expired := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		expired[id] = true
+	}
+	type pair struct{ a, b string }
+	var links []pair
+	for key, link := range c.links {
+		if link == nil {
+			continue
+		}
+		if expired[link.A] || expired[link.B] {
+			links = append(links, pair{a: link.A, b: link.B})
+			delete(c.links, key)
+		}
+	}
+	for _, id := range ids {
+		c.enqueueLocked("story:"+id, &dorv1.Delta{Body: &dorv1.Delta_StoryExpire{StoryExpire: id}})
+		delete(c.cooledAt, id)
+	}
+	for _, l := range links {
+		a, b := l.a, l.b
+		if a > b {
+			a, b = b, a
+		}
+		c.enqueueLocked("link:"+a+"|"+b, &dorv1.Delta{Body: &dorv1.Delta_LinkRemove{
+			LinkRemove: &dorv1.LinkKey{A: a, B: b},
+		}})
+	}
+	c.mu.Unlock()
+}
+
+// coolStories decays quiet story heat. UpdatedAt is not touched: expiry stays
+// anchored to the last content change. A story with a story upsert already
+// pending is skipped so a fresh update always wins.
+func (c *publisherCore) coolStories(now time.Time) {
+	nowNano := now.UnixNano()
+	if due := c.coolDue.Load(); due > nowNano {
+		return
+	}
+	c.coolDue.Store(nowNano + int64(time.Second))
+	c.mu.Lock()
+	if !c.restored || len(c.stories) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	inflight := make(map[string]bool)
+	if c.inflight != nil {
+		for _, d := range c.inflight.deltas {
+			if s := d.GetStoryUpsert(); s != nil {
+				inflight[s.Id] = true
+			}
+		}
+	}
+	type cooling struct {
+		id  string
+		hot *dorv1.Story
+	}
+	batch := make([]cooling, 0, 32)
+	for id, story := range c.stories {
+		if story == nil || story.Heat <= publisherHeatFloor || story.UpdatedAt <= 0 {
+			continue
+		}
+		if _, pending := c.pending["story:"+id]; pending || inflight[id] {
+			continue
+		}
+		if now.Sub(time.Unix(story.UpdatedAt, 0)) < publisherHeatGrace {
+			continue
+		}
+		last := c.cooledAt[id]
+		if last == 0 {
+			c.cooledAt[id] = now.UnixNano()
+			continue
+		}
+		dt := now.Sub(time.Unix(0, last))
+		if dt <= 0 {
+			continue
+		}
+		factor := math.Exp(-dt.Hours() * math.Ln2 / publisherHeatHalfLife.Hours())
+		heat := float32(float64(story.Heat) * factor)
+		if float64(story.Heat)-float64(heat) < publisherCoolMinDrop {
+			continue
+		}
+		if heat < publisherHeatFloor {
+			heat = 0
+		}
+		clone := proto.Clone(story).(*dorv1.Story)
+		clone.Heat = heat
+		batch = append(batch, cooling{id: id, hot: clone})
+		if len(batch) >= 200 {
+			break
+		}
+	}
+	for _, item := range batch {
+		c.cooledAt[item.id] = now.UnixNano()
+		// Enqueue under the same lock that sealed the snapshot: a concurrent
+		// content update either lands before this check (and is skipped) or
+		// after (and replaces the cooling delta), never backwards.
+		c.enqueueLocked("story:"+item.id, &dorv1.Delta{Body: &dorv1.Delta_StoryUpsert{StoryUpsert: item.hot}})
+	}
+	c.mu.Unlock()
 }
 
 func (c *publisherCore) onStory(s *dorv1.Story) {
@@ -574,16 +721,25 @@ func (c *publisherCore) onLink(l *dorv1.Link) {
 		}})
 		return
 	}
-	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: l}})
+	// Normalise the pair order before the committed state stores it, so a
+	// later removal (always sorted) deletes the same key.
+	normalised := proto.Clone(l).(*dorv1.Link)
+	normalised.A, normalised.B = a, b
+	c.enqueue(key, &dorv1.Delta{Body: &dorv1.Delta_LinkUpsert{LinkUpsert: normalised}})
 }
 
 func (c *publisherCore) enqueue(key string, delta *dorv1.Delta) {
 	c.mu.Lock()
+	c.enqueueLocked(key, delta)
+	c.mu.Unlock()
+}
+
+// enqueueLocked is enqueue for callers that already hold c.mu.
+func (c *publisherCore) enqueueLocked(key string, delta *dorv1.Delta) {
 	if _, ok := c.pending[key]; !ok {
 		c.order = append(c.order, key)
 	}
 	c.pending[key] = delta
-	c.mu.Unlock()
 }
 
 func publisherLinkKey(a, b string) string {

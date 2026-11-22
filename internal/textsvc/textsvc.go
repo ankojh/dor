@@ -184,10 +184,16 @@ func (s *Service) Link(ctx context.Context, a, b string) (live.LinkText, bool) {
 	if !ok || (link.Strength <= 0 && link.Confidence <= 0) {
 		return live.LinkText{}, false
 	}
+	revision := live.LinkRevision(link)
 	if t, ok := live.LoadLinkText(ctx, kv, a, b); ok {
-		return t, true
+		if t.Revision == revision {
+			return t, true
+		}
+		// The relation changed (or was re-created) since this explanation was
+		// written; do not serve text about the old link.
+		return live.LinkText{Kind: "link", A: a, B: b, Available: false, Revision: revision}, true
 	}
-	return live.LinkText{Kind: "link", A: a, B: b, Available: false}, true
+	return live.LinkText{Kind: "link", A: a, B: b, Available: false, Revision: revision}, true
 }
 
 // GenerateLink returns a cached "why" or writes one. The cache is kept for the
@@ -199,15 +205,20 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 	if !ok || (link.Strength <= 0 && link.Confidence <= 0) {
 		return live.LinkText{}, false
 	}
+	revision := live.LinkRevision(link)
 	if cached, ok := live.LoadLinkText(ctx, kv, a, b); ok {
-		if cached.Available {
+		if cached.Available && cached.Revision == revision {
 			return cached, true
 		}
-		if generated, err := time.Parse(time.RFC3339, cached.GeneratedAt); err == nil && s.now().Sub(generated) < time.Minute {
-			return cached, true
+		if !cached.Available && cached.Revision == revision {
+			if generated, err := time.Parse(time.RFC3339, cached.GeneratedAt); err == nil && s.now().Sub(generated) < time.Minute {
+				return cached, true
+			}
 		}
+		// A successful explanation for an older relation is stale and must be
+		// regenerated.
 	}
-	fallback := live.LinkText{Kind: "link", A: a, B: b, Available: false, GeneratedAt: s.nowString()}
+	fallback := live.LinkText{Kind: "link", A: a, B: b, Available: false, GeneratedAt: s.nowString(), Revision: revision}
 	if s.llm == nil {
 		s.putLinkText(ctx, kv, fallback)
 		return fallback, true
@@ -240,6 +251,7 @@ func (s *Service) GenerateLink(ctx context.Context, a, b string) (live.LinkText,
 		Available:   strings.TrimSpace(exp.Why) != "",
 		GeneratedAt: s.nowString(),
 		Model:       res.Model,
+		Revision:    revision,
 	}
 	s.putLinkText(ctx, kv, out)
 	return out, true

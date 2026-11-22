@@ -167,12 +167,20 @@ func (s *State) Apply(r *Record, raw uint64) error {
 			if b.LinkUpsert == nil {
 				return errors.New("publication: nil link")
 			}
-			s.Links[b.LinkUpsert.A+"|"+b.LinkUpsert.B] = b.LinkUpsert
+			a, bb := b.LinkUpsert.A, b.LinkUpsert.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			s.Links[a+"|"+bb] = b.LinkUpsert
 		case *dorv1.Delta_LinkRemove:
 			if b.LinkRemove == nil {
 				return errors.New("publication: nil link key")
 			}
-			delete(s.Links, b.LinkRemove.A+"|"+b.LinkRemove.B)
+			a, bb := b.LinkRemove.A, b.LinkRemove.B
+			if a > bb {
+				a, bb = bb, a
+			}
+			delete(s.Links, a+"|"+bb)
 		case *dorv1.Delta_Wire:
 			if b.Wire == nil {
 				return errors.New("publication: nil wire")

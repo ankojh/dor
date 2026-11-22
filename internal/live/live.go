@@ -7,6 +7,8 @@ package live
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -106,7 +108,9 @@ type StoryText struct {
 	Model       string `json:"model,omitempty"`
 }
 
-// LinkText is the cached "why" sentence.
+// LinkText is the cached "why" sentence. Revision is the relation revision
+// (see LinkRevision) the text was generated for; a mismatch means the cached
+// explanation describes an older relation.
 type LinkText struct {
 	Kind        string `json:"kind"`
 	A           string `json:"a"`
@@ -115,6 +119,7 @@ type LinkText struct {
 	Available   bool   `json:"available"`
 	GeneratedAt string `json:"generated_at"`
 	Model       string `json:"model,omitempty"`
+	Revision    uint64 `json:"revision,omitempty"`
 }
 
 func get(ctx context.Context, k kv, key string) ([]byte, bool) {
@@ -193,6 +198,22 @@ func LoadLink(ctx context.Context, k kv, a, b string) (*dorv1.Link, bool) {
 		return nil, false
 	}
 	return &l, true
+}
+
+// LinkRevision is the stable content revision of a relation. It changes when
+// the pair, type, direction, confidence, strength, verification or update time
+// changes, so a cached explanation generated for an older relation can be
+// recognised and discarded. It is deterministic across processes and restarts.
+func LinkRevision(l *dorv1.Link) uint64 {
+	if l == nil {
+		return 0
+	}
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(l)
+	if err != nil {
+		return 0
+	}
+	sum := sha256.Sum256(data)
+	return binary.BigEndian.Uint64(sum[:8])
 }
 
 // PutLink writes a link. A zero-strength link is a tombstone for removal.

@@ -724,8 +724,11 @@ export function App() {
           },
         ];
     const firstSeen = stories.map((story) => story.firstSeen).filter((at) => at > 0);
-    const start = firstSeen.length ? Math.min(...firstSeen) : nowSeconds - 3600;
-    const end = Math.max(nowSeconds, ...stories.map((story) => story.updatedAt));
+    const start = Math.min(
+      nowSeconds,
+      firstSeen.length ? Math.min(...firstSeen) : nowSeconds - 3600,
+    );
+    const end = nowSeconds;
     const span = Math.max(60, end - start);
     const events = stories
       .map((story, index) => {

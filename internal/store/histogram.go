@@ -51,8 +51,9 @@ SELECT LEAST($3::int - 1,
                floor(extract(epoch FROM (published_at - $1::timestamptz)) / $4::float8)::int
              )) AS bin,
        count(*)
-FROM articles
-WHERE published_at >= $1::timestamptz
+FROM articles a
+WHERE NOT EXISTS (SELECT 1 FROM wire_time_suppression s WHERE s.article_id = a.id)
+  AND published_at >= $1::timestamptz
   AND published_at < $2::timestamptz
 GROUP BY bin
 ORDER BY bin`,

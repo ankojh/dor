@@ -531,15 +531,14 @@ func (c *publisherCore) storyForWireLocked(id string) *dorv1.Story {
 	if id == "" {
 		return nil
 	}
-	if story := c.stories[id]; story != nil {
-		return story
-	}
+	// Pending is newer than the committed map: it is enqueued after the last
+	// flush and replaces any older committed copy at the next one.
 	if delta := c.pending["story:"+id]; delta != nil {
 		if story := delta.GetStoryUpsert(); story != nil {
 			return story
 		}
 	}
-	return nil
+	return c.stories[id]
 }
 
 func (c *publisherCore) expireLoop(ctx context.Context, interval time.Duration) {

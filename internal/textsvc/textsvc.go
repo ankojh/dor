@@ -124,7 +124,14 @@ func (s *Service) GenerateStory(ctx context.Context, id string) (live.StoryText,
 			// A successful brief is kept until the story changes; a fallback
 			// is retried after 5 minutes or when the story updates.
 			if cached.Available && !generated.Before(updated) {
-				return withProvenance(cached), true
+				cached = withProvenance(cached)
+				// A cached generated title may predate the storytitle marker
+				// (marker eviction or a restart); restore it without touching
+				// story.<id>.
+				if cached.Provenance == live.BriefGenerated && cached.Title != "" {
+					s.applyEditorTitle(ctx, kv, story, cached.Title)
+				}
+				return cached, true
 			}
 			if !cached.Available && s.now().Sub(generated) < 5*time.Minute && !generated.Before(updated) {
 				return withProvenance(cached), true

@@ -274,7 +274,13 @@ func withinRadius(lat, lon, rowLat, rowLon, radiusKm float64) bool {
 // filterDeltaBatch returns a copy with wire rows that do not match removed,
 // prompt scores projected to the client's prompts, and alert deltas kept only
 // when the client's session owns the alert. Non-wire/non-alert deltas always
-// pass; a batch with nothing left returns nil.
+// pass.
+//
+// A filtered delta is replaced by a seq-only no-op rather than dropped. The
+// gateway's sequence is global, so dropping a private alert or a non-matching
+// wire row would leave a hole that a client cannot distinguish from lost
+// transport frames. The no-op advances the client's contiguous seq without
+// exposing the filtered body, keeping privacy and gap detection intact.
 func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string]*dorv1.Story, sessionID string, alertOwner func(string) string) *dorv1.DeltaBatch {
 	if batch == nil || len(batch.Deltas) == 0 {
 		return nil
@@ -287,12 +293,13 @@ func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string
 		if hit := delta.GetAlert(); hit != nil {
 			// Fail closed: an unknown owner, an unowned legacy alert, or a
 			// missing resolver delivers the hit to nobody.
-			if sessionID == "" || alertOwner == nil {
-				continue
+			if sessionID != "" && alertOwner != nil {
+				if owner := alertOwner(hit.AlertId); owner != "" && owner == sessionID {
+					out = append(out, delta)
+					continue
+				}
 			}
-			if owner := alertOwner(hit.AlertId); owner != "" && owner == sessionID {
-				out = append(out, delta)
-			}
+			out = append(out, &dorv1.Delta{Seq: delta.Seq})
 			continue
 		}
 		wire := delta.GetWire()
@@ -302,15 +309,13 @@ func filterDeltaBatch(batch *dorv1.DeltaBatch, f filterState, stories map[string
 		}
 		filtered, ok := filterWire(wire, f, stories)
 		if !ok {
+			out = append(out, &dorv1.Delta{Seq: delta.Seq})
 			continue
 		}
 		out = append(out, &dorv1.Delta{
 			Seq:  delta.Seq,
 			Body: &dorv1.Delta_Wire{Wire: filtered},
 		})
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return &dorv1.DeltaBatch{Deltas: out}
 }

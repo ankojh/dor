@@ -6,6 +6,7 @@ import { createFocusHandler } from "./globe/focus-events";
 import { shouldIgnoreGlobeKeys, isTypingTarget } from "./keyboard";
 import { nextSelectionIndex, selectionKeyForStory, keepSelectionForStory } from "./globe/selection";
 import { TtlLruCache, LatestRequest } from "./text-cache";
+import { BriefLoader, type BriefProvenance, type StoryText } from "./brief";
 import { LruCache } from "./worker/lru";
 import type { LiveStory, StorySummary } from "./globe/live-data";
 import { categoryColor, categoryLabel } from "./globe/encoding";
@@ -253,17 +254,6 @@ function typeName(type: number): string {
   return type === 0 ? "Causal" : type === 1 ? "Reaction" : "Thematic";
 }
 
-type BriefProvenance = "generated" | "source_snippet" | "none";
-
-type StoryText = {
-  loading: boolean;
-  available: boolean;
-  title?: string;
-  brief?: string;
-  provenance?: BriefProvenance;
-  error?: string;
-};
-
 type LinkWhy = {
   loading: boolean;
   available: boolean;
@@ -380,6 +370,28 @@ function ensureSession(): Promise<void> {
       });
   }
   return sessionBootstrap;
+}
+
+/** Fetch one lazy brief; the caller owns caching and focus checks. */
+async function fetchStoryBrief(storyId: string): Promise<StoryText> {
+  const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
+    credentials: "include",
+  });
+  const payload = (await response.json()) as {
+    available?: boolean;
+    title?: string;
+    brief?: string;
+    provenance?: BriefProvenance;
+    error?: string;
+  };
+  return {
+    loading: false,
+    available: Boolean(payload.available) && Boolean(payload.brief),
+    ...(payload.title ? { title: payload.title } : {}),
+    ...(payload.brief ? { brief: payload.brief } : {}),
+    provenance: payload.provenance ?? "none",
+    ...(payload.error ? { error: payload.error } : {}),
+  };
 }
 
 export function App() {
@@ -523,17 +535,20 @@ export function App() {
   const pendingWire: WireItem[] = [];
   const alertInbox = new AlertInbox();
   const seen = new Set<string>();
-  const briefCache = new TtlLruCache<string, StoryText>();
+  const briefs = new BriefLoader(
+    fetchStoryBrief,
+    () => focus()?.storyId ?? null,
+    (_storyId, text) => setStoryText(text),
+    BRIEF_RETRY_MS,
+  );
   const detailsCache = new TtlLruCache<string, StoryDetails>();
   const whyCache = new TtlLruCache<string, LinkWhy>();
   const prefetched = new LruCache<string, true>();
-  const briefRequests = new LatestRequest();
   const whyRequests = new LatestRequest();
   const initialHash = new URLSearchParams(location.hash.slice(1));
   const initialQuery = new URLSearchParams(location.search);
   let hashTimer: ReturnType<typeof setTimeout> | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-  let briefRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let lastHashHref = "";
   let requestedSelection: string | null = null;
   let sheetTouchStartY = 0;
@@ -994,64 +1009,7 @@ export function App() {
   };
 
   const detailsMiss = new TtlLruCache<string, true>();
-  const briefInflight = new Set<string>();
   const detailsInflight = new Set<string>();
-
-  const scheduleBriefRetry = (storyId: string): void => {
-    if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
-    briefRetryTimer = setTimeout(() => {
-      briefRetryTimer = null;
-      if (focus()?.storyId === storyId) void loadStoryText(storyId);
-    }, BRIEF_RETRY_MS);
-  };
-
-  const loadStoryText = async (storyId: string): Promise<void> => {
-    const cached = briefCache.get(storyId);
-    if (cached) {
-      if (focus()?.storyId === storyId) setStoryText(cached);
-      // A missing brief is cached briefly so a later Editor result is picked
-      // up by a retry instead of being remembered as permanently unavailable.
-      if (!cached.available) scheduleBriefRetry(storyId);
-      return;
-    }
-    if (briefInflight.has(storyId)) return;
-    briefInflight.add(storyId);
-    const token = briefRequests.next();
-    if (focus()?.storyId === storyId) setStoryText({ loading: true, available: false });
-    let next: StoryText;
-    try {
-      const response = await fetch(`${API_BASE}/api/text?story_id=${encodeURIComponent(storyId)}`, {
-        credentials: "include",
-      });
-      const payload = (await response.json()) as {
-        available?: boolean;
-        title?: string;
-        brief?: string;
-        provenance?: BriefProvenance;
-        error?: string;
-      };
-      next = {
-        loading: false,
-        available: Boolean(payload.available) && Boolean(payload.brief),
-        ...(payload.title ? { title: payload.title } : {}),
-        ...(payload.brief ? { brief: payload.brief } : {}),
-        provenance: payload.provenance ?? "none",
-        ...(payload.error ? { error: payload.error } : {}),
-      };
-    } catch (error) {
-      next = {
-        loading: false,
-        available: false,
-        error: String(error),
-      };
-    } finally {
-      briefInflight.delete(storyId);
-    }
-    if (next.available) briefCache.set(storyId, next);
-    else briefCache.set(storyId, next, BRIEF_RETRY_MS);
-    if (briefRequests.isCurrent(token) && focus()?.storyId === storyId) setStoryText(next);
-    if (!next.available) scheduleBriefRetry(storyId);
-  };
 
   const loadStoryDetails = async (storyId: string): Promise<void> => {
     const cached = detailsCache.get(storyId);
@@ -1432,7 +1390,7 @@ export function App() {
             seen: seen.size,
             visible: wireRows().length,
             pending: pendingWire.length,
-            brief: briefCache.size,
+            brief: briefs.size,
             details: detailsCache.size,
             why: whyCache.size,
             prefetched: prefetched.size,
@@ -1487,9 +1445,9 @@ export function App() {
               selectionKeyForStory(rows, details.storyId, requestedSelection);
             requestedSelection = null;
             setSelectedArticle(nextSelection);
-            setStoryText(briefCache.get(details.storyId) ?? { loading: true, available: false });
+            briefs.showCached(details.storyId);
             setStoryDetails(detailsCache.get(details.storyId) ?? null);
-            void loadStoryText(details.storyId);
+            void briefs.load(details.storyId);
             void loadStoryDetails(details.storyId);
             worker?.postMessage({ type: "focus", storyId: details.storyId });
             syncHash(details.storyId);
@@ -1640,7 +1598,7 @@ export function App() {
       if (histogramTimer !== null) clearInterval(histogramTimer);
       if (flushTimer !== null) clearTimeout(flushTimer);
       if (freshTimer !== null) clearTimeout(freshTimer);
-      if (briefRetryTimer !== null) clearTimeout(briefRetryTimer);
+      briefs.dispose();
       if (hashTimer !== null) clearTimeout(hashTimer);
       if (ntfyCopyTimer !== null) clearTimeout(ntfyCopyTimer);
     });

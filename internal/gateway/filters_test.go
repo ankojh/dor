@@ -1,7 +1,10 @@
 package gateway
 
 import (
+	"bytes"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ankojh/dor/internal/pb/dorv1"
 )
@@ -130,6 +133,9 @@ func TestFilterWireProjectsPromptsAndCopies(t *testing.T) {
 	}
 }
 
+// A filtered delta is replaced by a seq-only no-op, never dropped: the global
+// sequence must stay contiguous for every client. These tests pin the exact
+// body/no-op split and that no private text survives in the encoded bytes.
 func TestFilterDeltaBatchKeepsMatchingWireAndOwnedAlert(t *testing.T) {
 	stories := map[string]*dorv1.Story{
 		"story-1": {Id: "story-1", SourceCount: 3},
@@ -151,23 +157,43 @@ func TestFilterDeltaBatchKeepsMatchingWireAndOwnedAlert(t *testing.T) {
 	if out == nil {
 		t.Fatal("batch with matching rows filtered to nil")
 	}
-	if len(out.Deltas) != 3 {
-		t.Fatalf("kept %d deltas, want 3 (matching wire, story upsert, owned alert)", len(out.Deltas))
+	if len(out.Deltas) != 5 {
+		t.Fatalf("kept %d deltas, want one slot per input delta", len(out.Deltas))
 	}
-	if out.Deltas[0].GetWire() == nil || out.Deltas[0].GetWire().ArticleId != "article-1" {
-		t.Fatalf("first delta = %+v, want the matching wire", out.Deltas[0])
+	for i, want := range []uint64{1, 2, 3, 4, 5} {
+		if out.Deltas[i].Seq != want {
+			t.Fatalf("delta %d seq = %d, want %d (sequences must stay in order)", i, out.Deltas[i].Seq, want)
+		}
 	}
-	if out.Deltas[1].GetStoryUpsert() == nil {
-		t.Fatalf("non-wire delta was dropped: %+v", out.Deltas[1])
+
+	wire := out.Deltas[0].GetWire()
+	if wire == nil || wire.ArticleId != "article-1" {
+		t.Fatalf("first delta = %+v, want the matching wire body", out.Deltas[0])
 	}
-	if out.Deltas[2].GetAlert() == nil || out.Deltas[2].GetAlert().AlertId != "mine" {
-		t.Fatalf("alert delta = %+v, want only the owned alert", out.Deltas[2])
+	if len(wire.PromptScores) != 1 {
+		t.Fatalf("kept wire was not prompt-projected: %+v", wire)
 	}
-	if len(out.Deltas[0].GetWire().PromptScores) != 1 {
-		t.Fatalf("kept wire was not prompt-projected: %+v", out.Deltas[0].GetWire())
+
+	// The non-matching wire keeps its seq but none of its body.
+	if out.Deltas[1].Body != nil || out.Deltas[1].GetWire() != nil {
+		t.Fatalf("non-matching wire leaked its body: %+v", out.Deltas[1])
 	}
+	if out.Deltas[2].GetStoryUpsert() == nil {
+		t.Fatalf("non-wire delta was not passed through: %+v", out.Deltas[2])
+	}
+	if hit := out.Deltas[3].GetAlert(); hit == nil || hit.AlertId != "mine" {
+		t.Fatalf("alert delta = %+v, want only the owned alert body", out.Deltas[3])
+	}
+	// Another session's alert keeps its seq as a no-op.
+	if out.Deltas[4].Body != nil || out.Deltas[4].GetAlert() != nil {
+		t.Fatalf("non-owned alert leaked its body: %+v", out.Deltas[4])
+	}
+
 	if len(batch.Deltas) != 5 {
 		t.Fatalf("filterDeltaBatch mutated the input batch: %d deltas", len(batch.Deltas))
+	}
+	if batch.Deltas[1].GetWire() == nil || batch.Deltas[4].GetAlert() == nil {
+		t.Fatal("filterDeltaBatch stripped bodies from the input batch")
 	}
 }
 
@@ -179,20 +205,40 @@ func TestFilterDeltaBatchAlertPrivacyFailsClosed(t *testing.T) {
 		name      string
 		sessionID string
 		owner     func(string) string
-		want      bool
+		wantBody  bool
 	}{
-		{name: "owned alert delivered", sessionID: "s1", owner: func(string) string { return "s1" }, want: true},
-		{name: "other session dropped", sessionID: "s2", owner: func(string) string { return "s1" }, want: false},
-		{name: "unknown owner dropped", sessionID: "s1", owner: func(string) string { return "" }, want: false},
-		{name: "missing resolver dropped", sessionID: "s1", owner: nil, want: false},
-		{name: "missing session dropped", sessionID: "", owner: func(string) string { return "s1" }, want: false},
+		{name: "owned alert delivered", sessionID: "s1", owner: func(string) string { return "s1" }, wantBody: true},
+		{name: "other session no-op", sessionID: "s2", owner: func(string) string { return "s1" }},
+		{name: "unknown owner no-op", sessionID: "s1", owner: func(string) string { return "" }},
+		{name: "missing resolver no-op", sessionID: "s1", owner: nil},
+		{name: "missing session no-op", sessionID: "", owner: func(string) string { return "s1" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out := filterDeltaBatch(&dorv1.DeltaBatch{Deltas: []*dorv1.Delta{alert("a")}}, filterState{}, nil, tc.sessionID, tc.owner)
-			got := out != nil
-			if got != tc.want {
-				t.Fatalf("alert delivered = %v, want %v", got, tc.want)
+			out := filterDeltaBatch(&dorv1.DeltaBatch{Deltas: []*dorv1.Delta{alert("secret-alert")}}, filterState{}, nil, tc.sessionID, tc.owner)
+			if out == nil || len(out.Deltas) != 1 {
+				t.Fatalf("output = %+v, want one accounting delta", out)
+			}
+			delta := out.Deltas[0]
+			if delta.Seq != 1 {
+				t.Fatalf("delta seq = %d, want 1", delta.Seq)
+			}
+			delivered := delta.GetAlert() != nil
+			if delivered != tc.wantBody {
+				t.Fatalf("alert delivered = %v, want %v", delivered, tc.wantBody)
+			}
+			if tc.wantBody {
+				return
+			}
+			if delta.Body != nil {
+				t.Fatalf("suppressed alert kept a body: %+v", delta)
+			}
+			raw, err := proto.Marshal(delta)
+			if err != nil {
+				t.Fatalf("marshal no-op: %v", err)
+			}
+			if bytes.Contains(raw, []byte("secret-alert")) {
+				t.Fatalf("no-op leaked the private alert id: %s", raw)
 			}
 		})
 	}
@@ -210,8 +256,48 @@ func TestFilterDeltaBatchEmptyInputs(t *testing.T) {
 		Body: &dorv1.Delta_Wire{Wire: &dorv1.WireRow{Category: dorv1.Category_CATEGORY_SPORTS}},
 	}}}
 	f := filterState{filters: &dorv1.SetFilters{Categories: []dorv1.Category{dorv1.Category_CATEGORY_DISASTER}}}
-	if out := filterDeltaBatch(noMatch, f, nil, "", nil); out != nil {
-		t.Fatalf("all-filtered batch = %+v, want nil", out)
+	out := filterDeltaBatch(noMatch, f, nil, "", nil)
+	if out == nil || len(out.Deltas) != 1 {
+		t.Fatalf("all-filtered batch = %+v, want one seq-only no-op", out)
+	}
+	if out.Deltas[0].Seq != 1 || out.Deltas[0].Body != nil {
+		t.Fatalf("all-filtered delta = %+v, want seq-only no-op seq 1", out.Deltas[0])
+	}
+}
+
+func TestFilterDeltaBatchFilteredWireNoOpDoesNotLeak(t *testing.T) {
+	batch := &dorv1.DeltaBatch{Deltas: []*dorv1.Delta{{
+		Seq: 11,
+		Body: &dorv1.Delta_Wire{Wire: &dorv1.WireRow{
+			ArticleId:     "private-article",
+			StoryId:       "story-1",
+			Title:         "private title",
+			Category:      dorv1.Category_CATEGORY_SPORTS,
+			PromptScores:  map[string]float32{"secret-prompt": 0.9},
+			ApproxPrompts: []string{"secret-prompt"},
+		}},
+	}}}
+	f := filterState{
+		filters: &dorv1.SetFilters{Categories: []dorv1.Category{dorv1.Category_CATEGORY_DISASTER}},
+		prompts: map[string]bool{"secret-prompt": true},
+	}
+
+	out := filterDeltaBatch(batch, f, nil, "session-a", nil)
+	if out == nil || len(out.Deltas) != 1 {
+		t.Fatalf("output = %+v, want one seq-only no-op", out)
+	}
+	delta := out.Deltas[0]
+	if delta.Seq != 11 || delta.Body != nil {
+		t.Fatalf("filtered wire delta = %+v, want seq-only no-op seq 11", delta)
+	}
+	raw, err := proto.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal filtered batch: %v", err)
+	}
+	for _, secret := range []string{"private-article", "private title", "secret-prompt"} {
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("filtered wire no-op leaked %q: %s", secret, raw)
+		}
 	}
 }
 

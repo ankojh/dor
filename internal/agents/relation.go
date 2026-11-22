@@ -94,6 +94,8 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 		judged:       make(map[string][2]uint64),
 		pairs:        make(map[string]*relationPairRecord),
 		dirty:        make(map[string]bool),
+		removals:     make(map[string]*relationRemovalRecord),
+		dirtyRem:     make(map[string]bool),
 		sink:         cfg.Persist,
 		work:         make(chan string, 64),
 		pairLocks:    make([]sync.Mutex, relationPairLocks),
@@ -329,6 +331,17 @@ type relationPairRecord struct {
 	Published bool   `json:"published"`
 }
 
+// relationRemovalRecord is the durable outbox for decay/eviction tombstones.
+// Judgement removals use the pair ledger; lifecycle removals need their own
+// record because they may supersede an already-published link.
+type relationRemovalRecord struct {
+	A         string `json:"a"`
+	B         string `json:"b"`
+	SeqA      uint64 `json:"seq_a"`
+	SeqB      uint64 `json:"seq_b"`
+	Published bool   `json:"published"`
+}
+
 // relationLink is the in-memory relation plus the strength last persisted and
 // published. Decay accumulates in memory and emits only visible steps.
 type relationLink struct {
@@ -353,6 +366,8 @@ type relationCore struct {
 	judged    map[string][2]uint64
 	pairs     map[string]*relationPairRecord
 	dirty     map[string]bool
+	removals  map[string]*relationRemovalRecord
+	dirtyRem  map[string]bool
 	sink      LinkSink
 	work      chan string
 	pairLocks []sync.Mutex
@@ -394,6 +409,11 @@ func relationStoryKey(id string) string { return "rel.s." + id }
 func relationPairKey(a, b string) string {
 	a, b = live.SortPair(a, b)
 	return "rel.p." + a + "." + b
+}
+
+func relationRemovalKey(a, b string) string {
+	a, b = live.SortPair(a, b)
+	return "rel.r." + a + "." + b
 }
 
 func (c *relationCore) storyLock(id string) *sync.Mutex {
@@ -470,8 +490,8 @@ func (c *relationCore) restore(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			var story dorv1.Story
-			if proto.Unmarshal(entry.Value(), &story) != nil || story.Id == "" {
+			story := &dorv1.Story{}
+			if proto.Unmarshal(entry.Value(), story) != nil || story.Id == "" {
 				continue
 			}
 			updated := story.UpdatedAt
@@ -483,14 +503,32 @@ func (c *relationCore) restore(ctx context.Context) {
 			}
 			meta, _ := live.LoadStoryMeta(ctx, c.kv, story.Id)
 			rec := relationStoryRecord{ContentSeq: 1, JudgedSeq: 0, Updated: updated}
-			rec.Story, _ = proto.Marshal(&story)
+			rec.Story, _ = proto.Marshal(story)
 			rec.Meta, _ = json.Marshal(meta)
-			if data, err := json.Marshal(rec); err == nil {
-				_, _ = c.kv.Put(ctx, relationStoryKey(story.Id), data)
+			if err := c.storeStoryRecord(ctx, story.Id, &rec); err != nil {
+				c.log.Debug("relation: legacy story record deferred", "story", story.Id, "err", err)
+				continue
 			}
-			rel := relationEntryFromRecord(&story, meta, rec, c.revision.Add(1))
-			rel.updated = updated
-			rel.lat, rel.lon = storyCoords(&story)
+			// Another process may have accepted a newer revision while this one
+			// was scanning legacy stories; use that authoritative record.
+			if stored, _, ok := c.loadStoryRecord(ctx, story.Id); ok {
+				rec = *stored
+				if len(rec.Story) > 0 {
+					latest := &dorv1.Story{}
+					if proto.Unmarshal(rec.Story, latest) == nil {
+						story = latest
+					}
+				}
+				if len(rec.Meta) > 0 {
+					_ = json.Unmarshal(rec.Meta, &meta)
+				}
+			}
+			rel := relationEntryFromRecord(story, meta, rec, c.revision.Add(1))
+			rel.updated = rec.Updated
+			if rel.updated == 0 {
+				rel.updated = updated
+			}
+			rel.lat, rel.lon = storyCoords(story)
 			c.index[story.Id] = rel
 			c.pending[story.Id] = now.Add(c.cfg.Debounce)
 			restored++
@@ -517,6 +555,25 @@ func (c *relationCore) restore(ctx context.Context) {
 				c.judged[pairKey(rec.A, rec.B)] = [2]uint64{rec.SeqA, rec.SeqB}
 			} else {
 				c.dirty[pkey] = true
+			}
+		}
+		_ = lister.Stop()
+	}
+
+	if lister, err := c.kv.ListKeysFiltered(ctx, "rel.r.>"); err == nil {
+		for key := range lister.Keys() {
+			entry, err := c.kv.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var rec relationRemovalRecord
+			if json.Unmarshal(entry.Value(), &rec) != nil || rec.A == "" || rec.B == "" {
+				continue
+			}
+			rkey := relationRemovalKey(rec.A, rec.B)
+			c.removals[rkey] = &rec
+			if !rec.Published {
+				c.dirtyRem[rkey] = true
 			}
 		}
 		_ = lister.Stop()
@@ -661,11 +718,12 @@ func (c *relationCore) observeSeq(ctx context.Context, story *dorv1.Story, strea
 		// heat used by decay without advancing the content revision or
 		// scheduling a judgement.
 		c.mu.Lock()
-		prev.story = story
-		prev.lat, prev.lon = entry.lat, entry.lon
-		entry.rev = prev.rev
-		entry.contentSeq = prev.contentSeq
-		entry.meta = prev.meta
+		// Replace, never mutate: judges and candidate scoring hold entry
+		// pointers after releasing c.mu.
+		updated := *prev
+		updated.story = story
+		updated.lat, updated.lon = entry.lat, entry.lon
+		c.index[story.Id] = &updated
 		c.mu.Unlock()
 		return nil
 	}
@@ -690,6 +748,21 @@ func (c *relationCore) observeSeq(ctx context.Context, story *dorv1.Story, strea
 	c.pending[story.Id] = now.Add(c.cfg.Debounce)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *relationCore) loadStoryRecord(ctx context.Context, storyID string) (*relationStoryRecord, uint64, bool) {
+	if c.kv == nil {
+		return nil, 0, false
+	}
+	entry, err := c.kv.Get(ctx, relationStoryKey(storyID))
+	if err != nil {
+		return nil, 0, false
+	}
+	var rec relationStoryRecord
+	if json.Unmarshal(entry.Value(), &rec) != nil {
+		return nil, 0, false
+	}
+	return &rec, entry.Revision(), true
 }
 
 // storeStoryRecord writes the durable content revision with CAS. A concurrent
@@ -903,6 +976,13 @@ func (c *relationCore) decay(ctx context.Context, now time.Time) {
 				evictedPairs = append(evictedPairs, key)
 			}
 		}
+		for key, rec := range c.removals {
+			if rec != nil && (rec.A == id || rec.B == id) && rec.Published {
+				delete(c.removals, key)
+				delete(c.dirtyRem, key)
+				evictedPairs = append(evictedPairs, key)
+			}
+		}
 	}
 	for key, l := range c.links {
 		if l == nil || l.link == nil {
@@ -1060,16 +1140,21 @@ func (c *relationCore) judgePair(ctx context.Context, a, b *relationEntry) error
 	lock.Lock()
 	defer lock.Unlock()
 
-	c.mu.Lock()
-	ea, eb := c.index[aid], c.index[bid]
-	c.mu.Unlock()
+	ea := c.authoritativeEntry(ctx, aid)
+	eb := c.authoritativeEntry(ctx, bid)
 	if ea == nil || eb == nil {
 		return nil
 	}
 	if !c.ownsPair(aid, bid) {
 		return nil
 	}
-	seqA, seqB := c.currentSeqs(ctx, aid, bid)
+	seqA, seqB := ea.contentSeq, eb.contentSeq
+	if seqA == 0 {
+		seqA = c.entrySeq(aid)
+	}
+	if seqB == 0 {
+		seqB = c.entrySeq(bid)
+	}
 	key := relationPairKey(aid, bid)
 	c.mu.Lock()
 	last, judged := c.judged[pairKey(aid, bid)]
@@ -1166,6 +1251,40 @@ func (c *relationCore) cacheJudged(aid string, seqA uint64, bid string, seqB uin
 	c.mu.Lock()
 	c.judged[pairKey(aid, bid)] = [2]uint64{seqA, seqB}
 	c.mu.Unlock()
+}
+
+// authoritativeEntry returns the entry whose payload and revision come from
+// the same durable record. A lagging shard must never judge an old in-memory
+// payload under a newer stored revision.
+func (c *relationCore) authoritativeEntry(ctx context.Context, id string) *relationEntry {
+	if rec, rev, ok := c.loadStoryRecord(ctx, id); ok && len(rec.Story) > 0 {
+		var story dorv1.Story
+		if proto.Unmarshal(rec.Story, &story) == nil && story.Id != "" {
+			var meta live.StoryMeta
+			if len(rec.Meta) > 0 {
+				_ = json.Unmarshal(rec.Meta, &meta)
+			}
+			e := relationEntryFromRecord(&story, meta, *rec, c.revision.Add(1))
+			e.lat, e.lon = storyCoords(&story)
+			e.meta = meta
+			e.vec = meta.Embedding
+			e.entities = meta.Entities
+			e.updated = rec.Updated
+			if e.updated == 0 {
+				e.updated = story.UpdatedAt
+			}
+			c.mu.Lock()
+			if cur := c.index[id]; cur == nil || cur.contentSeq <= rec.ContentSeq {
+				c.index[id] = e
+			}
+			c.mu.Unlock()
+			_ = rev
+			return e
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.index[id]
 }
 
 // currentSeqs reads the authoritative content revisions for both endpoints.
@@ -1360,7 +1479,11 @@ func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *rel
 			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
 				return entry.Revision(), false, nil
 			}
-			if current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
+			if current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
+				// The first committed result for an input revision pair is
+				// immutable, even while unpublished. A second overlapping
+				// judgement must recover and apply that result, not overwrite
+				// it with a different answer.
 				return entry.Revision(), false, nil
 			}
 		}
@@ -1420,12 +1543,42 @@ func (c *relationCore) linkExists(ctx context.Context, a, b string) bool {
 func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
 	switch rec.Outcome {
 	case "none":
+		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
+		}
 		return c.markPairPublished(ctx, key, rec, rev)
 	case "remove":
+		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
+		}
 		a, b := live.SortPair(rec.A, rec.B)
 		tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
 		if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
 			return errors.New("relation: link tombstone KV write failed")
+		}
+		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+			// A newer judgement landed while the tombstone was written.
+			// Restore its link if it is already published; drop this output.
+			if winner, _, ok, _ := c.loadPairRecord(ctx, key); ok && winner.Outcome == "link" && winner.Published && len(winner.Link) > 0 {
+				var link dorv1.Link
+				if proto.Unmarshal(winner.Link, &link) == nil {
+					live.PutLink(ctx, c.kv, &link)
+					link.A, link.B = live.SortPair(link.A, link.B)
+					c.mu.Lock()
+					c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
+					c.mu.Unlock()
+				}
+			}
+			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
 		}
 		if err := c.publishLink(ctx, tombstone, rec.SeqA, rec.SeqB, true); err != nil {
 			return err
@@ -1562,6 +1715,7 @@ func (c *relationCore) retryOutputs(ctx context.Context) {
 			c.log.Debug("relation: output retry deferred", "pair", key, "err", err)
 		}
 	}
+	c.retryRemovals(ctx)
 }
 
 // upsertLinkLocked persists a decayed link. The caller holds the pair lock.
@@ -1605,42 +1759,249 @@ func linkMessageID(link *dorv1.Link) string {
 
 // removeLinkLocked writes a decay/eviction tombstone. The caller holds the
 // pair lock. The durable judgement ledger entry is dropped with the link.
+// removeLinkLocked enqueues a decay/eviction tombstone in the durable removal
+// outbox. The link stays locally until the removal is published, so a failed
+// publication remains retryable.
 func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 	a, b = live.SortPair(a, b)
 	key := pairKey(a, b)
-	pkey := relationPairKey(a, b)
 	c.mu.Lock()
 	existing := c.links[key]
-	delete(c.links, key)
-	delete(c.judged, key)
-	delete(c.pairs, pkey)
-	delete(c.dirty, pkey)
 	c.mu.Unlock()
-	if c.kv != nil && existing != nil {
-		_ = c.kv.Delete(ctx, pkey)
-	}
 	if existing == nil {
+		if c.kv == nil {
+			return
+		}
+		link, ok := live.LoadLink(ctx, c.kv, a, b)
+		if !ok || (link.Strength <= 0 && link.Confidence <= 0) {
+			return
+		}
+	}
+	seqA, seqB := c.currentSeqs(ctx, a, b)
+	rkey := relationRemovalKey(a, b)
+	rec, rev, ok, err := c.loadRemovalRecord(ctx, rkey)
+	if err != nil {
 		return
 	}
+	if ok && rec.Published {
+		c.dropLocalLink(a, b)
+		return
+	}
+	if ok && (rec.SeqA > seqA || rec.SeqB > seqB) {
+		return
+	}
+	next := &relationRemovalRecord{A: a, B: b, SeqA: seqA, SeqB: seqB}
+	rev, stored, err := c.storeRemovalRecord(ctx, rkey, next, rev, ok)
+	if err != nil {
+		return
+	}
+	if !stored {
+		if winner, winnerRev, ok, loadErr := c.loadRemovalRecord(ctx, rkey); loadErr == nil && ok && !winner.Published {
+			_ = c.applyRemovalOutput(ctx, rkey, winner, winnerRev)
+		}
+		return
+	}
+	_ = c.applyRemovalOutput(ctx, rkey, next, rev)
+}
+
+func (c *relationCore) loadRemovalRecord(ctx context.Context, key string) (*relationRemovalRecord, uint64, bool, error) {
+	if c.kv == nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if rec := c.removals[key]; rec != nil {
+			cp := *rec
+			return &cp, 0, true, nil
+		}
+		return nil, 0, false, nil
+	}
+	entry, err := c.kv.Get(ctx, key)
+	if err != nil {
+		if isKVNotFound(err) {
+			return nil, 0, false, nil
+		}
+		return nil, 0, false, err
+	}
+	var rec relationRemovalRecord
+	if json.Unmarshal(entry.Value(), &rec) != nil {
+		return nil, 0, false, errors.New("relation: malformed removal record")
+	}
+	return &rec, entry.Revision(), true, nil
+}
+
+func (c *relationCore) storeRemovalRecord(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64, exists bool) (uint64, bool, error) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return 0, false, err
+	}
+	if c.kv == nil {
+		c.mu.Lock()
+		cp := *rec
+		c.removals[key] = &cp
+		c.mu.Unlock()
+		return 0, true, nil
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if exists {
+			if updated, err := c.kv.Update(ctx, key, data, rev); err == nil {
+				c.rememberRemoval(key, rec)
+				return updated, true, nil
+			}
+		} else {
+			if created, err := c.kv.Create(ctx, key, data); err == nil {
+				c.rememberRemoval(key, rec)
+				return created, true, nil
+			} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+				return 0, false, err
+			}
+		}
+		entry, err := c.kv.Get(ctx, key)
+		if err != nil {
+			if isKVNotFound(err) {
+				exists = false
+				continue
+			}
+			return 0, false, err
+		}
+		var current relationRemovalRecord
+		if json.Unmarshal(entry.Value(), &current) == nil {
+			if current.Published || current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
+				return entry.Revision(), false, nil
+			}
+		}
+		rev, exists = entry.Revision(), true
+	}
+	return 0, false, errors.New("relation: removal record contention")
+}
+
+func (c *relationCore) rememberRemoval(key string, rec *relationRemovalRecord) {
+	c.mu.Lock()
+	cp := *rec
+	c.removals[key] = &cp
+	if rec.Published {
+		delete(c.dirtyRem, key)
+	} else {
+		c.dirtyRem[key] = true
+	}
+	c.mu.Unlock()
+}
+
+func (c *relationCore) applyRemovalOutput(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64) error {
+	a, b := live.SortPair(rec.A, rec.B)
+	c.mu.Lock()
+	_, hasA := c.index[a]
+	_, hasB := c.index[b]
+	c.mu.Unlock()
+	endpointsLive := hasA && hasB
+	if endpointsLive && !c.seqsCurrent(ctx, a, rec.SeqA, b, rec.SeqB) {
+		c.restoreNewerPairLink(ctx, a, b)
+		c.deleteRemovalRecord(ctx, a, b, rev)
+		c.reschedule(a)
+		c.reschedule(b)
+		return nil
+	}
+	if winner, _, ok, _ := c.loadPairRecord(ctx, relationPairKey(a, b)); ok && winner.Outcome == "link" && winner.Published &&
+		(winner.SeqA > rec.SeqA || winner.SeqB > rec.SeqB) {
+		// A newer judgement owns the link. Drop this lifecycle removal.
+		c.deleteRemovalRecord(ctx, a, b, rev)
+		return nil
+	}
 	tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
-	if existing.link != nil {
-		tombstone.Type = existing.link.Type
-		tombstone.Dir = existing.link.Dir
+	if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
+		return errors.New("relation: removal tombstone KV write failed")
 	}
-	if c.kv != nil {
-		live.PutLink(ctx, c.kv, tombstone)
+	if endpointsLive && !c.seqsCurrent(ctx, a, rec.SeqA, b, rec.SeqB) {
+		c.restoreNewerPairLink(ctx, a, b)
+		c.deleteRemovalRecord(ctx, a, b, rev)
+		c.reschedule(a)
+		c.reschedule(b)
+		return nil
 	}
+	if err := c.publishLink(ctx, tombstone, rec.SeqA, rec.SeqB, true); err != nil {
+		return err
+	}
+	c.dropLocalLink(a, b)
 	if c.sink != nil {
 		c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
 	}
 	c.invalidateLinkText(ctx, a, b)
-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(tombstone)
+	c.markRemovalPublished(ctx, key, rec, rev)
+	return nil
+}
+
+func (c *relationCore) restoreNewerPairLink(ctx context.Context, a, b string) {
+	if c.kv == nil {
+		return
+	}
+	rec, _, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if err != nil || !ok || rec.Outcome != "link" || !rec.Published || len(rec.Link) == 0 {
+		return
+	}
+	var link dorv1.Link
+	if proto.Unmarshal(rec.Link, &link) != nil {
+		return
+	}
+	link.A, link.B = live.SortPair(link.A, link.B)
+	live.PutLink(ctx, c.kv, &link)
+	c.mu.Lock()
+	c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
+	c.mu.Unlock()
+}
+
+func (c *relationCore) dropLocalLink(a, b string) {
+	c.mu.Lock()
+	delete(c.links, pairKey(a, b))
+	delete(c.judged, pairKey(a, b))
+	c.mu.Unlock()
+}
+
+func (c *relationCore) deleteRemovalRecord(ctx context.Context, a, b string, rev uint64) {
+	key := relationRemovalKey(a, b)
+	c.mu.Lock()
+	delete(c.removals, key)
+	delete(c.dirtyRem, key)
+	c.mu.Unlock()
+	if c.kv == nil {
+		return
+	}
+	if rev > 0 {
+		_ = c.kv.Purge(ctx, key, jetstream.LastRevision(rev))
+		return
+	}
+	_ = c.kv.Delete(ctx, key)
+}
+
+func (c *relationCore) markRemovalPublished(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64) {
+	rec.Published = true
+	if c.kv == nil {
+		c.rememberRemoval(key, rec)
+		return
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
-	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	_, _ = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(linkMessageID(tombstone)))
+	if _, err := c.kv.Update(ctx, key, data, rev); err != nil {
+		return
+	}
+	c.rememberRemoval(key, rec)
+}
+
+func (c *relationCore) retryRemovals(ctx context.Context) {
+	c.mu.Lock()
+	dirty := make([]string, 0, len(c.dirtyRem))
+	for key := range c.dirtyRem {
+		dirty = append(dirty, key)
+	}
+	c.mu.Unlock()
+	for _, key := range dirty {
+		rec, rev, ok, err := c.loadRemovalRecord(ctx, key)
+		if err != nil || !ok || rec.Published {
+			continue
+		}
+		if err := c.applyRemovalOutput(ctx, key, rec, rev); err != nil {
+			c.log.Debug("relation: removal retry deferred", "pair", key, "err", err)
+		}
+	}
 }
 
 func (c *relationCore) storyInput(ctx context.Context, e *relationEntry) decide.Story {

@@ -112,6 +112,11 @@ type LinkRecord struct {
 	UpdatedAt  time.Time
 	DecaysAt   time.Time
 	Remove     bool
+	// Generation is the relation pair authority generation. SQL applies a
+	// record only when it is at least the durable link_generations value, so a
+	// delayed writer cannot overwrite or resurrect a newer generation. Zero is
+	// treated as the legacy first generation.
+	Generation uint64
 }
 
 // StoryTextRecord is the durable mirror of the storytext KV cache. An empty

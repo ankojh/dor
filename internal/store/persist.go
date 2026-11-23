@@ -18,8 +18,20 @@ func (s *Store) UpsertLinks(ctx context.Context, records []LinkRecord) error {
 	}
 	defer tx.Rollback(ctx)
 	const upsert = `
+WITH authority AS (
+    INSERT INTO link_generations (a, b, generation, removed)
+    VALUES ($1, $2, $10, false)
+    ON CONFLICT (a, b) DO UPDATE SET
+        generation = EXCLUDED.generation,
+        removed = false,
+        updated_at = now()
+      WHERE link_generations.generation <= EXCLUDED.generation
+    RETURNING generation
+)
 INSERT INTO links (a, b, type, direction, confidence, strength, why, updated_at, decays_at, unverified)
-VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9)
+SELECT $1,$2,$3,$4,$5,$6,NULL,$7,$8,$9
+FROM authority
+WHERE authority.generation = $10
 ON CONFLICT (a, b) DO UPDATE SET
     type = EXCLUDED.type,
     direction = EXCLUDED.direction,
@@ -28,12 +40,30 @@ ON CONFLICT (a, b) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
     decays_at = EXCLUDED.decays_at,
     unverified = EXCLUDED.unverified`
+	const remove = `
+WITH authority AS (
+    INSERT INTO link_generations (a, b, generation, removed)
+    VALUES ($1, $2, $3, true)
+    ON CONFLICT (a, b) DO UPDATE SET
+        generation = EXCLUDED.generation,
+        removed = true,
+        updated_at = now()
+      WHERE link_generations.generation <= EXCLUDED.generation
+    RETURNING generation
+)
+DELETE FROM links
+WHERE a = $1 AND b = $2
+  AND EXISTS (SELECT 1 FROM authority WHERE generation = $3)`
 	for _, r := range records {
 		if r.A == "" || r.B == "" || r.A == r.B {
 			continue
 		}
+		generation := r.Generation
+		if generation == 0 {
+			generation = 1
+		}
 		if r.Remove {
-			if _, err := tx.Exec(ctx, `DELETE FROM links WHERE a=$1 AND b=$2`, r.A, r.B); err != nil {
+			if _, err := tx.Exec(ctx, remove, r.A, r.B, int64(generation)); err != nil {
 				return fmt.Errorf("store: remove link %s/%s: %w", r.A, r.B, err)
 			}
 			continue
@@ -45,7 +75,7 @@ ON CONFLICT (a, b) DO UPDATE SET
 			r.DecaysAt = r.UpdatedAt.Add(48 * time.Hour)
 		}
 		if _, err := tx.Exec(ctx, upsert, r.A, r.B, r.Type, r.Direction, r.Confidence,
-			r.Strength, r.UpdatedAt, r.DecaysAt, r.Unverified); err != nil {
+			r.Strength, r.UpdatedAt, r.DecaysAt, r.Unverified, int64(generation)); err != nil {
 			return fmt.Errorf("store: upsert link %s/%s: %w", r.A, r.B, err)
 		}
 	}

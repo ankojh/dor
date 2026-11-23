@@ -388,3 +388,9 @@ Operational notes for this profile:
   is running. The replayer always attaches to an existing bus.
 - Perf CI, eval CI, soak and chaos automation are not part of this operational
   build. The replayer and `/ops` are the runtime surfaces they will use.
+
+## Relation generation rollout
+
+Migration `0010_link_generation` adds the durable SQL fence for relation links and removals. Apply it before admitting writes from the new binary; normal startup runs migrations before constructing the DB writer. Stop and drain all old relation/DB writers before starting the new writer fleet. Old binaries bypass the generation fence, so a mixed old/new writer rollout does not provide the ordering guarantee.
+
+For rollback, stop and drain the new writer fleet first. Returning to an old binary also removes the generation-ordering guarantee; retain the migration and its removal records until rollback and recovery requirements have been assessed. Code changes and test evidence do not authorize a live migration, service restart or deployment.

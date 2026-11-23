@@ -96,6 +96,8 @@ func NewRelationJudge(b *bus.Bus, metrics *Metrics, log *slog.Logger, cfg Relati
 		dirty:        make(map[string]bool),
 		removals:     make(map[string]*relationRemovalRecord),
 		dirtyRem:     make(map[string]bool),
+		abandoned:    make(map[string]bool),
+		projecting:   make(map[string]bool),
 		sink:         cfg.Persist,
 		work:         make(chan string, 64),
 		pairLocks:    make([]sync.Mutex, relationPairLocks),
@@ -318,35 +320,44 @@ type relationStoryRecord struct {
 	Updated    int64  `json:"updated"`
 }
 
-// relationPairRecord is the durable judgement/output state for one unordered
-// pair. Published is set only after the link KV write and link.changed publish
-// succeed, so a failed output is retried instead of suppressed.
+// relationPairRecord is the single durable per-pair generation authority for
+// every mutation that can change the link projection: judged link/remove/none,
+// visible positive decay and lifecycle/eviction removal. Generation is assigned
+// by the successful CAS of this record, not by stream order or wall clock.
+// Published is set only after this generation's KV, stream and sink projection
+// succeeds, so a failed or interrupted output is retried instead of suppressed.
 type relationPairRecord struct {
-	A         string `json:"a"`
-	B         string `json:"b"`
-	SeqA      uint64 `json:"seq_a"`
-	SeqB      uint64 `json:"seq_b"`
-	Outcome   string `json:"outcome"` // link|remove|none
-	Link      []byte `json:"link,omitempty"`
-	Published bool   `json:"published"`
+	A          string `json:"a"`
+	B          string `json:"b"`
+	SeqA       uint64 `json:"seq_a"`
+	SeqB       uint64 `json:"seq_b"`
+	Outcome    string `json:"outcome"` // link|remove|none
+	Link       []byte `json:"link,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
+	Published  bool   `json:"published"`
 }
 
-// relationRemovalRecord is the durable outbox for decay/eviction tombstones.
-// Judgement removals use the pair ledger; lifecycle removals need their own
-// record because they may supersede an already-published link.
+// relationRemovalRecord is the durable removal outbox for decay/eviction
+// tombstones. It mirrors the pair generation that owns the removal. The pair
+// record remains authoritative; an outbox row that is older than the pair is
+// discarded and never published.
 type relationRemovalRecord struct {
-	A         string `json:"a"`
-	B         string `json:"b"`
-	SeqA      uint64 `json:"seq_a"`
-	SeqB      uint64 `json:"seq_b"`
-	Published bool   `json:"published"`
+	A          string `json:"a"`
+	B          string `json:"b"`
+	SeqA       uint64 `json:"seq_a"`
+	SeqB       uint64 `json:"seq_b"`
+	Generation uint64 `json:"generation,omitempty"`
+	Published  bool   `json:"published"`
 }
 
-// relationLink is the in-memory relation plus the strength last persisted and
-// published. Decay accumulates in memory and emits only visible steps.
+// relationLink is the in-memory relation plus the pair generation it was last
+// projected from and the strength last persisted/published. Decay accumulates
+// in memory and emits only visible steps; a stale owner whose generation no
+// longer matches the durable authority cannot project its derived work.
 type relationLink struct {
 	link              *dorv1.Link
 	publishedStrength float64
+	generation        uint64
 }
 
 type relationCore struct {
@@ -359,22 +370,24 @@ type relationCore struct {
 	kv     jetstream.KeyValue
 	kvErr  error
 
-	mu        sync.Mutex
-	index     map[string]*relationEntry
-	pending   map[string]time.Time
-	links     map[string]*relationLink
-	judged    map[string][2]uint64
-	pairs     map[string]*relationPairRecord
-	dirty     map[string]bool
-	removals  map[string]*relationRemovalRecord
-	dirtyRem  map[string]bool
-	sink      LinkSink
-	work      chan string
-	pairLocks []sync.Mutex
-	revision  atomic.Uint64
-	localSeq  atomic.Uint64
-	lastDecay time.Time
-	lastRetry time.Time
+	mu         sync.Mutex
+	index      map[string]*relationEntry
+	pending    map[string]time.Time
+	links      map[string]*relationLink
+	judged     map[string][2]uint64
+	pairs      map[string]*relationPairRecord
+	dirty      map[string]bool
+	removals   map[string]*relationRemovalRecord
+	dirtyRem   map[string]bool
+	abandoned  map[string]bool
+	projecting map[string]bool
+	sink       LinkSink
+	work       chan string
+	pairLocks  []sync.Mutex
+	revision   atomic.Uint64
+	localSeq   atomic.Uint64
+	lastDecay  time.Time
+	lastRetry  time.Time
 
 	// storyLocks serialise observe and the final seq check/commit for one
 	// story inside this process. Durable pair records provide the cross-process
@@ -414,6 +427,33 @@ func relationPairKey(a, b string) string {
 func relationRemovalKey(a, b string) string {
 	a, b = live.SortPair(a, b)
 	return "rel.r." + a + "." + b
+}
+
+// pairRecordGeneration normalises legacy records written before the generation
+// field existed. They are the first generation of their pair.
+func pairRecordGeneration(rec *relationPairRecord) uint64 {
+	if rec == nil || rec.Generation == 0 {
+		return 1
+	}
+	return rec.Generation
+}
+
+func removalRecordGeneration(rec *relationRemovalRecord) uint64 {
+	if rec == nil || rec.Generation == 0 {
+		return 1
+	}
+	return rec.Generation
+}
+
+func relationLinkRevisionBytes(data []byte) uint64 {
+	if len(data) == 0 {
+		return 0
+	}
+	var link dorv1.Link
+	if proto.Unmarshal(data, &link) != nil {
+		return 0
+	}
+	return live.LinkRevision(&link)
 }
 
 func (c *relationCore) storyLock(id string) *sync.Mutex {
@@ -572,6 +612,19 @@ func (c *relationCore) restore(ctx context.Context) {
 			}
 			rkey := relationRemovalKey(rec.A, rec.B)
 			c.removals[rkey] = &rec
+			pkey := relationPairKey(rec.A, rec.B)
+			pair := c.pairs[pkey]
+			if pair == nil || (pair.Outcome != "remove" && pair.SeqA <= rec.SeqA && pair.SeqB <= rec.SeqB) {
+				// Legacy outbox written before every removal had a pair
+				// authority. A removal at the same or newer input than the
+				// recorded link is the newer intent; adopt it durably so
+				// restart and redelivery cannot resurrect the old link.
+				if _, _, stored, adoptErr := c.storeRemovalAuthority(ctx, pkey, rec.A, rec.B, rec.SeqA, rec.SeqB, 0); adoptErr != nil {
+					c.log.Debug("relation: legacy removal adoption deferred", "pair", rkey, "err", adoptErr)
+				} else if stored {
+					c.markPairDirty(pkey)
+				}
+			}
 			if !rec.Published {
 				c.dirtyRem[rkey] = true
 			}
@@ -586,6 +639,7 @@ func (c *relationCore) restore(ctx context.Context) {
 		}
 		return
 	}
+	projected := make(map[string]*dorv1.Link)
 	links := 0
 	for key := range linkLister.Keys() {
 		entry, err := c.kv.Get(ctx, key)
@@ -597,8 +651,13 @@ func (c *relationCore) restore(ctx context.Context) {
 			continue
 		}
 		link.A, link.B = live.SortPair(link.A, link.B)
-		if link.A == "" || link.B == "" || (link.Strength <= 0 && link.Confidence <= 0) {
-			// A removal tombstone already did its job.
+		if link.A == "" || link.B == "" {
+			continue
+		}
+		projected[pairKey(link.A, link.B)] = &link
+		if link.Strength <= 0 && link.Confidence <= 0 {
+			// A removal tombstone already did its job; keep the record in the
+			// projection map so restore can compare it with the authority.
 			_ = c.kv.Delete(ctx, key)
 			continue
 		}
@@ -607,11 +666,91 @@ func (c *relationCore) restore(ctx context.Context) {
 			_ = c.kv.Delete(ctx, key)
 			continue
 		}
-		c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
+		generation := uint64(0)
+		if rec := c.pairs[relationPairKey(link.A, link.B)]; rec != nil && rec.Outcome == "link" &&
+			relationLinkRevisionBytes(rec.Link) == live.LinkRevision(&link) {
+			generation = pairRecordGeneration(rec)
+		}
+		c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength), generation: generation}
 		links++
 	}
 	_ = linkLister.Stop()
+	c.verifyPairProjections(ctx, projected)
 	c.log.Info("relation: restored live state", "stories", restored, "links", links)
+}
+
+// verifyPairProjections compares every published pair authority with the KV
+// projection. A mismatch (including the B-V2-01 tombstone-over-unpublished-
+// winner case) becomes a new unpublished generation, so retry repairs KV,
+// stream and sink from the same durable record.
+func (c *relationCore) verifyPairProjections(ctx context.Context, projected map[string]*dorv1.Link) {
+	type pairProjection struct {
+		rec *relationPairRecord
+		key string
+	}
+	c.mu.Lock()
+	list := make([]pairProjection, 0, len(c.pairs))
+	for key, rec := range c.pairs {
+		if rec != nil {
+			list = append(list, pairProjection{rec: rec, key: key})
+		}
+	}
+	c.mu.Unlock()
+	for _, item := range list {
+		rec := item.rec
+		a, b := live.SortPair(rec.A, rec.B)
+		if c.index[a] == nil || c.index[b] == nil {
+			continue
+		}
+		actual := projected[pairKey(a, b)]
+		needsRepair := false
+		switch rec.Outcome {
+		case "link":
+			var desired dorv1.Link
+			if proto.Unmarshal(rec.Link, &desired) != nil {
+				continue
+			}
+			needsRepair = actual == nil || live.LinkRevision(actual) != live.LinkRevision(&desired)
+		case "remove":
+			needsRepair = actual != nil && (actual.Strength > 0 || actual.Confidence > 0)
+		case "none":
+			needsRepair = actual != nil && (actual.Strength > 0 || actual.Confidence > 0)
+		}
+		if !needsRepair || !rec.Published {
+			continue
+		}
+		c.bumpPairForRepair(ctx, item.key, rec)
+	}
+}
+
+// bumpPairForRepair turns a published projection mismatch into an unpublished
+// generation of the same desired content. The CAS keeps a concurrent newer
+// judgement as the winner.
+func (c *relationCore) bumpPairForRepair(ctx context.Context, key string, observed *relationPairRecord) {
+	if c.kv == nil {
+		c.markPairDirty(key)
+		return
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		rec, rev, ok, err := c.loadPairRecord(ctx, key)
+		if err != nil || !ok || !rec.Published {
+			return
+		}
+		if pairRecordGeneration(rec) != pairRecordGeneration(observed) {
+			return
+		}
+		next := *rec
+		next.Generation, next.Published = pairRecordGeneration(rec)+1, false
+		data, err := json.Marshal(&next)
+		if err != nil {
+			return
+		}
+		if _, err := c.kv.Update(ctx, key, data, rev); err != nil {
+			continue
+		}
+		c.rememberPair(key, &next)
+		return
+	}
 }
 
 func relationEntryFromRecord(story *dorv1.Story, meta live.StoryMeta, rec relationStoryRecord, rev uint64) *relationEntry {
@@ -1037,13 +1176,16 @@ func (c *relationCore) decay(ctx context.Context, now time.Time) {
 }
 
 // fadeLink applies heat-scaled decay to one link. Hot stories keep their links
-// longer; quiet stories lose strength faster. A new judgement or removal
-// between the snapshot and this write changes the revision and cancels it.
+// longer; quiet stories lose strength faster. Decay is a first-class pair
+// generation: it is committed through the durable authority only when the
+// current link is still the one this fade derived from. A newer judgement,
+// removal or restart state rejects the stale decay.
 func (c *relationCore) fadeLink(ctx context.Context, a, b string, revision uint64, heat float64, dt time.Duration) {
 	lock := c.lockPair(a, b)
 	lock.Lock()
 	defer lock.Unlock()
 
+	a, b = live.SortPair(a, b)
 	key := pairKey(a, b)
 	c.mu.Lock()
 	rel := c.links[key]
@@ -1051,36 +1193,94 @@ func (c *relationCore) fadeLink(ctx context.Context, a, b string, revision uint6
 		c.mu.Unlock()
 		return
 	}
+	base := proto.Clone(rel.link).(*dorv1.Link)
+	publishedStrength := rel.publishedStrength
+	generation := rel.generation
+	c.mu.Unlock()
+
 	// A hot story halves the decay rate; a cold one quadruples it.
 	tau := c.linkHalfLife.Seconds() * (0.2 + 0.8*heat)
 	if tau <= 0 {
 		tau = c.linkHalfLife.Seconds()
 	}
 	factor := math.Exp(-dt.Seconds() / tau)
-	strength := float64(rel.link.Strength) * factor
-	confidence := float64(rel.link.Confidence) * factor
+	strength := float64(base.Strength) * factor
+	confidence := float64(base.Confidence) * factor
 	if strength < 0 {
 		strength = 0
 	}
 	if confidence < 0 {
 		confidence = 0
 	}
-	rel.link.Strength = float32(strength)
-	rel.link.Confidence = float32(confidence)
-	shouldPublish := rel.publishedStrength-strength >= relationDecayMinStep
+	decayed := proto.Clone(base).(*dorv1.Link)
+	decayed.Strength = float32(strength)
+	decayed.Confidence = float32(confidence)
+	shouldPublish := publishedStrength-strength >= relationDecayMinStep
 	shouldRemove := strength < relationLinkFloor || confidence < relationLinkFloor
+
+	auth, _, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if err != nil {
+		return
+	}
+	if ok {
+		if auth.Outcome != "link" {
+			return
+		}
+		if generation != 0 {
+			// Decay must be derived from the current pair generation. Content
+			// revision alone can collide when two generations produced the same
+			// link bytes with different inputs.
+			if pairRecordGeneration(auth) != generation {
+				return
+			}
+		} else if relationLinkRevisionBytes(auth.Link) != revision {
+			return
+		}
+		if !c.seqsCurrent(ctx, auth.A, auth.SeqA, auth.B, auth.SeqB) {
+			c.reschedule(a)
+			c.reschedule(b)
+			return
+		}
+	} else if c.kv != nil {
+		actual, exists := live.LoadLink(ctx, c.kv, a, b)
+		if !exists || live.LinkRevision(actual) != revision {
+			return
+		}
+	}
 	if shouldRemove {
-		c.mu.Unlock()
-		c.removeLinkLocked(ctx, a, b)
+		c.removeLinkFencedGen(ctx, a, b, revision, generation)
 		return
 	}
 	if !shouldPublish {
+		c.mu.Lock()
+		if cur := c.links[key]; cur != nil && cur.link != nil && live.LinkRevision(cur.link) == revision {
+			c.links[key] = &relationLink{link: decayed, publishedStrength: cur.publishedStrength, generation: cur.generation}
+		}
 		c.mu.Unlock()
 		return
 	}
-	link := rel.link
-	c.mu.Unlock()
-	c.upsertLinkLocked(ctx, link)
+
+	seedA, seedB := c.currentSeqs(ctx, a, b)
+	expectedGeneration := uint64(0)
+	if ok {
+		seedA, seedB = auth.SeqA, auth.SeqB
+		expectedGeneration = generation
+	}
+	_, stored, err := c.storeDecayRecord(ctx, relationPairKey(a, b), decayed, revision, expectedGeneration, seedA, seedB)
+	if err != nil {
+		c.log.Debug("relation: decay record deferred", "a", a, "b", b, "err", err)
+		return
+	}
+	if !stored {
+		return
+	}
+	rec, recRev, exists, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if err != nil || !exists {
+		return
+	}
+	if err := c.applyPairOutput(ctx, relationPairKey(a, b), rec, recRev); err != nil {
+		c.log.Debug("relation: decay projection deferred", "a", a, "b", b, "err", err)
+	}
 }
 
 // tombstone removes a link whose endpoint left the index. It is safe when the
@@ -1089,7 +1289,22 @@ func (c *relationCore) tombstone(ctx context.Context, a, b string) {
 	lock := c.lockPair(a, b)
 	lock.Lock()
 	defer lock.Unlock()
-	c.removeLinkLocked(ctx, a, b)
+	c.mu.Lock()
+	c.abandoned[pairKey(a, b)] = true
+	c.mu.Unlock()
+	c.removeLinkFenced(ctx, a, b, 0)
+}
+
+func (c *relationCore) pairAbandoned(a, b string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.abandoned[pairKey(a, b)]
+}
+
+func (c *relationCore) clearAbandoned(a, b string) {
+	c.mu.Lock()
+	delete(c.abandoned, pairKey(a, b))
+	c.mu.Unlock()
 }
 
 // invalidateLinkText drops the cached "why" for a changed relation. The
@@ -1449,15 +1664,24 @@ func (c *relationCore) loadPairRecord(ctx context.Context, key string) (*relatio
 	return &rec, entry.Revision(), true, nil
 }
 
-// storePairRecord writes the durable judgement with CAS. An older sequence
-// pair never overwrites a newer record.
+// storePairRecord writes a durable judgement with CAS and assigns the next
+// generation. An older sequence pair never overwrites a newer record, and the
+// first committed result for an input revision pair is immutable even while
+// unpublished.
 func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *relationPairRecord, rev uint64, exists bool) (uint64, bool, error) {
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return 0, false, err
-	}
 	if c.kv == nil {
 		c.mu.Lock()
+		current := c.pairs[key]
+		if current != nil {
+			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB ||
+				(current.SeqA == rec.SeqA && current.SeqB == rec.SeqB) {
+				c.mu.Unlock()
+				return 0, false, nil
+			}
+			rec.Generation = pairRecordGeneration(current) + 1
+		} else if rec.Generation == 0 {
+			rec.Generation = 1
+		}
 		cp := *rec
 		c.pairs[key] = &cp
 		c.mu.Unlock()
@@ -1465,43 +1689,229 @@ func (c *relationCore) storePairRecord(ctx context.Context, key string, rec *rel
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		if exists {
-			if updated, err := c.kv.Update(ctx, key, data, rev); err == nil {
+			entry, err := c.kv.Get(ctx, key)
+			if err != nil {
+				if isKVNotFound(err) {
+					exists = false
+					continue
+				}
+				return 0, false, err
+			}
+			var current relationPairRecord
+			if json.Unmarshal(entry.Value(), &current) == nil {
+				if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
+					return entry.Revision(), false, nil
+				}
+				if current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
+					return entry.Revision(), false, nil
+				}
+			}
+			next := *rec
+			next.Generation = pairRecordGeneration(&current) + 1
+			data, err := json.Marshal(&next)
+			if err != nil {
+				return 0, false, err
+			}
+			if updated, err := c.kv.Update(ctx, key, data, entry.Revision()); err == nil {
+				rec.Generation = next.Generation
 				c.rememberPair(key, rec)
 				return updated, true, nil
 			}
-		} else {
-			if created, err := c.kv.Create(ctx, key, data); err == nil {
-				c.rememberPair(key, rec)
-				return created, true, nil
-			} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
-				return 0, false, err
-			}
+			rev, exists = entry.Revision(), true
+			continue
 		}
-		// Reconcile with the winner.
-		entry, err := c.kv.Get(ctx, key)
+		next := *rec
+		if next.Generation == 0 {
+			next.Generation = 1
+		}
+		data, err := json.Marshal(&next)
 		if err != nil {
-			if isKVNotFound(err) {
-				exists = false
-				continue
-			}
 			return 0, false, err
 		}
-		var current relationPairRecord
-		if json.Unmarshal(entry.Value(), &current) == nil {
-			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
-				return entry.Revision(), false, nil
-			}
-			if current.SeqA == rec.SeqA && current.SeqB == rec.SeqB {
-				// The first committed result for an input revision pair is
-				// immutable, even while unpublished. A second overlapping
-				// judgement must recover and apply that result, not overwrite
-				// it with a different answer.
-				return entry.Revision(), false, nil
-			}
+		if created, err := c.kv.Create(ctx, key, data); err == nil {
+			rec.Generation = next.Generation
+			c.rememberPair(key, rec)
+			return created, true, nil
+		} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			return 0, false, err
 		}
-		rev, exists = entry.Revision(), true
+		exists = true
 	}
 	return 0, false, errors.New("relation: pair record contention")
+}
+
+// storeDecayRecord commits one visible positive-decay generation. It only
+// succeeds when the current durable record is still the link the decay derived
+// from. The caller may pass exists=false for a legacy KV-only link; a concurrent
+// creator is reconciled the same way.
+func (c *relationCore) storeDecayRecord(ctx context.Context, key string, decayed *dorv1.Link, baseRevision, baseGeneration, seedSeqA, seedSeqB uint64) (uint64, bool, error) {
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(decayed)
+	if err != nil {
+		return 0, false, err
+	}
+	if c.kv == nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		current := c.pairs[key]
+		if current == nil {
+			if baseGeneration != 0 {
+				return 0, false, nil
+			}
+			next := &relationPairRecord{A: decayed.A, B: decayed.B, SeqA: seedSeqA, SeqB: seedSeqB,
+				Outcome: "link", Link: data, Generation: 1}
+			cp := *next
+			c.pairs[key] = &cp
+			return 0, true, nil
+		}
+		if current.Outcome != "link" {
+			return 0, false, nil
+		}
+		if baseGeneration != 0 {
+			if pairRecordGeneration(current) != baseGeneration {
+				return 0, false, nil
+			}
+		} else if current.SeqA != seedSeqA || current.SeqB != seedSeqB ||
+			relationLinkRevisionBytes(current.Link) != baseRevision {
+			return 0, false, nil
+		}
+		next := *current
+		next.Link, next.Generation, next.Published = data, pairRecordGeneration(current)+1, false
+		cp := next
+		c.pairs[key] = &cp
+		return 0, true, nil
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		entry, err := c.kv.Get(ctx, key)
+		if err != nil {
+			if !isKVNotFound(err) {
+				return 0, false, err
+			}
+			if baseGeneration != 0 {
+				return 0, false, nil
+			}
+			next := &relationPairRecord{A: decayed.A, B: decayed.B, SeqA: seedSeqA, SeqB: seedSeqB,
+				Outcome: "link", Link: data, Generation: 1}
+			raw, err := json.Marshal(next)
+			if err != nil {
+				return 0, false, err
+			}
+			if created, err := c.kv.Create(ctx, key, raw); err == nil {
+				c.rememberPair(key, next)
+				return created, true, nil
+			}
+			continue
+		}
+		var current relationPairRecord
+		if json.Unmarshal(entry.Value(), &current) != nil {
+			return 0, false, errors.New("relation: malformed pair record")
+		}
+		if current.Outcome != "link" {
+			return entry.Revision(), false, nil
+		}
+		if baseGeneration != 0 {
+			if pairRecordGeneration(&current) != baseGeneration {
+				return entry.Revision(), false, nil
+			}
+		} else if current.SeqA != seedSeqA || current.SeqB != seedSeqB ||
+			relationLinkRevisionBytes(current.Link) != baseRevision {
+			return entry.Revision(), false, nil
+		}
+		next := current
+		next.Link, next.Generation, next.Published = data, pairRecordGeneration(&current)+1, false
+		raw, err := json.Marshal(&next)
+		if err != nil {
+			return 0, false, err
+		}
+		if updated, err := c.kv.Update(ctx, key, raw, entry.Revision()); err == nil {
+			c.rememberPair(key, &next)
+			return updated, true, nil
+		}
+	}
+	return 0, false, errors.New("relation: decay record contention")
+}
+
+// storeRemovalAuthority CASes the pair authority to a removal generation. The
+// returned record is the projection the caller must apply. stored=false means
+// another generation already owns the pair; the caller must not publish this
+// removal.
+func (c *relationCore) storeRemovalAuthority(ctx context.Context, key, a, b string, seqA, seqB, expectedGeneration uint64) (*relationPairRecord, uint64, bool, error) {
+	desired := &relationPairRecord{A: a, B: b, SeqA: seqA, SeqB: seqB, Outcome: "remove"}
+	if c.kv == nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		current := c.pairs[key]
+		if current == nil {
+			if expectedGeneration != 0 {
+				return nil, 0, false, nil
+			}
+			desired.Generation = 1
+			cp := *desired
+			c.pairs[key] = &cp
+			return &cp, 0, true, nil
+		}
+		if expectedGeneration != 0 && pairRecordGeneration(current) != expectedGeneration {
+			return nil, 0, false, nil
+		}
+		if current.SeqA > seqA || current.SeqB > seqB {
+			return nil, 0, false, nil
+		}
+		if current.Outcome == "remove" && current.SeqA == seqA && current.SeqB == seqB {
+			cp := *current
+			return &cp, 0, false, nil
+		}
+		desired.Generation = pairRecordGeneration(current) + 1
+		desired.Published = false
+		cp := *desired
+		c.pairs[key] = &cp
+		return &cp, 0, true, nil
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		entry, err := c.kv.Get(ctx, key)
+		if err != nil {
+			if !isKVNotFound(err) {
+				return nil, 0, false, err
+			}
+			if expectedGeneration != 0 {
+				return nil, 0, false, nil
+			}
+			desired.Generation = 1
+			raw, err := json.Marshal(desired)
+			if err != nil {
+				return nil, 0, false, err
+			}
+			if created, err := c.kv.Create(ctx, key, raw); err == nil {
+				c.rememberPair(key, desired)
+				return desired, created, true, nil
+			}
+			continue
+		}
+		var current relationPairRecord
+		if json.Unmarshal(entry.Value(), &current) != nil {
+			return nil, 0, false, errors.New("relation: malformed pair record")
+		}
+		if expectedGeneration != 0 && pairRecordGeneration(&current) != expectedGeneration {
+			return nil, entry.Revision(), false, nil
+		}
+		if current.SeqA > seqA || current.SeqB > seqB {
+			return nil, 0, false, nil
+		}
+		if current.Outcome == "remove" && current.SeqA == seqA && current.SeqB == seqB {
+			cp := current
+			return &cp, entry.Revision(), false, nil
+		}
+		next := current
+		next.SeqA, next.SeqB, next.Outcome, next.Link = seqA, seqB, "remove", nil
+		next.Generation, next.Published = pairRecordGeneration(&current)+1, false
+		raw, err := json.Marshal(&next)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if updated, err := c.kv.Update(ctx, key, raw, entry.Revision()); err == nil {
+			c.rememberPair(key, &next)
+			return &next, updated, true, nil
+		}
+	}
+	return nil, 0, false, errors.New("relation: removal authority contention")
 }
 
 func (c *relationCore) rememberPair(key string, rec *relationPairRecord) {
@@ -1513,6 +1923,9 @@ func (c *relationCore) rememberPair(key string, rec *relationPairRecord) {
 	} else {
 		c.dirty[key] = true
 	}
+	if rec.Outcome != "remove" {
+		delete(c.abandoned, pairKey(rec.A, rec.B))
+	}
 	c.mu.Unlock()
 }
 
@@ -1521,7 +1934,7 @@ func (c *relationCore) deletePairRecord(ctx context.Context, a, b string, rev ui
 	c.mu.Lock()
 	delete(c.pairs, key)
 	delete(c.dirty, key)
-	delete(c.judged, key)
+	delete(c.judged, pairKey(a, b))
 	c.mu.Unlock()
 	if c.kv == nil {
 		return
@@ -1549,9 +1962,160 @@ func (c *relationCore) linkExists(ctx context.Context, a, b string) bool {
 	return false
 }
 
-// applyPairOutput writes/publishes a durable pair outcome. Published is set
-// only after every output succeeds, so a crash or failed publish leaves the
-// record recoverable.
+// pairAuthorityCurrent reports whether rec is still the exact durable
+// generation that owns this pair. A legacy zero generation is generation one.
+func (c *relationCore) pairAuthorityCurrent(ctx context.Context, key string, rec *relationPairRecord) (*relationPairRecord, uint64, bool, error) {
+	current, rev, ok, err := c.loadPairRecord(ctx, key)
+	if err != nil || !ok {
+		return nil, 0, false, err
+	}
+	return current, rev, pairRecordGeneration(current) == pairRecordGeneration(rec), nil
+}
+
+func (c *relationCore) markPairDirty(key string) {
+	c.mu.Lock()
+	c.dirty[key] = true
+	c.mu.Unlock()
+}
+
+// projectAuthority restores the KV projection from the current pair authority
+// without emitting an obsolete generation to the stream. It is the repair path
+// used when a losing writer has already touched KV. The current generation's
+// owner (or restart retry) publishes the stream and marks Published.
+func (c *relationCore) projectAuthority(ctx context.Context, a, b string) {
+	a, b = live.SortPair(a, b)
+	key := relationPairKey(a, b)
+	c.mu.Lock()
+	if c.projecting[key] {
+		c.mu.Unlock()
+		return
+	}
+	c.projecting[key] = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.projecting, key)
+		c.mu.Unlock()
+	}()
+	for attempt := 0; attempt < 4; attempt++ {
+		rec, pairRev, ok, err := c.loadPairRecord(ctx, key)
+		if err != nil {
+			return
+		}
+		if !ok {
+			if removal, _, removed, removalErr := c.loadRemovalRecord(ctx, relationRemovalKey(a, b)); removalErr == nil && removed && removal.Published {
+				if c.kv != nil {
+					live.PutLink(ctx, c.kv, &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()})
+				}
+				if _, _, exists, loadErr := c.loadPairRecord(ctx, key); loadErr != nil {
+					return
+				} else if exists {
+					continue
+				}
+				c.dropLocalLink(a, b)
+			}
+			return
+		}
+		var link *dorv1.Link
+		switch rec.Outcome {
+		case "link":
+			if len(rec.Link) == 0 {
+				return
+			}
+			var desired dorv1.Link
+			if proto.Unmarshal(rec.Link, &desired) != nil {
+				return
+			}
+			desired.A, desired.B = live.SortPair(desired.A, desired.B)
+			link = &desired
+			if c.kv != nil {
+				live.PutLink(ctx, c.kv, link)
+			}
+		case "remove":
+			if c.kv != nil {
+				live.PutLink(ctx, c.kv, &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()})
+			}
+		case "none":
+			if c.linkExists(ctx, a, b) {
+				// A positive projection survived from an older generation. The
+				// current no-link authority must emit an explicit removal so
+				// publisher state converges; this is the current generation,
+				// not the stale caller.
+				if last, seqErr := c.lastLinkSequence(ctx); seqErr == nil {
+					if applyErr := c.applyPairRemoval(ctx, key, rec, pairRev, last); applyErr == nil {
+						return
+					}
+				}
+				c.markPairDirty(key)
+				return
+			}
+			if c.kv != nil {
+				live.PutLink(ctx, c.kv, &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()})
+			}
+		default:
+			return
+		}
+		// A newer generation can claim while this repair is writing. In that
+		// case rewrite from the new authority instead of leaving stale KV.
+		current, _, still, loadErr := c.loadPairRecord(ctx, key)
+		if loadErr != nil {
+			return
+		}
+		if !still || current == nil || pairRecordGeneration(current) != pairRecordGeneration(rec) {
+			continue
+		}
+		switch rec.Outcome {
+		case "link":
+			c.mu.Lock()
+			c.links[pairKey(link.A, link.B)] = &relationLink{link: link, publishedStrength: float64(link.Strength), generation: pairRecordGeneration(rec)}
+			c.mu.Unlock()
+		case "remove", "none":
+			c.dropLocalLink(a, b)
+		}
+		if rec.Published {
+			c.cacheJudged(rec.A, rec.SeqA, rec.B, rec.SeqB)
+		} else {
+			c.markPairDirty(key)
+		}
+		return
+	}
+}
+
+func (c *relationCore) retirePairRecord(ctx context.Context, key string, rec *relationPairRecord, rev uint64) {
+	if current, _, ok, err := c.pairAuthorityCurrent(ctx, key, rec); err == nil && ok && current != nil {
+		c.deletePairRecord(ctx, rec.A, rec.B, rev)
+		if rec.Outcome == "remove" {
+			c.retireRemovalOutbox(ctx, rec.A, rec.B, pairRecordGeneration(rec))
+		}
+	}
+}
+
+// retireRemovalOutbox drops the compatibility outbox for a pair generation
+// that is being retired by stale-content rejection. Without this a retry would
+// adopt the stale removal again and publish it.
+func (c *relationCore) retireRemovalOutbox(ctx context.Context, a, b string, generation uint64) {
+	rec, rev, ok, err := c.loadRemovalRecord(ctx, relationRemovalKey(a, b))
+	if err != nil || !ok {
+		return
+	}
+	if generation != 0 && rec.Generation != 0 && rec.Generation != generation {
+		return
+	}
+	c.deleteRemovalRecord(ctx, a, b, rev)
+}
+
+func (c *relationCore) endpointsLive(a, b string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, hasA := c.index[a]
+	_, hasB := c.index[b]
+	return hasA && hasB
+}
+
+// applyPairOutput writes/publishes one durable pair generation. The pair record
+// is the authority: every projection step is gated by it, and a losing writer
+// restores the current winner (even an unpublished winner) instead of exposing
+// stale KV or stream state.
 func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
 	// Capture the stream fence before checking either ledger. The server
 	// rejects an output if any link publication wins after this snapshot.
@@ -1559,72 +2123,30 @@ func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *rel
 	if err != nil {
 		return err
 	}
-	if rec.Outcome == "link" {
-		removal, removalRev, ok, err := c.loadRemovalRecord(ctx, relationRemovalKey(rec.A, rec.B))
-		if err != nil {
-			return err
-		}
-		if ok && removalRev > rev && removal.SeqA >= rec.SeqA && removal.SeqB >= rec.SeqB {
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
-			return nil
-		}
+	_, _, current, err := c.pairAuthorityCurrent(ctx, key, rec)
+	if err != nil {
+		return err
+	}
+	if !current {
+		c.projectAuthority(ctx, rec.A, rec.B)
+		return nil
 	}
 	switch rec.Outcome {
 	case "none":
 		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.retirePairRecord(ctx, key, rec, rev)
 			c.reschedule(rec.A)
 			c.reschedule(rec.B)
 			return nil
+		}
+		if c.linkExists(ctx, rec.A, rec.B) {
+			// A positive projection survived from an older generation. Clear it
+			// through this authoritative no-link generation.
+			return c.applyPairRemoval(ctx, key, rec, rev, last)
 		}
 		return c.markPairPublished(ctx, key, rec, rev)
 	case "remove":
-		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
-			c.reschedule(rec.A)
-			c.reschedule(rec.B)
-			return nil
-		}
-		a, b := live.SortPair(rec.A, rec.B)
-		tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
-		if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
-			return errors.New("relation: link tombstone KV write failed")
-		}
-		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
-			// A newer judgement landed while the tombstone was written.
-			// Restore its link if it is already published; drop this output.
-			if winner, _, ok, _ := c.loadPairRecord(ctx, key); ok && winner.Outcome == "link" && winner.Published && len(winner.Link) > 0 {
-				var link dorv1.Link
-				if proto.Unmarshal(winner.Link, &link) == nil {
-					live.PutLink(ctx, c.kv, &link)
-					link.A, link.B = live.SortPair(link.A, link.B)
-					c.mu.Lock()
-					c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
-					c.mu.Unlock()
-				}
-			}
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
-			c.reschedule(rec.A)
-			c.reschedule(rec.B)
-			return nil
-		}
-		if err := c.publishLinkFenced(ctx, tombstone, rec.SeqA, rec.SeqB, true, last, rev); err != nil {
-			c.restoreNewerPairLink(ctx, rec.A, rec.B)
-			if current, seqErr := c.lastLinkSequence(ctx); seqErr == nil && current != last {
-				c.reschedule(rec.A)
-				c.reschedule(rec.B)
-				return nil
-			}
-			return err
-		}
-		c.mu.Lock()
-		delete(c.links, pairKey(a, b))
-		c.mu.Unlock()
-		if c.sink != nil {
-			c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
-		}
-		c.invalidateLinkText(ctx, a, b)
-		return c.markPairPublished(ctx, key, rec, rev)
+		return c.applyPairRemoval(ctx, key, rec, rev, last)
 	case "link":
 		var link dorv1.Link
 		if err := proto.Unmarshal(rec.Link, &link); err != nil {
@@ -1632,7 +2154,7 @@ func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *rel
 		}
 		link.A, link.B = live.SortPair(link.A, link.B)
 		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.retirePairRecord(ctx, key, rec, rev)
 			c.reschedule(rec.A)
 			c.reschedule(rec.B)
 			return nil
@@ -1640,35 +2162,198 @@ func (c *relationCore) applyPairOutput(ctx context.Context, key string, rec *rel
 		if c.kv != nil && !live.PutLink(ctx, c.kv, &link) {
 			return errors.New("relation: link KV write failed")
 		}
-		// Re-check after the write: a story update may have landed while the
-		// KV write was in flight.
+		// Re-check after the write: a newer generation may have projected while
+		// the KV write was in flight.
+		_, _, current, authErr := c.pairAuthorityCurrent(ctx, key, rec)
+		if authErr != nil {
+			return authErr
+		}
+		if !current {
+			c.projectAuthority(ctx, rec.A, rec.B)
+			return nil
+		}
 		if !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
 			c.rollbackLink(ctx, &link)
-			c.deletePairRecord(ctx, rec.A, rec.B, rev)
+			c.retirePairRecord(ctx, key, rec, rev)
 			c.reschedule(rec.A)
 			c.reschedule(rec.B)
 			return nil
 		}
-		if err := c.publishLinkFenced(ctx, &link, rec.SeqA, rec.SeqB, false, last, rev); err != nil {
-			c.restoreNewerPairLink(ctx, rec.A, rec.B)
+		if err := c.publishLinkFenced(ctx, &link, rec.SeqA, rec.SeqB, false, last, pairRecordGeneration(rec)); err != nil {
+			c.projectAuthority(ctx, rec.A, rec.B)
+			if current, seqErr := c.lastLinkSequence(ctx); seqErr == nil && current != last {
+				c.reschedule(rec.A)
+				c.reschedule(rec.B)
+				return nil
+			}
 			return err
 		}
+		if _, _, still, authErr := c.pairAuthorityCurrent(ctx, key, rec); authErr != nil {
+			return authErr
+		} else if !still {
+			c.projectAuthority(ctx, rec.A, rec.B)
+			return nil
+		}
+		enqueued := true
+		if c.sink != nil {
+			enqueued = c.sink.EnqueueLink(relationLinkSinkRecord(&link, pairRecordGeneration(rec)))
+		}
+		// The sink may block or fail while a newer generation completes. Never
+		// mark this generation published over stale SQL state; repair from the
+		// current authority instead.
+		if _, _, still, authErr := c.pairAuthorityCurrent(ctx, key, rec); authErr != nil {
+			return authErr
+		} else if !still {
+			c.repairStaleSink(ctx, rec.A, rec.B)
+			return nil
+		}
+		if !enqueued {
+			return errors.New("relation: link sink enqueue rejected")
+		}
 		c.mu.Lock()
-		c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
+		c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength), generation: pairRecordGeneration(rec)}
 		c.mu.Unlock()
 		c.invalidateLinkText(ctx, link.A, link.B)
-		if c.sink != nil {
-			c.sink.EnqueueLink(store.LinkRecord{
-				A: link.A, B: link.B, Type: int16(link.Type), Direction: int16(link.Dir),
-				Confidence: link.Confidence, Strength: link.Strength, Unverified: link.Unverified,
-				UpdatedAt: time.Unix(link.UpdatedAt, 0).UTC(),
-				DecaysAt:  time.Unix(link.UpdatedAt, 0).UTC().Add(48 * time.Hour),
-			})
-		}
 		return c.markPairPublished(ctx, key, rec, rev)
 	default:
 		return fmt.Errorf("relation: unknown pair outcome %q", rec.Outcome)
 	}
+}
+
+// applyPairRemoval projects a remove/none generation as a zero-strength
+// tombstone and a stream removal. Every exposure is gated by the authority.
+func (c *relationCore) applyPairRemoval(ctx context.Context, key string, rec *relationPairRecord, rev, last uint64) error {
+	a, b := live.SortPair(rec.A, rec.B)
+	liveEndpoints := c.endpointsLive(a, b)
+	if liveEndpoints && !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+		c.retirePairRecord(ctx, key, rec, rev)
+		c.reschedule(rec.A)
+		c.reschedule(rec.B)
+		return nil
+	}
+	var previous *dorv1.Link
+	if c.kv != nil {
+		previous, _ = live.LoadLink(ctx, c.kv, a, b)
+	}
+	tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
+	if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
+		return errors.New("relation: link tombstone KV write failed")
+	}
+	_, _, current, err := c.pairAuthorityCurrent(ctx, key, rec)
+	if err != nil {
+		return err
+	}
+	if !current {
+		c.projectAuthority(ctx, a, b)
+		return nil
+	}
+	if liveEndpoints && !c.seqsCurrent(ctx, rec.A, rec.SeqA, rec.B, rec.SeqB) {
+		// Content changed while the tombstone was in flight. Do not let the
+		// removal publish or survive as a retryable outbox; restore whatever
+		// link was projected before this stale generation and rejudge.
+		if c.kv != nil {
+			if previous != nil && (previous.Strength > 0 || previous.Confidence > 0) {
+				live.PutLink(ctx, c.kv, previous)
+			} else {
+				_ = c.kv.Delete(ctx, live.LinkKey(a, b))
+			}
+		}
+		c.retirePairRecord(ctx, key, rec, rev)
+		c.reschedule(rec.A)
+		c.reschedule(rec.B)
+		return nil
+	}
+	if err := c.publishLinkFenced(ctx, tombstone, rec.SeqA, rec.SeqB, true, last, pairRecordGeneration(rec)); err != nil {
+		c.projectAuthority(ctx, a, b)
+		if current, seqErr := c.lastLinkSequence(ctx); seqErr == nil && current != last {
+			c.reschedule(rec.A)
+			c.reschedule(rec.B)
+			return nil
+		}
+		return err
+	}
+	enqueued := true
+	if c.sink != nil {
+		enqueued = c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true, Generation: pairRecordGeneration(rec)})
+	}
+	if _, _, still, authErr := c.pairAuthorityCurrent(ctx, key, rec); authErr != nil {
+		return authErr
+	} else if !still {
+		c.repairStaleSink(ctx, a, b)
+		return nil
+	}
+	if !enqueued {
+		return errors.New("relation: removal sink enqueue rejected")
+	}
+	c.dropLocalLink(a, b)
+	c.invalidateLinkText(ctx, a, b)
+	return c.markPairPublished(ctx, key, rec, rev)
+}
+
+func relationLinkSinkRecord(link *dorv1.Link, generation uint64) store.LinkRecord {
+	return store.LinkRecord{
+		A: link.A, B: link.B, Type: int16(link.Type), Direction: int16(link.Dir),
+		Confidence: link.Confidence, Strength: link.Strength, Unverified: link.Unverified,
+		UpdatedAt:  time.Unix(link.UpdatedAt, 0).UTC(),
+		DecaysAt:   time.Unix(link.UpdatedAt, 0).UTC().Add(48 * time.Hour),
+		Generation: generation,
+	}
+}
+
+// enqueueAuthorityProjection mirrors the current durable winner into the sink.
+// It is used after a stale generation's sink completed and may have overwritten
+// the newer SQL projection out of order.
+func (c *relationCore) enqueueAuthorityProjection(ctx context.Context, a, b string) bool {
+	if c.sink == nil {
+		return true
+	}
+	a, b = live.SortPair(a, b)
+	rec, _, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if err != nil {
+		return false
+	}
+	if !ok {
+		if removal, _, removed, removalErr := c.loadRemovalRecord(ctx, relationRemovalKey(a, b)); removalErr == nil && removed && removal.Published {
+			return c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true, Generation: removalRecordGeneration(removal)})
+		}
+		return true
+	}
+	switch rec.Outcome {
+	case "link":
+		if len(rec.Link) == 0 {
+			return false
+		}
+		var link dorv1.Link
+		if proto.Unmarshal(rec.Link, &link) != nil {
+			return false
+		}
+		link.A, link.B = live.SortPair(link.A, link.B)
+		return c.sink.EnqueueLink(relationLinkSinkRecord(&link, pairRecordGeneration(rec)))
+	case "remove", "none":
+		return c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true, Generation: pairRecordGeneration(rec)})
+	default:
+		return false
+	}
+}
+
+// repairStaleSink restores KV from the current authority and then re-enqueues
+// the current SQL projection behind any stale record that just completed. If
+// the sink rejects the repair, make a published winner a retryable generation
+// instead of leaving the database permanently behind.
+func (c *relationCore) repairStaleSink(ctx context.Context, a, b string) {
+	c.projectAuthority(ctx, a, b)
+	if c.sink == nil {
+		return
+	}
+	if c.enqueueAuthorityProjection(ctx, a, b) {
+		return
+	}
+	key := relationPairKey(a, b)
+	if rec, _, ok, err := c.loadPairRecord(ctx, key); err == nil && ok && rec.Published {
+		c.bumpPairForRepair(ctx, key, rec)
+		return
+	}
+	c.markPairDirty(key)
 }
 
 func (c *relationCore) rollbackLink(ctx context.Context, link *dorv1.Link) {
@@ -1687,22 +2372,9 @@ func (c *relationCore) rollbackLink(ctx context.Context, link *dorv1.Link) {
 	c.mu.Unlock()
 }
 
-func (c *relationCore) publishLink(ctx context.Context, link *dorv1.Link, seqA, seqB uint64, remove bool) error {
-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(link)
-	if err != nil {
-		return err
-	}
-	msgID := pairMessageID(link.A, link.B, seqA, seqB, remove)
-	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(msgID)); err != nil {
-		return fmt.Errorf("relation: publish link: %w", err)
-	}
-	return nil
-}
-
-// lastLinkSequence and the expected-subject-sequence header serialize link
-// output against other relation instances at the JetStream publish boundary.
+// lastLinkSequence and the expected-subject-sequence header reject a stream
+// message once a later link generation has published. The header is a second
+// line of defence behind the durable pair generation check, not the authority.
 func (c *relationCore) lastLinkSequence(ctx context.Context) (uint64, error) {
 	stream, err := c.bus.StreamNamed(ctx, bus.StreamStory)
 	if err != nil {
@@ -1725,45 +2397,62 @@ func (c *relationCore) publishLinkFenced(ctx context.Context, link *dorv1.Link, 
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	id := pairMessageID(link.A, link.B, seqA, seqB, remove)
-	if remove {
-		id = fmt.Sprintf("%s:%d", id, generation)
-	}
 	_, err = c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data,
-		bus.WithMsgID(id),
+		bus.WithMsgID(pairMessageID(link.A, link.B, seqA, seqB, remove, generation)),
 		bus.WithHeaders(map[string][]string{"Nats-Expected-Last-Subject-Sequence": {fmt.Sprint(last)}}))
 	return err
 }
 
-func pairMessageID(a, b string, seqA, seqB uint64, remove bool) string {
+func pairMessageID(a, b string, seqA, seqB uint64, remove bool, generation uint64) string {
 	a, b = live.SortPair(a, b)
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", a, b, seqA, seqB)))
 	suffix := ""
 	if remove {
 		suffix = ":rm"
 	}
-	return "link:" + a + "." + b + ":" + hex.EncodeToString(sum[:8]) + suffix
+	return fmt.Sprintf("link:%s.%s:%s:g%d%s", a, b, hex.EncodeToString(sum[:8]), generation, suffix)
 }
 
 func (c *relationCore) markPairPublished(ctx context.Context, key string, rec *relationPairRecord, rev uint64) error {
-	rec.Published = true
+	next := *rec
+	next.Published = true
 	if c.kv == nil {
-		c.rememberPair(key, rec)
+		c.rememberPair(key, &next)
+		c.cacheJudged(rec.A, rec.SeqA, rec.B, rec.SeqB)
 		return nil
 	}
-	data, err := json.Marshal(rec)
+	data, err := json.Marshal(&next)
 	if err != nil {
 		return err
 	}
-	// The record may have been superseded while the output was in flight.
-	if _, err := c.kv.Update(ctx, key, data, rev); err != nil {
+	// CAS on the exact generation revision. A newer generation must never be
+	// marked published by an older projection.
+	updated, err := c.kv.Update(ctx, key, data, rev)
+	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
 			return nil
 		}
 		return err
 	}
-	c.rememberPair(key, rec)
+	c.rememberPair(key, &next)
 	c.cacheJudged(rec.A, rec.SeqA, rec.B, rec.SeqB)
+	if rec.Outcome == "remove" || rec.Outcome == "none" {
+		c.markRemovalOutboxPublished(ctx, rec.A, rec.B, pairRecordGeneration(rec))
+	}
+	a, b := live.SortPair(rec.A, rec.B)
+	if next.Outcome != "remove" {
+		c.clearAbandoned(a, b)
+		return nil
+	}
+	if c.pairAbandoned(a, b) && !c.endpointsLive(a, b) {
+		// The endpoints were evicted and the tombstone is durable. Retaining
+		// pair state for an abandoned pair would grow without bound.
+		c.deletePairRecord(ctx, a, b, updated)
+		if out, outRev, ok, loadErr := c.loadRemovalRecord(ctx, relationRemovalKey(a, b)); loadErr == nil && ok && out.Published {
+			c.deleteRemovalRecord(ctx, a, b, outRev)
+		}
+		c.clearAbandoned(a, b)
+	}
 	return nil
 }
 
@@ -1777,7 +2466,13 @@ func (c *relationCore) retryOutputs(ctx context.Context) {
 	c.mu.Unlock()
 	for _, key := range dirty {
 		rec, rev, ok, err := c.loadPairRecord(ctx, key)
-		if err != nil || !ok || rec.Published {
+		if err != nil {
+			continue
+		}
+		if !ok || rec.Published {
+			c.mu.Lock()
+			delete(c.dirty, key)
+			c.mu.Unlock()
 			continue
 		}
 		if err := c.applyPairOutput(ctx, key, rec, rev); err != nil {
@@ -1787,56 +2482,27 @@ func (c *relationCore) retryOutputs(ctx context.Context) {
 	c.retryRemovals(ctx)
 }
 
-// upsertLinkLocked persists a decayed link. The caller holds the pair lock.
-func (c *relationCore) upsertLinkLocked(ctx context.Context, link *dorv1.Link) {
-	if link == nil || link.A == "" || link.B == "" {
-		return
-	}
-	link.A, link.B = live.SortPair(link.A, link.B)
-	if link.UpdatedAt == 0 {
-		link.UpdatedAt = c.now().Unix()
-	}
-	if c.kv != nil {
-		live.PutLink(ctx, c.kv, link)
-	}
-	c.mu.Lock()
-	c.links[pairKey(link.A, link.B)] = &relationLink{link: link, publishedStrength: float64(link.Strength)}
-	c.mu.Unlock()
-	c.invalidateLinkText(ctx, link.A, link.B)
-	if c.sink != nil {
-		c.sink.EnqueueLink(store.LinkRecord{
-			A: link.A, B: link.B, Type: int16(link.Type), Direction: int16(link.Dir),
-			Confidence: link.Confidence, Strength: link.Strength, Unverified: link.Unverified,
-			UpdatedAt: time.Unix(link.UpdatedAt, 0).UTC(),
-			DecaysAt:  time.Unix(link.UpdatedAt, 0).UTC().Add(48 * time.Hour),
-		})
-	}
-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(link)
-	if err != nil {
-		return
-	}
-	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := c.bus.Publish(pubCtx, bus.SubjectLinkChanged, data, bus.WithMsgID(linkMessageID(link))); err != nil {
-		c.log.Debug("relation: decay publish deferred", "a", link.A, "b", link.B, "err", err)
-	}
-}
-
-func linkMessageID(link *dorv1.Link) string {
-	return fmt.Sprintf("link:%s.%s:%016x", link.A, link.B, live.LinkRevision(link))
-}
-
-// removeLinkLocked writes a decay/eviction tombstone. The caller holds the
-// pair lock. The durable judgement ledger entry is dropped with the link.
-// removeLinkLocked enqueues a decay/eviction tombstone in the durable removal
-// outbox. The link stays locally until the removal is published, so a failed
-// publication remains retryable.
+// removeLinkLocked removes a link without a base-generation fence. It is used
+// for endpoint eviction, where the link content itself may no longer be
+// trusted.
 func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
+	c.removeLinkFenced(ctx, a, b, 0)
+}
+
+// removeLinkFenced commits a lifecycle/decay removal as a pair generation. A
+// non-zero base revision requires the current durable authority to still be
+// exactly that link; a stale decay cannot remove a newer judgement.
+func (c *relationCore) removeLinkFenced(ctx context.Context, a, b string, baseRevision uint64) {
+	c.removeLinkFencedGen(ctx, a, b, baseRevision, 0)
+}
+
+func (c *relationCore) removeLinkFencedGen(ctx context.Context, a, b string, baseRevision, baseGeneration uint64) {
 	a, b = live.SortPair(a, b)
 	key := pairKey(a, b)
 	c.mu.Lock()
 	existing := c.links[key]
 	c.mu.Unlock()
+	var kvLink *dorv1.Link
 	if existing == nil {
 		if c.kv == nil {
 			return
@@ -1845,35 +2511,112 @@ func (c *relationCore) removeLinkLocked(ctx context.Context, a, b string) {
 		if !ok || (link.Strength <= 0 && link.Confidence <= 0) {
 			return
 		}
+		kvLink = link
+	} else if baseRevision != 0 && c.kv != nil {
+		kvLink, _ = live.LoadLink(ctx, c.kv, a, b)
 	}
-	seqA, seqB := c.currentSeqs(ctx, a, b)
-	rkey := relationRemovalKey(a, b)
-	rec, rev, ok, err := c.loadRemovalRecord(ctx, rkey)
+	pkey := relationPairKey(a, b)
+	pair, pairRev, pairOK, err := c.loadPairRecord(ctx, pkey)
 	if err != nil {
 		return
 	}
-	if ok && rec.Published && rec.SeqA == seqA && rec.SeqB == seqB {
-		_, pairRev, pairOK, _ := c.loadPairRecord(ctx, relationPairKey(a, b))
-		if !pairOK || pairRev <= rev {
-			c.dropLocalLink(a, b)
+	if baseGeneration != 0 {
+		if !pairOK || pairRecordGeneration(pair) != baseGeneration {
+			return
+		}
+	} else if baseRevision != 0 {
+		if pairOK {
+			if pair.Outcome != "link" || relationLinkRevisionBytes(pair.Link) != baseRevision {
+				return
+			}
+		} else if kvLink != nil {
+			if live.LinkRevision(kvLink) != baseRevision {
+				return
+			}
+		} else if existing == nil || existing.link == nil || live.LinkRevision(existing.link) != baseRevision {
 			return
 		}
 	}
-	if ok && (rec.SeqA > seqA || rec.SeqB > seqB) {
+	seqA, seqB := c.currentSeqs(ctx, a, b)
+	if pairOK && (pair.SeqA > seqA || pair.SeqB > seqB) {
 		return
 	}
-	next := &relationRemovalRecord{A: a, B: b, SeqA: seqA, SeqB: seqB}
-	rev, stored, err := c.storeRemovalRecord(ctx, rkey, next, rev, ok)
-	if err != nil {
-		return
+	expectedGeneration := uint64(0)
+	if baseGeneration != 0 {
+		expectedGeneration = baseGeneration
+	} else if baseRevision != 0 && pairOK {
+		expectedGeneration = pairRecordGeneration(pair)
 	}
-	if !stored {
-		if winner, winnerRev, ok, loadErr := c.loadRemovalRecord(ctx, rkey); loadErr == nil && ok && !winner.Published {
-			_ = c.applyRemovalOutput(ctx, rkey, winner, winnerRev)
+	if pairOK && pair.Outcome == "remove" && pair.SeqA == seqA && pair.SeqB == seqB {
+		if expectedGeneration != 0 && pairRecordGeneration(pair) != expectedGeneration {
+			return
+		}
+		c.mirrorRemovalOutbox(ctx, a, b, seqA, seqB, pairRecordGeneration(pair))
+		if pair.Published {
+			c.markRemovalOutboxPublished(ctx, a, b, pairRecordGeneration(pair))
+			c.dropLocalLink(a, b)
+			return
+		}
+		if err := c.applyPairOutput(ctx, pkey, pair, pairRev); err != nil {
+			c.log.Debug("relation: removal projection deferred", "a", a, "b", b, "err", err)
 		}
 		return
 	}
-	_ = c.applyRemovalOutput(ctx, rkey, next, rev)
+	next, rev, stored, err := c.storeRemovalAuthority(ctx, pkey, a, b, seqA, seqB, expectedGeneration)
+	if err != nil {
+		c.log.Debug("relation: removal authority deferred", "a", a, "b", b, "err", err)
+		return
+	}
+	if !stored {
+		current, currentRev, ok, loadErr := c.loadPairRecord(ctx, pkey)
+		if loadErr != nil || !ok {
+			return
+		}
+		if current.Outcome != "remove" {
+			return
+		}
+		c.mirrorRemovalOutbox(ctx, a, b, current.SeqA, current.SeqB, pairRecordGeneration(current))
+		if !current.Published {
+			_ = c.applyPairOutput(ctx, pkey, current, currentRev)
+		} else {
+			c.markRemovalOutboxPublished(ctx, a, b, pairRecordGeneration(current))
+			c.dropLocalLink(a, b)
+		}
+		return
+	}
+	c.mirrorRemovalOutbox(ctx, a, b, seqA, seqB, pairRecordGeneration(next))
+	if err := c.applyPairOutput(ctx, pkey, next, rev); err != nil {
+		c.log.Debug("relation: removal projection deferred", "a", a, "b", b, "err", err)
+	}
+}
+
+// mirrorRemovalOutbox keeps the compatibility removal record aligned with the
+// authoritative pair generation. It is never allowed to outrun the pair.
+func (c *relationCore) mirrorRemovalOutbox(ctx context.Context, a, b string, seqA, seqB, generation uint64) {
+	rkey := relationRemovalKey(a, b)
+	old, rev, ok, err := c.loadRemovalRecord(ctx, rkey)
+	if err != nil {
+		return
+	}
+	if ok {
+		oldGen := removalRecordGeneration(old)
+		if oldGen > generation {
+			return
+		}
+		if oldGen == generation && old.Published {
+			c.mu.Lock()
+			delete(c.dirtyRem, rkey)
+			c.mu.Unlock()
+			return
+		}
+	}
+	next := &relationRemovalRecord{A: a, B: b, SeqA: seqA, SeqB: seqB, Generation: generation}
+	if ok && old.Published && removalRecordGeneration(old) == generation {
+		next.Published = true
+	}
+	if _, stored, err := c.storeRemovalRecord(ctx, rkey, next, rev, ok); err != nil || !stored {
+		return
+	}
 }
 
 func (c *relationCore) loadRemovalRecord(ctx context.Context, key string) (*relationRemovalRecord, uint64, bool, error) {
@@ -1936,7 +2679,14 @@ func (c *relationCore) storeRemovalRecord(ctx context.Context, key string, rec *
 		}
 		var current relationRemovalRecord
 		if json.Unmarshal(entry.Value(), &current) == nil {
-			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB || (current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB) {
+			if current.SeqA > rec.SeqA || current.SeqB > rec.SeqB {
+				return entry.Revision(), false, nil
+			}
+			if current.Published && current.SeqA == rec.SeqA && current.SeqB == rec.SeqB &&
+				removalRecordGeneration(&current) >= removalRecordGeneration(rec) {
+				return entry.Revision(), false, nil
+			}
+			if removalRecordGeneration(&current) > removalRecordGeneration(rec) {
 				return entry.Revision(), false, nil
 			}
 		}
@@ -1957,84 +2707,134 @@ func (c *relationCore) rememberRemoval(key string, rec *relationRemovalRecord) {
 	c.mu.Unlock()
 }
 
+// applyRemovalOutput retries a removal outbox row. The pair record is the
+// authority; the outbox only requests/remembers a removal that the pair record
+// must also own. A stale outbox is discarded instead of being projected.
 func (c *relationCore) applyRemovalOutput(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64) error {
-	last, err := c.lastLinkSequence(ctx)
+	a, b := live.SortPair(rec.A, rec.B)
+	pkey := relationPairKey(a, b)
+	pair, pairRev, ok, err := c.loadPairRecord(ctx, pkey)
 	if err != nil {
 		return err
 	}
-	a, b := live.SortPair(rec.A, rec.B)
-	c.mu.Lock()
-	_, hasA := c.index[a]
-	_, hasB := c.index[b]
-	c.mu.Unlock()
-	endpointsLive := hasA && hasB
-	if endpointsLive && !c.seqsCurrent(ctx, a, rec.SeqA, b, rec.SeqB) {
-		c.restoreNewerPairLink(ctx, a, b)
+	if !ok {
+		adopted, adoptedRev, _, err := c.adoptRemovalAuthority(ctx, pkey, rec)
+		if err != nil || adopted == nil {
+			return err
+		}
+		if adopted.Published {
+			c.markRemovalOutboxPublished(ctx, a, b, pairRecordGeneration(adopted))
+			return nil
+		}
+		return c.applyPairOutput(ctx, pkey, adopted, adoptedRev)
+	}
+	if pair.Outcome != "remove" {
+		if pair.Outcome == "link" && rec.SeqA >= pair.SeqA && rec.SeqB >= pair.SeqB {
+			// Legacy outbox from before removal intent lived in the pair
+			// authority. A same-or-newer-input removal supersedes the link.
+			next, nextRev, stored, adoptErr := c.storeRemovalAuthority(ctx, pkey, a, b, rec.SeqA, rec.SeqB, 0)
+			if adoptErr != nil {
+				return adoptErr
+			}
+			if stored {
+				return c.applyPairOutput(ctx, pkey, next, nextRev)
+			}
+			current, currentRev, ok, loadErr := c.loadPairRecord(ctx, pkey)
+			if loadErr != nil || !ok {
+				return loadErr
+			}
+			if current.Outcome != "remove" {
+				c.deleteRemovalRecord(ctx, a, b, rev)
+				return nil
+			}
+			return c.applyPairOutput(ctx, pkey, current, currentRev)
+		}
+		// A genuinely newer judged link/none owns the pair. This outbox is
+		// obsolete.
 		c.deleteRemovalRecord(ctx, a, b, rev)
-		c.reschedule(a)
-		c.reschedule(b)
+		if !pair.Published {
+			return c.applyPairOutput(ctx, pkey, pair, pairRev)
+		}
 		return nil
 	}
-	if winner, _, ok, _ := c.loadPairRecord(ctx, relationPairKey(a, b)); ok && winner.Outcome == "link" && winner.Published &&
-		(winner.SeqA > rec.SeqA || winner.SeqB > rec.SeqB) {
-		// A newer judgement owns the link. Drop this lifecycle removal.
+	pairGen, outGen := pairRecordGeneration(pair), removalRecordGeneration(rec)
+	if outGen > pairGen {
 		c.deleteRemovalRecord(ctx, a, b, rev)
+		if !pair.Published {
+			return c.applyPairOutput(ctx, pkey, pair, pairRev)
+		}
 		return nil
 	}
-	tombstone := &dorv1.Link{A: a, B: b, UpdatedAt: c.now().Unix()}
-	if c.kv != nil && !live.PutLink(ctx, c.kv, tombstone) {
-		return errors.New("relation: removal tombstone KV write failed")
+	if outGen < pairGen {
+		c.mirrorRemovalOutbox(ctx, a, b, pair.SeqA, pair.SeqB, pairGen)
 	}
-	if endpointsLive && !c.seqsCurrent(ctx, a, rec.SeqA, b, rec.SeqB) {
-		c.restoreNewerPairLink(ctx, a, b)
-		c.deleteRemovalRecord(ctx, a, b, rev)
-		c.reschedule(a)
-		c.reschedule(b)
+	if pair.Published {
+		c.markRemovalOutboxPublished(ctx, a, b, pairGen)
 		return nil
 	}
-	if err := c.publishLinkFenced(ctx, tombstone, rec.SeqA, rec.SeqB, true, last, rev); err != nil {
-		c.restoreNewerPairLink(ctx, a, b)
-		return err
-	}
-	c.dropLocalLink(a, b)
-	if c.sink != nil {
-		c.sink.EnqueueLink(store.LinkRecord{A: a, B: b, Remove: true})
-	}
-	c.invalidateLinkText(ctx, a, b)
-	c.markRemovalPublished(ctx, key, rec, rev)
-	return nil
+	return c.applyPairOutput(ctx, pkey, pair, pairRev)
 }
 
-func (c *relationCore) restoreNewerPairLink(ctx context.Context, a, b string) {
+// adoptRemovalAuthority upgrades a legacy removal outbox (written before every
+// pair had a pair record) into the single pair authority.
+func (c *relationCore) adoptRemovalAuthority(ctx context.Context, key string, rec *relationRemovalRecord) (*relationPairRecord, uint64, bool, error) {
+	next := &relationPairRecord{
+		A: rec.A, B: rec.B, SeqA: rec.SeqA, SeqB: rec.SeqB,
+		Outcome: "remove", Generation: removalRecordGeneration(rec), Published: rec.Published,
+	}
 	if c.kv == nil {
+		c.rememberPair(key, next)
+		return next, 0, true, nil
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if created, err := c.kv.Create(ctx, key, raw); err == nil {
+		c.rememberPair(key, next)
+		return next, created, true, nil
+	}
+	current, rev, exists, err := c.loadPairRecord(ctx, key)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if !exists {
+		return nil, 0, false, nil
+	}
+	return current, rev, false, nil
+}
+
+// markRemovalOutboxPublished mirrors a completed removal generation. It never
+// marks an outbox generation that the pair authority has already superseded.
+func (c *relationCore) markRemovalOutboxPublished(ctx context.Context, a, b string, generation uint64) {
+	rkey := relationRemovalKey(a, b)
+	rec, rev, ok, err := c.loadRemovalRecord(ctx, rkey)
+	if err != nil || !ok {
 		return
 	}
-	rec, pairRev, ok, err := c.loadPairRecord(ctx, relationPairKey(a, b))
+	if rec.Published {
+		c.mu.Lock()
+		delete(c.dirtyRem, rkey)
+		c.mu.Unlock()
+		return
+	}
+	if rec.Generation != 0 && generation != 0 && rec.Generation != generation {
+		return
+	}
+	next := *rec
+	next.Published = true
+	if c.kv == nil {
+		c.rememberRemoval(rkey, &next)
+		return
+	}
+	data, err := json.Marshal(&next)
 	if err != nil {
 		return
 	}
-	removal, removalRev, removed, removalErr := c.loadRemovalRecord(ctx, relationRemovalKey(a, b))
-	if removalErr != nil {
+	if _, err := c.kv.Update(ctx, rkey, data, rev); err != nil {
 		return
 	}
-	if removed && removal.Published && (!ok || (removalRev > pairRev && removal.SeqA >= rec.SeqA && removal.SeqB >= rec.SeqB)) {
-		x, y := live.SortPair(a, b)
-		live.PutLink(ctx, c.kv, &dorv1.Link{A: x, B: y, UpdatedAt: c.now().Unix()})
-		c.dropLocalLink(a, b)
-		return
-	}
-	if !ok || rec.Outcome != "link" || !rec.Published || len(rec.Link) == 0 {
-		return
-	}
-	var link dorv1.Link
-	if proto.Unmarshal(rec.Link, &link) != nil {
-		return
-	}
-	link.A, link.B = live.SortPair(link.A, link.B)
-	live.PutLink(ctx, c.kv, &link)
-	c.mu.Lock()
-	c.links[pairKey(link.A, link.B)] = &relationLink{link: &link, publishedStrength: float64(link.Strength)}
-	c.mu.Unlock()
+	c.rememberRemoval(rkey, &next)
 }
 
 func (c *relationCore) dropLocalLink(a, b string) {
@@ -2060,22 +2860,6 @@ func (c *relationCore) deleteRemovalRecord(ctx context.Context, a, b string, rev
 	_ = c.kv.Delete(ctx, key)
 }
 
-func (c *relationCore) markRemovalPublished(ctx context.Context, key string, rec *relationRemovalRecord, rev uint64) {
-	rec.Published = true
-	if c.kv == nil {
-		c.rememberRemoval(key, rec)
-		return
-	}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return
-	}
-	if _, err := c.kv.Update(ctx, key, data, rev); err != nil {
-		return
-	}
-	c.rememberRemoval(key, rec)
-}
-
 func (c *relationCore) retryRemovals(ctx context.Context) {
 	c.mu.Lock()
 	dirty := make([]string, 0, len(c.dirtyRem))
@@ -2085,7 +2869,13 @@ func (c *relationCore) retryRemovals(ctx context.Context) {
 	c.mu.Unlock()
 	for _, key := range dirty {
 		rec, rev, ok, err := c.loadRemovalRecord(ctx, key)
-		if err != nil || !ok || rec.Published {
+		if err != nil || !ok {
+			continue
+		}
+		if rec.Published {
+			c.mu.Lock()
+			delete(c.dirtyRem, key)
+			c.mu.Unlock()
 			continue
 		}
 		if err := c.applyRemovalOutput(ctx, key, rec, rev); err != nil {

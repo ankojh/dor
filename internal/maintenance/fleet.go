@@ -336,7 +336,10 @@ func writerWork(w WriterCounters) int64 {
 		n++
 	}
 	n += w.Flushing
-	if w.DroppedQueue > 0 || w.DroppedBatch > 0 || w.DroppedStories > 0 || w.Errors > 0 {
+	// Errors is cumulative diagnostics: a transient error recovered by retry
+	// leaves it non-zero with no unresolved work. Only terminal drops keep the
+	// barrier blocked.
+	if w.DroppedQueue > 0 || w.DroppedBatch > 0 || w.DroppedStories > 0 {
 		n++
 	}
 	return n

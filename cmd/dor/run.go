@@ -310,7 +310,7 @@ func runCommand(args []string) error {
 				logger.Warn("postgres migrations failed; durable writes disabled, pipeline continues", "err", migrateErr)
 				st.Close()
 			} else {
-				w, werr := store.NewWriter(st, store.WriterOptions{Logger: logger})
+				w, werr := store.NewWriter(st, newDurableWriterOptions(logger))
 				if werr != nil {
 					logger.Warn("postgres writer unavailable; durable writes disabled", "err", werr)
 					st.Close()
@@ -606,6 +606,16 @@ func runCommand(args []string) error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// newDurableWriterOptions starts from the documented production defaults and
+// overrides only the logger, so MaxRetries remains the documented three. A
+// zero-value WriterOptions intentionally means no retries for explicit
+// no-retry callers and must not be used as the production construction.
+func newDurableWriterOptions(logger *slog.Logger) store.WriterOptions {
+	opts := store.DefaultWriterOptions()
+	opts.Logger = logger
+	return opts
 }
 
 func adminHandler(b *bus.Bus, runner *agents.Runner, metrics *agents.Metrics, runtime *maintenance.Runtime, opsHTTP ...*ops.HTTP) http.Handler {

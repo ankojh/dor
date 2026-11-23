@@ -278,8 +278,8 @@ func quiesceReasons(report *DrainReport) []string {
 		if report.Writer.Flushing > 0 {
 			reasons = append(reasons, "DB writer is currently flushing")
 		}
-		if report.Writer.DroppedQueue > 0 || report.Writer.DroppedBatch > 0 || report.Writer.DroppedStories > 0 || report.Writer.Errors > 0 {
-			reasons = append(reasons, "DB writer reported drops or errors")
+		if report.Writer.DroppedQueue > 0 || report.Writer.DroppedBatch > 0 || report.Writer.DroppedStories > 0 {
+			reasons = append(reasons, "DB writer reported terminal drops")
 		}
 	}
 	return reasons

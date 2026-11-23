@@ -14,7 +14,10 @@ type WriterOptions struct {
 	QueueSize     int
 	BatchSize     int
 	FlushInterval time.Duration
-	MaxRetries    int
+	// MaxRetries is the number of retries after the first attempt. Zero means
+	// no retries; callers that want the documented production behavior must
+	// start from DefaultWriterOptions (and may override Logger).
+	MaxRetries int
 	// WriteTimeout bounds one batch attempt. Default 10 s.
 	WriteTimeout time.Duration
 	Logger       *slog.Logger
@@ -388,19 +391,25 @@ func (w *Writer) loop() {
 	var linkTexts []LinkTextRecord
 	var enrichments []ArticleEnrichmentRecord
 	var pending []pendingEnrichment
-	flush := func() {
-		if len(buffer) > 0 {
-			n := len(buffer)
-			w.flush(buffer)
-			buffer = buffer[:0]
-			w.unsettled.Add(-int64(n))
+	flushArticles := func() {
+		if len(buffer) == 0 {
+			return
 		}
-		if len(stories) > 0 {
-			n := len(stories)
-			w.flushStories(stories)
-			stories = stories[:0]
-			w.unsettled.Add(-int64(n))
+		n := len(buffer)
+		w.flush(buffer)
+		buffer = buffer[:0]
+		w.settle(n)
+	}
+	flushStoryUpdates := func() {
+		if len(stories) == 0 {
+			return
 		}
+		n := len(stories)
+		w.flushStories(stories)
+		stories = stories[:0]
+		w.settle(n)
+	}
+	flushAux := func() {
 		auxCount := len(links) + len(storyTexts) + len(linkTexts) + len(enrichments)
 		if len(links) > 0 {
 			w.flushLinks(links)
@@ -418,10 +427,13 @@ func (w *Writer) loop() {
 			pending = append(pending, w.flushEnrichments(enrichments)...)
 			enrichments = nil
 		}
-		if auxCount > 0 {
-			w.unsettled.Add(-int64(auxCount))
-		}
 		w.pendingEnrich.Store(int64(len(pending)))
+		w.settle(auxCount)
+	}
+	flush := func() {
+		flushArticles()
+		flushStoryUpdates()
+		flushAux()
 	}
 	articlesOpen, storiesOpen, auxOpen := true, true, true
 	articles := w.queue
@@ -437,8 +449,7 @@ func (w *Writer) loop() {
 			}
 			buffer = append(buffer, rec)
 			if len(buffer) >= w.opts.BatchSize {
-				w.flush(buffer)
-				buffer = buffer[:0]
+				flushArticles()
 			}
 		case rec, ok := <-storyUpdates:
 			if !ok {
@@ -448,8 +459,7 @@ func (w *Writer) loop() {
 			}
 			stories = append(stories, rec)
 			if len(stories) >= max(8, w.opts.BatchSize/4) {
-				w.flushStories(stories)
-				stories = stories[:0]
+				flushStoryUpdates()
 			}
 		case m, ok := <-aux:
 			if !ok {
@@ -468,7 +478,7 @@ func (w *Writer) loop() {
 				enrichments = append(enrichments, m.enrichment)
 			}
 			if len(links)+len(storyTexts)+len(linkTexts)+len(enrichments) >= w.opts.BatchSize {
-				flush()
+				flushAux()
 			}
 		case <-ticker.C:
 			flush()
@@ -479,6 +489,17 @@ func (w *Writer) loop() {
 	}
 	flush()
 	w.retryPending(true)
+}
+
+// settle removes n accepted records from the active-unsettled count exactly
+// once, after their flush attempt reached a terminal outcome. Threshold,
+// timer, auxiliary and shutdown paths all call this same helper so a full
+// batch cannot leak a permanently unsettled count.
+func (w *Writer) settle(n int) {
+	if n <= 0 {
+		return
+	}
+	w.unsettled.Add(-int64(n))
 }
 
 func (w *Writer) flushLinks(batch []LinkRecord) {

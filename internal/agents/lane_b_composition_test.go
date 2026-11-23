@@ -255,16 +255,29 @@ func TestRecheckStaleRemoveCannotPublishAfterNewerLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := collectSubject(t, b, bus.SubjectLinkChanged)
-	if len(bodies) < 2 {
-		t.Fatalf("expected both outputs: %d", len(bodies))
+	if len(bodies) != 1 {
+		t.Fatalf("link.changed outputs = %d, want only the winning newer link", len(bodies))
 	}
-	var last dorv1.Link
-	if err = proto.Unmarshal([]byte(bodies[len(bodies)-1]), &last); err != nil {
+	var published dorv1.Link
+	if err = proto.Unmarshal([]byte(bodies[0]), &published); err != nil {
 		t.Fatal(err)
 	}
+	if published.Strength <= 0 {
+		t.Fatalf("stale removal published a tombstone over the newer link: %+v", &published)
+	}
+	if published.A != a.Id || published.B != other.Id {
+		t.Fatalf("published link pair = %s/%s, want %s/%s", published.A, published.B, a.Id, other.Id)
+	}
 	rec := pairRecordForTest(t, ctx, b, a.Id, other.Id)
-	if last.Strength == 0 {
-		t.Fatalf("new published link followed by stale stream tombstone; final stream=%+v authoritative ledger=%+v", &last, rec)
+	if rec.Outcome != "link" || rec.SeqA != 30 || rec.SeqB != 20 || !rec.Published {
+		t.Fatalf("authoritative ledger = %+v, want published winning link at seq 30/20", rec)
+	}
+	kv, err := b.KV(ctx, bus.KVBucketLiveState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link, ok := live.LoadLink(ctx, kv, a.Id, other.Id); !ok || link.Strength <= 0 {
+		t.Fatalf("authoritative link state = %+v, ok=%v, want the winning newer link", link, ok)
 	}
 }
 

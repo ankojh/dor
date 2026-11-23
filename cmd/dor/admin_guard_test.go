@@ -30,7 +30,7 @@ func TestAdminHandlerOriginGuardProtectsOpsControl(t *testing.T) {
 
 	opsHTTP := ops.NewHTTP(nil, nil, log)
 	handler := httpguard.NewAllowlist([]string{"localhost:*", "127.0.0.1:*"}).Middleware(
-		adminHandler(b, runner, agents.NewMetrics(), opsHTTP))
+		adminHandler(b, runner, agents.NewMetrics(), nil, opsHTTP))
 
 	req := httptest.NewRequest(http.MethodPost, "http://localhost:8091/api/ops/control", strings.NewReader(`{"action":"pause"}`))
 	req.Header.Set("Content-Type", "application/json")

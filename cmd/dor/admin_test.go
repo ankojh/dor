@@ -47,7 +47,7 @@ func TestAdminHealthOKAndTerminalCounts(t *testing.T) {
 		_ = runner.Shutdown(ctx)
 	})
 
-	server := httptest.NewServer(adminHandler(b, runner, metrics))
+	server := httptest.NewServer(adminHandler(b, runner, metrics, nil))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/healthz")
 	if err != nil {
@@ -88,7 +88,7 @@ func TestAdminHealthIs503WhenBusClosed(t *testing.T) {
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(adminHandler(b, runner, metrics))
+	server := httptest.NewServer(adminHandler(b, runner, metrics, nil))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/healthz")
 	if err != nil {

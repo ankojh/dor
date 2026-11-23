@@ -2,16 +2,47 @@
 
 The command defaults to a read-only audit. It lists Postgres articles whose publication time is still in the future at the audit instant, then reads retained INGEST messages directly without creating a consumer. It matches canonical article identity, including hazard revisions, and reports candidate original fetch times.
 
+Every invocation requires an explicit, already-provisioned `--nats` target and
+an explicit `--environment-id`. The command never starts the embedded NATS
+server and never provisions streams or KV. It refuses an unbound or mismatched
+database, publisher or participant identity before any audit result can drive a
+fence or write.
+
 ```sh
-go run ./scripts/repair-wire-time --database "$DOR_DATABASE_URL" --nats nats://127.0.0.1:4222 > wire-time-audit.json
+go run ./scripts/repair-wire-time --database "$DOR_DATABASE_URL" \
+  --nats "$COPY_NATS_URL" --environment-id "$COPY_ENVIRONMENT_ID" > wire-time-audit.json
 ```
 
 Raw retention is limited: a matching event can be a later refetch, so a candidate is not proof. `created_at` is copied from publication and is not an independent clock. A later audit can miss legacy future timestamps that have since elapsed; retain and compare the initial census and available raw evidence. Each unknown or conflicting identity is marked for suppression, never substituted with the repair clock.
 
-A rehearsal can write only to an explicitly named non-`dor` database with migration 0008 applied and requires the operator to verify every proposed candidate is the original fetch:
+## Isolated environment binding (required once per private copy)
+
+The copy's database, publisher bucket and participant leases must all carry the
+same immutable environment id. Migration `0011_maintenance_environment` creates
+the database singleton row; the publisher bucket stores
+`maintenance/environment`. Binding is an explicit setup step and is never
+performed implicitly by an audit or apply:
+
+```sh
+go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
+  --nats "$COPY_NATS_URL" --environment-id "$COPY_ENVIRONMENT_ID" \
+  --bind-environment --allow-db COPY_DATABASE_NAME
+```
+
+The command writes only when both durable sides are absent or already equal; a
+conflicting database row or publisher key aborts before writing. A partial
+failure is safely resumable with the same id because both sides are
+insert-once. Start the copy's gateway and runtime processes with
+`DOR_ENVIRONMENT_ID=$COPY_ENVIRONMENT_ID` (and any other copy-specific
+`DOR_*` settings) so their leases advertise the same identity. The private NATS
+deployment must already be provisioned by its owner; the maintenance command
+only attaches to it.
+
+A rehearsal can write only to an explicitly named non-`dor` database with migrations 0008 and 0011 applied and requires the operator to verify every proposed candidate is the original fetch:
 
 ```sh
 go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" --nats "$COPY_NATS_URL" \
+  --environment-id "$COPY_ENVIRONMENT_ID" \
   --apply --allow-db COPY_DATABASE_NAME --confirm-candidates > wire-time-copy-result.json
 ```
 
@@ -23,7 +54,8 @@ A read-only plan can be exported without touching the live service:
 
 ```sh
 go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
-  --nats "$COPY_NATS_URL" --plan-out /absolute/path/wire-time-plan.json
+  --nats "$COPY_NATS_URL" --environment-id "$COPY_ENVIRONMENT_ID" \
+  --plan-out /absolute/path/wire-time-plan.json
 ```
 
 The plan binds the audit instant, the actual active publisher root/head/global/raw
@@ -79,10 +111,12 @@ The audit command can run the complete protocol against an explicitly named
 non-`dor` copy:
 
 ```sh
-# Start only an isolated copy configured with COPY_DATABASE_URL/COPY_NATS_URL.
-DOR_RUNTIME_ID=copy-1 DOR_GATEWAY_ID=copy-gw-1 go run ./cmd/dor run ...
+# Start only an isolated copy configured with COPY_DATABASE_URL/COPY_NATS_URL
+# and DOR_ENVIRONMENT_ID=$COPY_ENVIRONMENT_ID.
+DOR_RUNTIME_ID=copy-1 DOR_GATEWAY_ID=copy-gw-1 DOR_ENVIRONMENT_ID="$COPY_ENVIRONMENT_ID" go run ./cmd/dor run ...
 go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
-  --nats "$COPY_NATS_URL" --apply --maintenance-apply \
+  --nats "$COPY_NATS_URL" --environment-id "$COPY_ENVIRONMENT_ID" \
+  --apply --maintenance-apply \
   --allow-db COPY_DATABASE_NAME --confirm-candidates \
   --expected-producer copy-1 --expected-gateway copy-gw-1 \
   --expected-consumer ENRICH/publisher-enrich \
@@ -93,10 +127,16 @@ go run ./scripts/repair-wire-time --database "$COPY_DATABASE_URL" \
   --drain-timeout 5m
 ```
 
-Without `--maintenance-apply` (and without `--apply`) the command is read-only
-and `--plan-out` exports a deterministic plan. `--apply` without
-`--maintenance-apply` is the prior DB-only copy operation. The adapter:
+Without `--maintenance-apply` (and without `--apply`) the command performs no
+NATS provisioning and no maintenance writes; `--plan-out` exports a
+deterministic plan. `--apply` without `--maintenance-apply` is the prior DB-only
+copy operation. The adapter:
 
+- verifies the explicit environment id against the database singleton row, the
+  publisher `maintenance/environment` key and every current gateway/producer
+  lease before the first fence or write, and revalidates before the DB
+  transaction; an unbound or mismatched target is refused, and a matching
+  database name alone is not identity proof;
 - verifies `current_database()` equals `--allow-db` and refuses `dor`;
 - closes external/raw ingress first, lets downstream enrichment/story/match/alert
   work drain, then pauses durable consumer delivery and fences downstream/KV/DB

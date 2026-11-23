@@ -510,6 +510,7 @@ export function App() {
   const [alertList, setAlertList] = createSignal<AlertRecord[]>([]);
   const [alertsOpen, setAlertsOpen] = createSignal(false);
   const [sidePanelOpen, setSidePanelOpen] = createSignal(false);
+  const [wireOpen, setWireOpen] = createSignal(false);
   const [ntfyCopied, setNtfyCopied] = createSignal<string | null>(null);
   const [alertDraftPrompt, setAlertDraftPrompt] = createSignal("");
   const [alertDraftMinSources, setAlertDraftMinSources] = createSignal(0);
@@ -1929,7 +1930,7 @@ export function App() {
   };
 
   return (
-    <div class={`app3 ${sidePanelOpen() ? "drawer-open" : ""}`}>
+    <div class={`app3 ${sidePanelOpen() ? "drawer-open" : ""} ${wireOpen() ? "wire-open" : ""}`}>
       <header class="topbar">
         <div class="brand">
           <span class="mark" />
@@ -2140,7 +2141,7 @@ export function App() {
         </div>
       </header>
 
-      <aside class={`wire mobile-tab-${mobileTab()}`} aria-label="Live wire">
+      <aside id="live-wire" class={`wire mobile-tab-${mobileTab()}`} aria-label="Live wire">
         <div class="mobile-tabs" role="tablist" aria-label="Mobile sections">
           <For each={["wire", "threads", "near", "alerts"] as const}>
             {(tab) => (
@@ -2166,6 +2167,9 @@ export function App() {
         <div class="wire-head">
           <div class="r1">
             <h2>Live wire</h2>
+            <button class="text-btn" aria-label="Hide live wire" onClick={() => setWireOpen(false)}>
+              ×
+            </button>
             <span class="rate" title="Articles in the last minute">
               <i>
                 <For each={rateBars()}>{(height) => <b style={`height:${height}%`} />}</For>
@@ -2719,6 +2723,19 @@ export function App() {
           </Show>
         </div>
         <div class="tr">
+          <button
+            class="ibtn wire-toggle"
+            aria-label="Live wire"
+            aria-expanded={wireOpen()}
+            aria-controls="live-wire"
+            title="Live wire"
+            onClick={() => {
+              if (!wireOpen() && window.matchMedia("(max-width: 780px)").matches) clearFocus();
+              setWireOpen((open) => !open);
+            }}
+          >
+            Wire
+          </button>
           <button
             class="ibtn"
             aria-pressed={globe().secondDegree}
@@ -3308,7 +3325,14 @@ export function App() {
             }}
           />
           <div class="mobile-story-head">
-            <button class="text-btn" aria-label="Back to the wire" onClick={clearFocus}>
+            <button
+              class="text-btn"
+              aria-label="Back to the wire"
+              onClick={() => {
+                clearFocus();
+                setWireOpen(true);
+              }}
+            >
               ← Wire
             </button>
             <span class="cap">Focused story</span>

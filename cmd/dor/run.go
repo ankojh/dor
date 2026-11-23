@@ -248,6 +248,7 @@ func runCommand(args []string) error {
 		StoreDir:      cfg.natsStore,
 		MaxAckPending: cfg.maxAckPending,
 		Provision:     cfg.provision,
+		EnvironmentID: envOr("DOR_ENVIRONMENT_ID", ""),
 		Logger:        logger,
 	})
 	cancelConnect()

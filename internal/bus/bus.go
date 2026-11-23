@@ -133,6 +133,10 @@ type Options struct {
 	DuplicateWindow time.Duration
 	// MaxAckPending is the default for consumers that do not set one.
 	MaxAckPending int
+	// EnvironmentID names the isolated deployment this client belongs to.
+	// Maintenance leases carry it so the coordinator can refuse a mixed
+	// database/bus/participant target. Empty means unbound (fail closed).
+	EnvironmentID string
 	// Logger is optional.
 	Logger *slog.Logger
 }
@@ -217,6 +221,7 @@ func Connect(ctx context.Context, opts Options) (*Bus, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
+	opts.EnvironmentID = strings.TrimSpace(opts.EnvironmentID)
 	if opts.ListenAddr == "" {
 		opts.ListenAddr = DefaultNATSListen
 	}
@@ -302,6 +307,21 @@ func Connect(ctx context.Context, opts Options) (*Bus, error) {
 		b.log.Info("bus provisioned", "nats_url", b.RedactedURL(), "streams", len(b.policies))
 	}
 	return b, nil
+}
+
+// Attach binds an already provisioned NATS deployment without starting an
+// embedded server or creating/updating any stream or KV bucket. Maintenance
+// commands use this path so an empty or wrong target cannot implicitly
+// provision a new store.
+func Attach(ctx context.Context, opts Options) (*Bus, error) {
+	if strings.TrimSpace(opts.URL) == "" {
+		return nil, errors.New("bus: attach requires an explicit non-empty NATS URL")
+	}
+	if opts.Provision {
+		return nil, errors.New("bus: attach never provisions; bind an existing deployment")
+	}
+	opts.Provision = false
+	return Connect(ctx, opts)
 }
 
 func (b *Bus) resolvePolicies() (map[string]StreamPolicy, error) {
@@ -690,6 +710,10 @@ func (b *Bus) JS() jetstream.JetStream { return b.js }
 
 // Owner reports whether this client provisioned the streams and KV.
 func (b *Bus) Owner() bool { return b.owner }
+
+// EnvironmentID returns the configured isolated-deployment identity. Empty
+// means the client is unbound and maintenance must fail closed.
+func (b *Bus) EnvironmentID() string { return b.opts.EnvironmentID }
 
 // Stream returns the dev ECHO stream. It exists for the M0 echo probes only;
 // new code should use StreamNamed or StreamForSubject.

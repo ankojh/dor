@@ -23,6 +23,7 @@ const GatewayLeaseTTL = 5 * time.Second
 type GatewayLease struct {
 	Version       int    `json:"version"`
 	ID            string `json:"id"`
+	Environment   string `json:"environment"`
 	Epoch         uint64 `json:"epoch"`
 	Serving       bool   `json:"serving"`
 	WireTombstone bool   `json:"wire_tombstone"`
@@ -110,6 +111,7 @@ func ActiveGatewayLeases(ctx context.Context, kv jetstream.KeyValue) ([]GatewayL
 type ProducerLease struct {
 	Version            int            `json:"version"`
 	ID                 string         `json:"id"`
+	Environment        string         `json:"environment"`
 	Epoch              uint64         `json:"epoch"`
 	Healthy            bool           `json:"healthy"`
 	Error              string         `json:"error,omitempty"`

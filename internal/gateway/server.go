@@ -486,6 +486,7 @@ func (s *Server) publishLease(control maintenance.Control, serving bool, floor m
 	defer cancel()
 	_ = maintenance.WriteGatewayLease(ctx, s.leaseKV, maintenance.GatewayLease{
 		ID:            s.gatewayID,
+		Environment:   s.cfg.Bus.EnvironmentID(),
 		Epoch:         control.FleetEpoch,
 		Serving:       serving,
 		WireTombstone: true,

@@ -8,6 +8,7 @@ export async function afterShellPaint(signal: AbortSignal): Promise<void> {
     if (performance.getEntriesByName("first-contentful-paint").length) return;
     await new Promise<void>((resolve) => {
       const done = (): void => {
+        clearTimeout(fallback);
         observer.disconnect();
         signal.removeEventListener("abort", done);
         resolve();
@@ -15,6 +16,9 @@ export async function afterShellPaint(signal: AbortSignal): Promise<void> {
       const observer = new PerformanceObserver((list) => {
         if (list.getEntries().some((entry) => entry.name === "first-contentful-paint")) done();
       });
+      // Some embedded browsers advertise Paint Timing without delivering an
+      // entry. Keep that missing signal from blocking the map and data socket.
+      const fallback = setTimeout(done, 1_000);
       signal.addEventListener("abort", done, { once: true });
       observer.observe({ type: "paint", buffered: true });
     });

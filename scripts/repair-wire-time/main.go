@@ -1,5 +1,8 @@
 // Command repair-wire-time audits retained future publication times and prepares
-// candidate fetch-time repairs. It never changes NATS or the live database.
+// candidate fetch-time repairs against one explicitly bound isolated copy. It
+// never starts or provisions NATS: --nats must name an already provisioned
+// server, and --environment-id must match the durable database, publisher and
+// participant identities before any audit or maintenance step.
 package main
 
 import (
@@ -8,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -32,15 +36,17 @@ type candidate struct {
 }
 
 type report struct {
-	Database    string                   `json:"database"`
-	AsOf        time.Time                `json:"as_of"`
-	IngestFirst uint64                   `json:"ingest_first"`
-	IngestLast  uint64                   `json:"ingest_last"`
-	Changes     []*candidate             `json:"changes"`
-	Committed   bool                     `json:"committed"`
-	Plan        *maintenance.Plan        `json:"maintenance_plan,omitempty"`
-	Maintenance *maintenance.ApplyResult `json:"maintenance_result,omitempty"`
-	Warning     string                   `json:"warning"`
+	Database         string                   `json:"database"`
+	Environment      string                   `json:"environment"`
+	EnvironmentBound bool                     `json:"environment_bound,omitempty"`
+	AsOf             time.Time                `json:"as_of"`
+	IngestFirst      uint64                   `json:"ingest_first"`
+	IngestLast       uint64                   `json:"ingest_last"`
+	Changes          []*candidate             `json:"changes"`
+	Committed        bool                     `json:"committed"`
+	Plan             *maintenance.Plan        `json:"maintenance_plan,omitempty"`
+	Maintenance      *maintenance.ApplyResult `json:"maintenance_result,omitempty"`
+	Warning          string                   `json:"warning"`
 }
 
 // stringList collects a repeatable string flag.
@@ -66,50 +72,153 @@ func rawID(raw *dorv1.RawArticle) string {
 	return agents.ArticleID(u)
 }
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
-func run() error {
-	dbURL := flag.String("database", os.Getenv("DOR_DATABASE_URL"), "Postgres URL")
-	natsURL := flag.String("nats", "nats://127.0.0.1:4222", "NATS URL (read-only direct message fetches)")
-	apply := flag.Bool("apply", false, "apply candidate changes to an explicitly named copy only")
-	allowDB := flag.String("allow-db", "", "exact copy database name; dor is forbidden")
-	confirm := flag.Bool("confirm-candidates", false, "operator has verified each retained raw fetch time is the original; also authorizes a plan override")
-	planOut := flag.String("plan-out", "", "write the deterministic revision-bound maintenance plan to this file (read-only)")
-	maintenanceApply := flag.Bool("maintenance-apply", false, "run the full fenced maintenance protocol against an explicit non-dor copy")
+
+// run is the testable command entry point. Every path refuses an empty NATS
+// target and an unbound/mismatched environment before it can fence or write.
+func run(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("repair-wire-time", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbURL := fs.String("database", os.Getenv("DOR_DATABASE_URL"), "Postgres URL")
+	natsURL := fs.String("nats", "", "explicit NATS URL of an already provisioned isolated deployment (required; no embedded server)")
+	environmentID := fs.String("environment-id", "", "explicit isolated environment id shared by the copy DB, publisher KV and participant leases (required)")
+	bindEnvironment := fs.Bool("bind-environment", false, "explicitly bind the non-dor copy DB and publisher store to --environment-id, then exit")
+	apply := fs.Bool("apply", false, "apply candidate changes to an explicitly named copy only")
+	allowDB := fs.String("allow-db", "", "exact copy database name; dor is forbidden")
+	confirm := fs.Bool("confirm-candidates", false, "operator has verified each retained raw fetch time is the original; also authorizes a plan override")
+	planOut := fs.String("plan-out", "", "write the deterministic revision-bound maintenance plan to this file (read-only)")
+	maintenanceApply := fs.Bool("maintenance-apply", false, "run the full fenced maintenance protocol against an explicit non-dor copy")
 	var expectedProducers, excludedProducers, expectedGateways, excludedGateways, expectedConsumers stringList
-	flag.Var(&expectedProducers, "expected-producer", "runtime id that must be paused and drained (repeatable)")
-	flag.Var(&excludedProducers, "excluded-producer", "runtime id explicitly excluded by external routing evidence (repeatable)")
-	flag.Var(&expectedGateways, "expected-gateway", "gateway id that must be fenced (repeatable)")
-	flag.Var(&excludedGateways, "excluded-gateway", "gateway id explicitly excluded by external routing evidence (repeatable)")
-	flag.Var(&expectedConsumers, "expected-consumer", "durable consumer STREAM/name that must be present (repeatable)")
-	exclusionAuthority := flag.String("exclusion-authority", "", "routing/process authority that excluded absent participants")
-	exclusionEvidence := flag.String("exclusion-evidence", "", "machine evidence id from the exclusion authority")
-	exclusionGeneration := flag.Uint64("exclusion-generation", 0, "monotonic exclusion generation from the authority")
-	drainTimeout := flag.Duration("drain-timeout", 2*time.Minute, "maximum time to wait for a stable finite backlog drain")
-	flag.Parse()
-	if *dbURL == "" {
+	fs.Var(&expectedProducers, "expected-producer", "runtime id that must be paused and drained (repeatable)")
+	fs.Var(&excludedProducers, "excluded-producer", "runtime id explicitly excluded by external routing evidence (repeatable)")
+	fs.Var(&expectedGateways, "expected-gateway", "gateway id that must be fenced (repeatable)")
+	fs.Var(&excludedGateways, "excluded-gateway", "gateway id explicitly excluded by external routing evidence (repeatable)")
+	fs.Var(&expectedConsumers, "expected-consumer", "durable consumer STREAM/name that must be present (repeatable)")
+	exclusionAuthority := fs.String("exclusion-authority", "", "routing/process authority that excluded absent participants")
+	exclusionEvidence := fs.String("exclusion-evidence", "", "machine evidence id from the exclusion authority")
+	exclusionGeneration := fs.Uint64("exclusion-generation", 0, "monotonic exclusion generation from the authority")
+	drainTimeout := fs.Duration("drain-timeout", 2*time.Minute, "maximum time to wait for a stable finite backlog drain")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	dbTarget := strings.TrimSpace(*dbURL)
+	if dbTarget == "" {
 		return errors.New("database URL required")
 	}
+	natsTarget := strings.TrimSpace(*natsURL)
+	if natsTarget == "" {
+		return errors.New("explicit non-empty --nats target is required; this command never starts or provisions an embedded server")
+	}
+	environment, err := maintenance.NormalizeEnvironmentID(*environmentID)
+	if err != nil {
+		return err
+	}
+	allowCopy := strings.TrimSpace(*allowDB)
+	if *bindEnvironment {
+		if *apply || *maintenanceApply || *planOut != "" {
+			return errors.New("--bind-environment is a separate explicit setup step; do not combine it with --apply, --maintenance-apply or --plan-out")
+		}
+	}
+
 	ctx := context.Background()
-	db, err := pgx.Connect(ctx, *dbURL)
+	db, err := pgx.Connect(ctx, dbTarget)
 	if err != nil {
 		return err
 	}
 	defer db.Close(ctx)
-	b, err := bus.Connect(ctx, bus.Options{URL: *natsURL})
+	// Attach never starts an embedded server and never provisions streams/KV.
+	b, err := bus.Attach(ctx, bus.Options{URL: natsTarget, EnvironmentID: environment})
 	if err != nil {
 		return err
 	}
 	defer b.Close()
+	publisherKV, err := b.KV(ctx, bus.KVBucketPublisher)
+	if err != nil {
+		return err
+	}
+	gatewayLeases, err := b.KV(ctx, bus.KVBucketGatewayLease)
+	if err != nil {
+		return err
+	}
+	producerLeases, err := b.KV(ctx, bus.KVBucketProducerLease)
+	if err != nil {
+		return err
+	}
+
+	dbEnvironment, err := readDatabaseEnvironment(ctx, db)
+	if err != nil {
+		return err
+	}
+	pubEnvironment, _, err := maintenance.ReadEnvironment(ctx, publisherKV)
+	if err != nil {
+		return err
+	}
+
+	if *bindEnvironment {
+		// Refuse conflicting durable sides before writing either one. A
+		// partially completed bind is resumable because both sides are
+		// insert-once and equal-only.
+		if dbEnvironment != "" && dbEnvironment != environment {
+			return fmt.Errorf("database is already bound to environment %q, not %q", dbEnvironment, environment)
+		}
+		if pubEnvironment.ID != "" && pubEnvironment.ID != environment {
+			return fmt.Errorf("publisher is already bound to environment %q, not %q", pubEnvironment.ID, environment)
+		}
+		name, err := bindDatabaseEnvironment(ctx, db, allowCopy, environment)
+		if err != nil {
+			return err
+		}
+		if err := maintenance.PutEnvironment(ctx, publisherKV, environment); err != nil {
+			return err
+		}
+		boundDB, err := readDatabaseEnvironment(ctx, db)
+		if err != nil {
+			return err
+		}
+		if err := maintenance.RequireEnvironment("database", boundDB, environment); err != nil {
+			return err
+		}
+		boundPub, revision, err := maintenance.ReadEnvironment(ctx, publisherKV)
+		if err != nil {
+			return err
+		}
+		if revision == 0 {
+			return errors.New("maintenance: publisher environment identity is unbound after binding")
+		}
+		if err := maintenance.RequireEnvironment("publisher", boundPub.ID, environment); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(report{
+			Database:         name,
+			Environment:      environment,
+			EnvironmentBound: true,
+			Warning:          "Explicit environment binding only: no audit, candidate repair or maintenance fence was performed.",
+		})
+	}
+
+	// Every audit/apply/resume compares the durable targets before the first
+	// audit read result can drive a fence or write.
+	if err := maintenance.RequireEnvironment("database", dbEnvironment, environment); err != nil {
+		return err
+	}
+	if err := maintenance.RequireEnvironment("publisher", pubEnvironment.ID, environment); err != nil {
+		return err
+	}
+	if err := maintenance.ValidateParticipantEnvironments(ctx, gatewayLeases, producerLeases, environment); err != nil {
+		return err
+	}
+
 	auditRun, err := auditRetained(ctx, db, b)
 	if err != nil {
 		return err
 	}
 	name, asOf, changes, info := auditRun.name, auditRun.asOf, auditRun.changes, auditRun.stream
-	if *apply && (*allowDB == "" || *allowDB != name || name == "dor") {
+	if *apply && (allowCopy == "" || allowCopy != name || name == "dor") {
 		return errors.New("apply requires --allow-db matching a non-dor copy")
 	}
 	if *apply && !*maintenanceApply && !*confirm {
@@ -123,7 +232,7 @@ func run() error {
 			return errors.New("--maintenance-apply requires nonempty expected producer, gateway and consumer inventories")
 		}
 	}
-	out := report{Database: name, AsOf: asOf, IngestFirst: info.State.FirstSeq, IngestLast: info.State.LastSeq, Changes: changes, Warning: "Raw retention is limited; later refetch is not necessarily the original. Publisher snapshots, journal and derived state require a separate fenced reconciliation; no live cutover is authorized."}
+	out := report{Database: name, Environment: environment, AsOf: asOf, IngestFirst: info.State.FirstSeq, IngestLast: info.State.LastSeq, Changes: changes, Warning: "Raw retention is limited; later refetch is not necessarily the original. Publisher snapshots, journal and derived state require a separate fenced reconciliation; no live cutover is authorized."}
 	if *planOut != "" {
 		audit := make([]maintenance.AuditArticle, 0, len(changes))
 		for _, c := range changes {
@@ -167,12 +276,13 @@ func run() error {
 		if err := maintenance.ValidateExclusionProof(exclusion); err != nil {
 			return err
 		}
-		coord, err := maintenance.NewCoordinator(ctx, b)
+		coord, err := maintenance.NewCoordinator(ctx, b, environment)
 		if err != nil {
 			return err
 		}
 		result, err := coord.Apply(ctx, maintenance.ApplyRequest{
 			Database:          name,
+			EnvironmentID:     environment,
 			AsOf:              asOf,
 			Audit:             audit,
 			ConfirmOriginals:  *confirm,
@@ -183,6 +293,13 @@ func run() error {
 			ExpectedConsumers: expectedConsumers,
 			Exclusion:         exclusion,
 			DrainTimeout:      *drainTimeout,
+			VerifyEnvironment: func(callCtx context.Context) error {
+				current, verr := readDatabaseEnvironment(callCtx, db)
+				if verr != nil {
+					return verr
+				}
+				return maintenance.RequireEnvironment("database", current, environment)
+			},
 			AuditFunc: func(callCtx context.Context) (time.Time, []maintenance.AuditArticle, error) {
 				run, aerr := auditRetained(callCtx, db, b)
 				if aerr != nil {
@@ -198,7 +315,7 @@ func run() error {
 				if !strings.EqualFold(plan.Database, name) || strings.EqualFold(plan.Database, "dor") {
 					return nil, errors.New("maintenance DB callback database identity changed")
 				}
-				return applyCandidates(callCtx, db, name, planCandidates(plan))
+				return applyCandidates(callCtx, db, name, environment, planCandidates(plan))
 			},
 		})
 		if err != nil {
@@ -206,16 +323,16 @@ func run() error {
 		}
 		out.Maintenance = result
 		out.Committed = true
-		return json.NewEncoder(os.Stdout).Encode(out)
+		return json.NewEncoder(stdout).Encode(out)
 	}
 	if *apply {
-		result, err := applyCandidates(ctx, db, name, changes)
+		result, err := applyCandidates(ctx, db, name, environment, changes)
 		if err != nil {
 			return err
 		}
 		out.Committed = result != nil
 	}
-	return json.NewEncoder(os.Stdout).Encode(out)
+	return json.NewEncoder(stdout).Encode(out)
 }
 
 type auditRunResult struct {
@@ -354,14 +471,23 @@ func planCandidates(plan *maintenance.Plan) []*candidate {
 
 // applyCandidates is the copy-only DB transaction shared by the audit command
 // and the maintenance adapter. It is idempotent: a retry after an unknown
-// commit accepts an already-repaired row and verifies it by readback.
-func applyCandidates(ctx context.Context, db *pgx.Conn, name string, changes []*candidate) (*maintenance.DBRepairResult, error) {
+// commit accepts an already-repaired row and verifies it by readback. The
+// database environment must still match the explicit target before any row is
+// locked or changed.
+func applyCandidates(ctx context.Context, db *pgx.Conn, name, environmentID string, changes []*candidate) (*maintenance.DBRepairResult, error) {
 	var current string
 	if err := db.QueryRow(ctx, "SELECT current_database()").Scan(&current); err != nil {
 		return nil, err
 	}
 	if current != name || strings.EqualFold(current, "dor") {
 		return nil, errors.New("apply refuses a database other than the bound non-dor copy")
+	}
+	bound, err := readDatabaseEnvironment(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if err := maintenance.RequireEnvironment("database", bound, environmentID); err != nil {
+		return nil, err
 	}
 	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {

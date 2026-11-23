@@ -2921,6 +2921,56 @@ body {
   }
 }
 
+/* Globe first; readers reveal either panel when they need it. */
+@media (min-width: 781px) {
+  .app3,
+  .app3.drawer-open {
+    --open-wire-w: 0px;
+    --open-side-w: 0px;
+    grid-template-columns: var(--open-wire-w) minmax(0, 1fr) var(--open-side-w);
+  }
+  .app3.wire-open {
+    --open-wire-w: clamp(300px, 29vw, 420px);
+  }
+  .app3.drawer-open {
+    --open-side-w: clamp(280px, 25vw, 360px);
+  }
+  .app3:not(.wire-open) > .wire,
+  .app3:not(.drawer-open) > .side {
+    display: none;
+  }
+  .app3.drawer-open > .side {
+    display: flex;
+  }
+  .panel-toggle {
+    display: grid;
+  }
+  .side-panel-bar {
+    display: flex;
+  }
+}
+.wire-toggle {
+  width: auto;
+  padding: 0 10px;
+  font: 11px var(--mono);
+}
+@media (max-width: 780px) {
+  .app3 {
+    grid-template-rows: 56px minmax(0, 1fr);
+  }
+  .app3:not(.wire-open) > .wire {
+    display: none;
+  }
+  .app3.wire-open > .wire {
+    position: relative;
+    min-height: 0;
+    z-index: 25;
+  }
+  .app3.wire-open {
+    grid-template-rows: 56px minmax(260px, 46dvh) minmax(0, 1fr);
+  }
+}
+
 /* Selected rows sit on the brightest wire background; lift their meta text. */
 .wr.sel .wr-body time,
 .wr.sel .wr-body .ws,

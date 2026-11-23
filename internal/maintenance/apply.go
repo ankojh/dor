@@ -22,20 +22,25 @@ const maintenanceLease = 1200 * time.Millisecond
 // Coordinator serialises the cross-store maintenance phases under the existing
 // publisher owner lease. It never resets source streams or consumer positions.
 type Coordinator struct {
-	bus       *bus.Bus
-	kv        jetstream.KeyValue
-	leases    jetstream.KeyValue
-	producers jetstream.KeyValue
-	authority ExclusionAuthority
-	store     *publication.Store
-	now       func() time.Time
+	bus         *bus.Bus
+	kv          jetstream.KeyValue
+	leases      jetstream.KeyValue
+	producers   jetstream.KeyValue
+	authority   ExclusionAuthority
+	store       *publication.Store
+	now         func() time.Time
+	environment string
 }
 
-// NewCoordinator binds the non-expiring publisher bucket and the short-lived
-// gateway lease bucket.
-func NewCoordinator(ctx context.Context, b *bus.Bus) (*Coordinator, error) {
+// NewCoordinator binds the non-expiring publisher bucket, the short-lived
+// gateway lease bucket and the immutable isolated-environment identity.
+func NewCoordinator(ctx context.Context, b *bus.Bus, environmentID string) (*Coordinator, error) {
 	if b == nil {
 		return nil, errors.New("maintenance: bus is required")
+	}
+	environment, err := NormalizeEnvironmentID(environmentID)
+	if err != nil {
+		return nil, err
 	}
 	kv, err := b.KV(ctx, bus.KVBucketPublisher)
 	if err != nil {
@@ -49,13 +54,43 @@ func NewCoordinator(ctx context.Context, b *bus.Bus) (*Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{bus: b, kv: kv, leases: leases, producers: producers, now: time.Now}, nil
+	return &Coordinator{bus: b, kv: kv, leases: leases, producers: producers, now: time.Now, environment: environment}, nil
+}
+
+// validateEnvironment proves that the coordinator, publisher store and every
+// current participant lease belong to the same explicit environment. It is
+// read-only and is called before the first fence or write of every run.
+func (c *Coordinator) validateEnvironment(ctx context.Context, requested string) error {
+	want, err := NormalizeEnvironmentID(requested)
+	if err != nil {
+		return err
+	}
+	if c.environment == "" {
+		return errors.New("maintenance: coordinator environment identity is unbound")
+	}
+	if c.environment != want {
+		return fmt.Errorf("maintenance: coordinator environment %q does not match requested %q", c.environment, want)
+	}
+	env, revision, err := ReadEnvironment(ctx, c.kv)
+	if err != nil {
+		return err
+	}
+	if revision == 0 {
+		return errors.New("maintenance: publisher environment identity is unbound; run the explicit bind setup first")
+	}
+	if err := RequireEnvironment("publisher", env.ID, want); err != nil {
+		return err
+	}
+	return ValidateParticipantEnvironments(ctx, c.leases, c.producers, want)
 }
 
 // BeginGate closes gateway ingress before any drain. It is idempotent and
 // deliberately does not require a plan: the fleet must be excluded even if the
 // process stops before planning.
 func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
+	if err := c.validateEnvironment(ctx, c.environment); err != nil {
+		return err
+	}
 	control, _, err := ReadControl(ctx, c.kv)
 	if err != nil {
 		return err
@@ -97,6 +132,9 @@ func (c *Coordinator) BeginGate(ctx context.Context, reason string) error {
 
 // AwaitFleetExclusion waits for floor-aware gateways to acknowledge the fence.
 func (c *Coordinator) AwaitFleetExclusion(ctx context.Context, proof ExclusionProof, timeout time.Duration) error {
+	if err := c.validateEnvironment(ctx, c.environment); err != nil {
+		return err
+	}
 	if c.leases == nil {
 		return errors.New("maintenance: gateway lease bucket unavailable")
 	}
@@ -147,6 +185,9 @@ func (c *Coordinator) AwaitProducerWriterClosed(ctx context.Context, expected, e
 // durable consumer. In-flight handlers remain unacknowledged until they finish;
 // no message is reset, purged or acknowledged by maintenance.
 func (c *Coordinator) PauseConsumers(ctx context.Context, expected []string) error {
+	if err := c.validateEnvironment(ctx, c.environment); err != nil {
+		return err
+	}
 	if len(expected) == 0 {
 		return errors.New("maintenance: expected consumer inventory is required")
 	}
@@ -361,6 +402,9 @@ func (c *Coordinator) FenceForRun(ctx context.Context, runID string) error {
 // ClaimPublisher acquires the exclusive publisher root lease. A live publisher
 // must have been stopped first; this waits at most the lease duration.
 func (c *Coordinator) ClaimPublisher(ctx context.Context) error {
+	if err := c.validateEnvironment(ctx, c.environment); err != nil {
+		return err
+	}
 	c.store = publication.New(c.kv, nuid.Next(), maintenanceLease, c.bus.NC().MaxPayload())
 	deadline := c.now().Add(maintenanceLease + 200*time.Millisecond)
 	for {
@@ -980,12 +1024,17 @@ type DBRepairFunc func(context.Context, *Plan) (*DBRepairResult, error)
 // itself: the caller supplies the already-authorized DB callback and the writer
 // barrier source.
 type ApplyRequest struct {
-	Database          string
-	AsOf              time.Time
-	Audit             []AuditArticle
-	ConfirmOriginals  bool
-	DBRepair          DBRepairFunc
-	AuditFunc         func(context.Context) (time.Time, []AuditArticle, error)
+	Database         string
+	EnvironmentID    string
+	AsOf             time.Time
+	Audit            []AuditArticle
+	ConfirmOriginals bool
+	DBRepair         DBRepairFunc
+	AuditFunc        func(context.Context) (time.Time, []AuditArticle, error)
+	// VerifyEnvironment re-reads the caller-owned database identity (and any
+	// other durable target) before the first fence. It is mandatory so a
+	// coordinator can never fence a bus for a database it did not verify.
+	VerifyEnvironment func(context.Context) error
 	Drain             DrainOptions
 	ExpectedProducers []string
 	ExcludedProducers []string
@@ -1016,6 +1065,15 @@ func (c *Coordinator) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult
 	result := &ApplyResult{}
 	if strings.EqualFold(strings.TrimSpace(req.Database), "dor") {
 		return result, errors.New("maintenance: refusing the live dor database")
+	}
+	if err := c.validateEnvironment(ctx, req.EnvironmentID); err != nil {
+		return result, err
+	}
+	if req.VerifyEnvironment == nil {
+		return result, errors.New("maintenance: environment verification callback is required")
+	}
+	if err := req.VerifyEnvironment(ctx); err != nil {
+		return result, err
 	}
 	requestID := RequestIdentity(req.Database, req.AsOf, req.Audit, req.ConfirmOriginals)
 	resumePlan := false

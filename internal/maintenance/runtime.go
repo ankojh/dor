@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,8 @@ type Runtime struct {
 	control jetstream.KeyValue
 	leases  jetstream.KeyValue
 	log     *slog.Logger
+
+	environment string
 
 	writerProbe   func() WriterCounters
 	writerBlocked func(bool)
@@ -124,7 +127,7 @@ func NewRuntime(ctx context.Context, b *bus.Bus, id string, log *slog.Logger) (*
 		SetProcessBlocked(true)
 		writerClosed = true
 	}
-	return &Runtime{ID: id, Bus: b, control: controlKV, leases: leases, log: log, writerClosed: writerClosed}, nil
+	return &Runtime{ID: id, Bus: b, control: controlKV, leases: leases, log: log, writerClosed: writerClosed, environment: strings.TrimSpace(b.EnvironmentID())}, nil
 }
 
 // SetWriter wires the in-process DB writer barrier and admission fence.
@@ -226,6 +229,7 @@ func (r *Runtime) sample(ctx context.Context) {
 	lease := ProducerLease{
 		Version:            ControlVersion,
 		ID:                 r.ID,
+		Environment:        r.environment,
 		Epoch:              epoch,
 		Healthy:            healthy,
 		Error:              errText,
@@ -297,6 +301,7 @@ func (r *Runtime) shutdown() {
 	lease := ProducerLease{
 		Version:            ControlVersion,
 		ID:                 r.ID,
+		Environment:        r.environment,
 		Epoch:              epoch,
 		Healthy:            healthy,
 		Paused:             downstreamClosed,

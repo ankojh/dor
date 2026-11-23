@@ -189,7 +189,7 @@ func TestSendWithNoSubscriptionsMakesNoHTTPCall(t *testing.T) {
 		http:   &http.Client{Transport: transport},
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	a, err := st.Create(context.Background(), alert.Alert{ID: "alert", Prompt: "wildfire", Enabled: true, Channels: []string{"push"}})
+	a, err := st.Create(context.Background(), alert.Alert{ID: "alert", Owner: "owner", Prompt: "wildfire", Enabled: true, Channels: []string{"push"}})
 	if err != nil {
 		t.Fatal(err)
 	}

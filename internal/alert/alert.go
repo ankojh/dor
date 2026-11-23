@@ -26,6 +26,14 @@ import (
 // ErrNotFound is returned when an alert id does not exist.
 var ErrNotFound = errors.New("alert: not found")
 
+// Push subscription owner errors. Subscription writes and deletes require a
+// verified nonempty anonymous session owner; unowned legacy rows are readable
+// by nobody and are never deleted on another owner's behalf.
+var (
+	ErrPushOwnerRequired = errors.New("alert: push subscription owner is required")
+	ErrPushOwnerMismatch = errors.New("alert: push subscription owner mismatch")
+)
+
 // Alert is one saved prompt alert.
 type Alert struct {
 	ID string `json:"id"`
@@ -71,9 +79,12 @@ type Patch struct {
 	DigestHourUTC *int      `json:"digest_hour_utc"`
 }
 
-// PushRecord is one encrypted Web Push subscription blob.
+// PushRecord is one encrypted Web Push subscription blob. Owner is the
+// verified anonymous session that registered it; an empty owner is legacy and
+// receives no delivery and no cross-owner mutation.
 type PushRecord struct {
 	ID        string    `json:"id"`
+	Owner     string    `json:"owner"`
 	Blob      []byte    `json:"blob"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -517,30 +528,126 @@ func (s *Store) IsMuted(ctx context.Context, alertID, storyID string) bool {
 	return s.getKV(ctx, muteKey(alertID, storyID), &v) && v["muted"]
 }
 
-// SavePush stores an encrypted subscription blob. Postgres keeps only the
-// ciphertext; endpoint and keys are never written in plaintext.
-func (s *Store) SavePush(ctx context.Context, id string, blob []byte) error {
-	rec := PushRecord{ID: id, Blob: blob, CreatedAt: s.now().UTC()}
-	if err := s.putKV(ctx, "pushsub."+id, rec); err != nil {
+// SavePush stores an encrypted subscription blob bound to its verified
+// anonymous session owner. Postgres keeps only the ciphertext; endpoint and
+// keys are never written in plaintext. An empty owner is rejected so a legacy
+// or caller-supplied identity cannot be persisted as if it were verified.
+func (s *Store) SavePush(ctx context.Context, owner, id string, blob []byte) error {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return ErrPushOwnerRequired
+	}
+	rec := PushRecord{ID: id, Owner: owner, Blob: blob, CreatedAt: s.now().UTC()}
+	rev, created, err := s.savePushKV(ctx, rec)
+	if err != nil {
 		return err
 	}
 	if s.db != nil {
 		if err := s.savePushDB(ctx, rec); err != nil {
+			if errors.Is(err, ErrPushOwnerMismatch) {
+				// The DB mirror already binds this id to another owner. Remove
+				// only the KV row this call created so the mismatch cannot be
+				// served from KV after restart.
+				if created {
+					opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+					if derr := s.kv.Delete(opCtx, "pushsub."+id, jetstream.LastRevision(rev)); derr != nil && !errors.Is(derr, jetstream.ErrKeyNotFound) {
+						s.log.Warn("alert: push subscription rollback failed", "id", id, "err", derr)
+					}
+					cancel()
+				}
+				return err
+			}
+			// KV is authoritative: an ordinary mirror outage keeps the
+			// successful registration and is best-effort, as before.
 			s.log.Warn("alert: push subscription mirror failed", "id", id, "err", err)
 		}
 	}
 	return nil
 }
 
-// DeletePush removes one subscription after a 404/410 response or a corrupt
-// blob. Endpoint keys are never needed to delete; the id is enough.
-func (s *Store) DeletePush(ctx context.Context, id string) {
+// savePushKV creates or updates the encrypted record only while its owner
+// binding stays unchanged. It returns the revision used and whether this call
+// created the key.
+func (s *Store) savePushKV(ctx context.Context, rec PushRecord) (uint64, bool, error) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return 0, false, err
+	}
 	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
-	_ = s.kv.Delete(opCtx, "pushsub."+id)
-	if s.db != nil {
-		_ = s.deletePushDB(ctx, id)
+	key := "pushsub." + rec.ID
+	for attempt := 0; attempt < 5; attempt++ {
+		entry, err := s.kv.Get(opCtx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			rev, cerr := s.kv.Create(opCtx, key, data)
+			if cerr == nil {
+				return rev, true, nil
+			}
+			if errors.Is(cerr, jetstream.ErrKeyExists) {
+				continue
+			}
+			return 0, false, cerr
+		}
+		if err != nil {
+			return 0, false, err
+		}
+		var existing PushRecord
+		if err := json.Unmarshal(entry.Value(), &existing); err != nil {
+			return 0, false, err
+		}
+		if existing.Owner != rec.Owner {
+			return 0, false, ErrPushOwnerMismatch
+		}
+		if _, err := s.kv.Update(opCtx, key, data, entry.Revision()); err == nil {
+			return entry.Revision(), false, nil
+		} else if !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			return 0, false, err
+		}
 	}
+	return 0, false, errors.New("alert: push subscription contention")
+}
+
+// DeletePush removes one subscription after a 404/410 response or a corrupt
+// blob. The caller must name the verified owner; a foreign or unowned record
+// is never removed. The DB mirror is deleted before KV so a mirror failure
+// cannot leave a deleted KV entry resurrectable from DB fallback.
+func (s *Store) DeletePush(ctx context.Context, owner, id string) error {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return ErrPushOwnerRequired
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	key := "pushsub." + id
+	rev := uint64(0)
+	hasKV := false
+	entry, err := s.kv.Get(opCtx, key)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case err != nil:
+		return err
+	default:
+		var rec PushRecord
+		if err := json.Unmarshal(entry.Value(), &rec); err != nil {
+			return err
+		}
+		if rec.Owner != owner {
+			return ErrPushOwnerMismatch
+		}
+		rev, hasKV = entry.Revision(), true
+	}
+	if s.db != nil {
+		if err := s.deletePushDB(ctx, owner, id); err != nil {
+			return err
+		}
+	}
+	if !hasKV {
+		return nil
+	}
+	if err := s.kv.Delete(opCtx, key, jetstream.LastRevision(rev)); err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return err
+	}
+	return nil
 }
 
 // PushDelivered and MarkPushDelivered retain one receipt per generation/subscription.
@@ -578,9 +685,14 @@ func (s *Store) MarkPushDelivered(ctx context.Context, h Hit, subID string) erro
 	return s.MarkChannelDelivered(ctx, h.Identity(), "push."+subID)
 }
 
-// PushSubscriptions returns the encrypted subscriptions, KV first and the
-// durable mirror when KV expired.
-func (s *Store) PushSubscriptions(ctx context.Context) ([]PushRecord, error) {
+// PushSubscriptions returns only the owner's encrypted subscriptions, KV first
+// and the durable mirror when KV expired. An empty owner yields nothing; an
+// unowned legacy record is never returned to any caller.
+func (s *Store) PushSubscriptions(ctx context.Context, owner string) ([]PushRecord, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, nil
+	}
 	var out []PushRecord
 	seen := make(map[string]bool)
 	w, err := s.kv.Watch(ctx, "pushsub.>", jetstream.IgnoreDeletes())
@@ -604,17 +716,19 @@ scan:
 			if err = json.Unmarshal(e.Value(), &p); err != nil {
 				return nil, err
 			}
-			out = append(out, p)
 			seen[p.ID] = true
+			if p.Owner == owner {
+				out = append(out, p)
+			}
 		}
 	}
 	if s.db != nil {
-		records, err := s.pushSubscriptionsDB(ctx)
+		records, err := s.pushSubscriptionsDB(ctx, owner)
 		if err != nil {
 			return nil, err
 		}
 		for _, p := range records {
-			if !seen[p.ID] {
+			if !seen[p.ID] && p.Owner == owner {
 				out = append(out, p)
 			}
 		}

@@ -38,7 +38,7 @@ func (r *countRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func TestSendReturnsPushSubscriptionReadErrorWithoutMarkingSuccess(t *testing.T) {
 	_, st := pushTestStore(t)
-	a, err := st.Create(context.Background(), alert.Alert{ID: "alert", Prompt: "wildfire", Enabled: true, Channels: []string{"push"}})
+	a, err := st.Create(context.Background(), alert.Alert{ID: "alert", Owner: "owner", Prompt: "wildfire", Enabled: true, Channels: []string{"push"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestSendReturnsPushSubscriptionReadErrorWithoutMarkingSuccess(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SavePush(context.Background(), "subscription", blob); err != nil {
+	if err := st.SavePush(context.Background(), "owner", "subscription", blob); err != nil {
 		t.Fatal(err)
 	}
 	transport := &countRoundTripper{}

@@ -148,21 +148,67 @@ func (s *Store) savePushDB(ctx context.Context, rec PushRecord) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Pool().Exec(ctx, `
-		INSERT INTO push_subscriptions (id, endpoint, keys, created_at)
-		VALUES ($1, 'encrypted', $2, $3)
-		ON CONFLICT (id) DO UPDATE SET keys=EXCLUDED.keys`,
-		rec.ID, string(payload), rec.CreatedAt)
-	return err
+	// Owner is immutable once bound. A conflicting id owned by someone else is
+	// a hard failure, never an update and never a silent no-op.
+	for attempt := 0; attempt < 3; attempt++ {
+		tag, err := s.db.Pool().Exec(ctx, `
+			INSERT INTO push_subscriptions (id, owner, endpoint, keys, created_at)
+			VALUES ($1, $2, 'encrypted', $3, $4)
+			ON CONFLICT (id) DO NOTHING`,
+			rec.ID, rec.Owner, string(payload), rec.CreatedAt)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		var actual string
+		err = s.db.Pool().QueryRow(ctx, `SELECT owner FROM push_subscriptions WHERE id=$1`, rec.ID).Scan(&actual)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if actual != rec.Owner {
+			return ErrPushOwnerMismatch
+		}
+		_, err = s.db.Pool().Exec(ctx, `
+			UPDATE push_subscriptions SET keys=$2, created_at=$3
+			WHERE id=$1 AND owner=$4`, rec.ID, string(payload), rec.CreatedAt, rec.Owner)
+		return err
+	}
+	return errors.New("alert: push subscription mirror contention")
 }
 
-func (s *Store) deletePushDB(ctx context.Context, id string) error {
-	_, err := s.db.Pool().Exec(ctx, `DELETE FROM push_subscriptions WHERE id=$1`, id)
-	return err
+func (s *Store) deletePushDB(ctx context.Context, owner, id string) error {
+	var deleted string
+	err := s.db.Pool().QueryRow(ctx,
+		`DELETE FROM push_subscriptions WHERE id=$1 AND owner=$2 RETURNING owner`, id, owner).Scan(&deleted)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	// No row matched this owner. Distinguish an absent row (idempotent delete)
+	// from a row bound to a different owner (fail closed, never delete it).
+	var actual string
+	err = s.db.Pool().QueryRow(ctx, `SELECT owner FROM push_subscriptions WHERE id=$1`, id).Scan(&actual)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if actual != owner {
+		return ErrPushOwnerMismatch
+	}
+	return nil
 }
 
-func (s *Store) pushSubscriptionsDB(ctx context.Context) ([]PushRecord, error) {
-	rows, err := s.db.Pool().Query(ctx, `SELECT id, keys, created_at FROM push_subscriptions`)
+func (s *Store) pushSubscriptionsDB(ctx context.Context, owner string) ([]PushRecord, error) {
+	rows, err := s.db.Pool().Query(ctx, `SELECT id, owner, keys, created_at FROM push_subscriptions WHERE owner=$1`, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +217,7 @@ func (s *Store) pushSubscriptionsDB(ctx context.Context) ([]PushRecord, error) {
 	for rows.Next() {
 		var rec PushRecord
 		var payload []byte
-		if err := rows.Scan(&rec.ID, &payload, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Owner, &payload, &rec.CreatedAt); err != nil {
 			return nil, err
 		}
 		var wrapped map[string]string

@@ -322,7 +322,9 @@ func (s *Server) handlePushKey(w http.ResponseWriter, r *http.Request) {
 
 // handlePushSubscription serves POST /api/push/subscriptions. The endpoint and
 // keys are AES-GCM encrypted before the KV write; the plaintext never reaches
-// the alert store.
+// the alert store. The verified anonymous session is the owner. A browser whose
+// legacy subscription predates owner binding simply re-registers (the old row
+// remains unowned and is never delivered).
 func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) {
 	available, reason := s.cfg.Push.Available()
 	if !available {
@@ -345,6 +347,14 @@ func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	// The owner is always the verified session from the signed HttpOnly
+	// cookie; an asserted owner in the request body is not part of this shape
+	// and can never be persisted.
+	owner := session.IDFromRequest(r)
+	if owner == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "session unavailable"})
+		return
+	}
 	if !strings.HasPrefix(in.Endpoint, "https://") ||
 		strings.TrimSpace(in.Keys.P256DH) == "" || strings.TrimSpace(in.Keys.Auth) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "endpoint and keys are required"})
@@ -355,7 +365,7 @@ func (s *Server) handlePushSubscription(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "encrypt subscription"})
 		return
 	}
-	if err := s.cfg.Alerts.SavePush(r.Context(), "push_"+newClientID(), blob); err != nil {
+	if err := s.cfg.Alerts.SavePush(r.Context(), owner, "push_"+newClientID(), blob); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"subscribed": false,
 			"error":      err.Error(),

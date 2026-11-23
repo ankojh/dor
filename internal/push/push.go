@@ -120,12 +120,19 @@ func NewSender(cfg Config) (*Sender, error) {
 	}, nil
 }
 
-// Send delivers one alert hit to every subscription that has not already
-// received this exact (alert, story, level). It returns an error when at least
-// one transient delivery failed, which lets the notifier's retry/backoff/DLQ
-// path take over. Expired subscriptions (404/410) are removed immediately.
+// Send delivers one alert hit to the saved alert owner's subscriptions that
+// have not already received this exact (alert, story, level, generation). An
+// unowned alert or unowned legacy subscription is never delivered and never
+// receives a receipt. It returns an error when at least one transient delivery
+// failed, which lets the notifier's retry/backoff/DLQ path take over. Expired
+// subscriptions (404/410) are removed immediately.
 func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
-	records, err := s.alerts.PushSubscriptions(ctx)
+	owner := strings.TrimSpace(a.Owner)
+	if owner == "" {
+		s.log.Debug("push: unowned alert skipped", "alert", a.ID)
+		return nil
+	}
+	records, err := s.alerts.PushSubscriptions(ctx, owner)
 	if err != nil {
 		return fmt.Errorf("push: load subscriptions: %w", err)
 	}
@@ -140,6 +147,9 @@ func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
 	var errs []error
 	sent := 0
 	for _, record := range records {
+		if record.Owner != owner {
+			continue
+		}
 		delivered, err := s.alerts.PushDelivered(ctx, h, record.ID)
 		if err != nil {
 			return err
@@ -152,13 +162,17 @@ func (s *Sender) Send(ctx context.Context, a alert.Alert, h alert.Hit) error {
 			// A corrupt blob can never become valid; drop it rather than
 			// retrying every alert forever.
 			s.log.Warn("push: dropping unreadable subscription", "id", record.ID, "err", err)
-			s.alerts.DeletePush(ctx, record.ID)
+			if derr := s.alerts.DeletePush(ctx, owner, record.ID); derr != nil {
+				s.log.Warn("push: delete unreadable subscription failed", "id", record.ID, "err", derr)
+			}
 			continue
 		}
 		err = s.sendOne(ctx, sub, payload)
 		if errors.Is(err, errSubscriptionGone) {
 			s.log.Info("push: subscription expired; removed", "id", record.ID)
-			s.alerts.DeletePush(ctx, record.ID)
+			if derr := s.alerts.DeletePush(ctx, owner, record.ID); derr != nil {
+				s.log.Warn("push: delete expired subscription failed", "id", record.ID, "err", derr)
+			}
 			if err := s.alerts.MarkPushDelivered(ctx, h, record.ID); err != nil {
 				return err
 			}
